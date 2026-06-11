@@ -83,16 +83,18 @@ pub fn execute(args: &UninstallArgs) -> Result<()> {
 }
 
 /// Remove VectorCode from a specific agent's config. Returns true if config was modified.
-fn uninstall_for_agent(_target: &AgentTarget, config_path: &std::path::Path) -> Result<bool> {
+fn uninstall_for_agent(target: &AgentTarget, config_path: &std::path::Path) -> Result<bool> {
     let content = std::fs::read_to_string(config_path)?;
     let mut config: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
         Err(_) => return Ok(false), // Not valid JSON — nothing to remove
     };
 
+    let mcp_key = target.mcp_config_key();
+
     // Check if vectorcode entry exists
     let has_entry = config
-        .get("mcpServers")
+        .get(mcp_key)
         .and_then(|ms| ms.get("vectorcode"))
         .is_some();
 
@@ -101,7 +103,7 @@ fn uninstall_for_agent(_target: &AgentTarget, config_path: &std::path::Path) -> 
     }
 
     // Remove the vectorcode entry
-    if let Some(mcp_servers) = config.get_mut("mcpServers") {
+    if let Some(mcp_servers) = config.get_mut(mcp_key) {
         if let Some(obj) = mcp_servers.as_object_mut() {
             obj.remove("vectorcode");
         }
@@ -166,7 +168,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.json");
 
-        // Write config with vectorcode entry
+        // Write config with vectorcode entry (Cursor uses mcpServers)
         let config = serde_json::json!({
             "mcpServers": {
                 "vectorcode": {
@@ -180,7 +182,7 @@ mod tests {
         });
         std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
 
-        let result = uninstall_for_agent(&AgentTarget::Opencode, &config_path).unwrap();
+        let result = uninstall_for_agent(&AgentTarget::Cursor, &config_path).unwrap();
         assert!(result, "Should return true when entry is removed");
 
         let content = std::fs::read_to_string(&config_path).unwrap();
@@ -193,6 +195,43 @@ mod tests {
         assert!(
             updated["mcpServers"]["otherTool"].is_object(),
             "Other entries should be preserved"
+        );
+    }
+
+    #[test]
+    fn uninstall_removes_vectorcode_entry_opencode() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("opencode.json");
+
+        // Write config with vectorcode entry in OpenCode format (uses "mcp" key)
+        let config = serde_json::json!({
+            "mcp": {
+                "vectorcode": {
+                    "command": ["vectorcode", "serve", "--mcp"],
+                    "type": "local",
+                    "enabled": true
+                },
+                "otherTool": {
+                    "command": ["/usr/bin/other"],
+                    "type": "local"
+                }
+            }
+        });
+        std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        let result = uninstall_for_agent(&AgentTarget::Opencode, &config_path).unwrap();
+        assert!(result, "Should return true when entry is removed");
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let updated: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        assert!(
+            updated["mcp"]["vectorcode"].is_null(),
+            "vectorcode entry should be removed from 'mcp' key"
+        );
+        assert!(
+            updated["mcp"]["otherTool"].is_object(),
+            "Other entries under 'mcp' should be preserved"
         );
     }
 
@@ -246,13 +285,39 @@ mod tests {
         .unwrap();
         assert!(installed);
 
+        // Verify entry exists — OpenCode uses "mcp" key
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(config["mcp"]["vectorcode"].is_object());
+
+        // Uninstall
+        let removed = uninstall_for_agent(&AgentTarget::Opencode, &config_path).unwrap();
+        assert!(removed);
+
+        // Verify entry is gone
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(config["mcp"]["vectorcode"].is_null());
+    }
+
+    #[test]
+    fn uninstall_install_roundtrip_standard_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("cursor_config.json");
+
+        // Install for Cursor (uses mcpServers)
+        let installed =
+            crate::cli::install::install_for_agent(&AgentTarget::Cursor, &config_path, dir.path())
+                .unwrap();
+        assert!(installed);
+
         // Verify entry exists
         let content = std::fs::read_to_string(&config_path).unwrap();
         let config: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert!(config["mcpServers"]["vectorcode"].is_object());
 
         // Uninstall
-        let removed = uninstall_for_agent(&AgentTarget::Opencode, &config_path).unwrap();
+        let removed = uninstall_for_agent(&AgentTarget::Cursor, &config_path).unwrap();
         assert!(removed);
 
         // Verify entry is gone

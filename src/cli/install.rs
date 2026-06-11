@@ -151,17 +151,32 @@ impl AgentTarget {
         }
     }
 
-    /// Build the MCP server entry for this agent.
+    /// Return the JSON key used for the MCP servers object in this agent's config.
+    pub(crate) fn mcp_config_key(&self) -> &'static str {
+        match self {
+            Self::Opencode => "mcp",
+            _ => "mcpServers",
+        }
+    }
+
+    /// Build the MCP server entry for this agent, matching the agent's expected format.
     fn mcp_server_entry(&self, project_path: &std::path::Path) -> serde_json::Value {
         let binary_path = std::env::current_exe()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| "vectorcode".to_string());
 
-        serde_json::json!({
-            "command": binary_path,
-            "args": ["serve", "--mcp", "--project-path", project_path.to_string_lossy()],
-            "env": {}
-        })
+        match self {
+            Self::Opencode => serde_json::json!({
+                "command": [binary_path, "serve", "--mcp", "--project-path", project_path.to_string_lossy()],
+                "type": "local",
+                "enabled": true
+            }),
+            _ => serde_json::json!({
+                "command": binary_path,
+                "args": ["serve", "--mcp", "--project-path", project_path.to_string_lossy()],
+                "env": {}
+            }),
+        }
     }
 }
 
@@ -317,22 +332,24 @@ pub(crate) fn install_for_agent(
         serde_json::json!({})
     };
 
-    // Ensure mcpServers object exists
-    if config.get("mcpServers").is_none() {
-        config["mcpServers"] = serde_json::json!({});
+    let mcp_key = target.mcp_config_key();
+
+    // Ensure the MCP servers object exists under the agent's key
+    if config.get(mcp_key).is_none() {
+        config[mcp_key] = serde_json::json!({});
     }
 
     let entry = target.mcp_server_entry(project_path);
 
     // Check if already configured with same entry
-    if let Some(existing) = config["mcpServers"].get("vectorcode") {
+    if let Some(existing) = config[mcp_key].get("vectorcode") {
         if existing == &entry {
             return Ok(false); // Already configured identically
         }
     }
 
     // Add/update the vectorcode entry
-    config["mcpServers"]["vectorcode"] = entry;
+    config[mcp_key]["vectorcode"] = entry;
 
     // Ensure parent directory exists
     if let Some(parent) = config_path.parent() {
@@ -433,7 +450,7 @@ mod tests {
     // ─── install_for_agent tests ───────────────────────────────────────
 
     #[test]
-    fn install_creates_config_file_with_mcp_entry() {
+    fn install_creates_config_file_with_mcp_entry_opencode() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("opencode.json");
 
@@ -445,9 +462,52 @@ mod tests {
         let content = std::fs::read_to_string(&config_path).unwrap();
         let config: serde_json::Value = serde_json::from_str(&content).unwrap();
 
+        // OpenCode uses "mcp" key, not "mcpServers"
+        assert!(
+            config["mcp"]["vectorcode"].is_object(),
+            "Should have vectorcode MCP entry under 'mcp' key"
+        );
+        // OpenCode format: command is an array, with type and enabled fields
+        let command = config["mcp"]["vectorcode"]["command"].as_array().unwrap();
+        assert!(
+            command.contains(&serde_json::Value::String("serve".to_string())),
+            "Command array should include 'serve'"
+        );
+        assert!(
+            command.contains(&serde_json::Value::String("--mcp".to_string())),
+            "Command array should include '--mcp'"
+        );
+        assert!(
+            command.contains(&serde_json::Value::String("--project-path".to_string())),
+            "Command array should include '--project-path'"
+        );
+        assert_eq!(
+            config["mcp"]["vectorcode"]["type"], "local",
+            "Should have type 'local'"
+        );
+        assert_eq!(
+            config["mcp"]["vectorcode"]["enabled"], true,
+            "Should have enabled true"
+        );
+    }
+
+    #[test]
+    fn install_creates_config_file_with_mcp_entry_other_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("cursor_config.json");
+
+        let result = install_for_agent(&AgentTarget::Cursor, &config_path, dir.path()).unwrap();
+        assert!(result, "Should return true when config is created");
+
+        assert!(config_path.exists(), "Config file should be created");
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        // Non-OpenCode agents use "mcpServers" key
         assert!(
             config["mcpServers"]["vectorcode"].is_object(),
-            "Should have vectorcode MCP entry"
+            "Should have vectorcode MCP entry under 'mcpServers' key"
         );
         assert_eq!(
             config["mcpServers"]["vectorcode"]["args"][0], "serve",
@@ -518,9 +578,90 @@ mod tests {
     }
 
     #[test]
-    fn mcp_server_entry_has_correct_structure() {
+    fn install_preserves_existing_config_opencode() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("opencode.json");
+
+        // OpenCode-style existing config — mcp key with other tools
+        let existing = serde_json::json!({
+            "someSetting": "value",
+            "mcp": {
+                "otherTool": {
+                    "command": ["/usr/bin/other"],
+                    "type": "local",
+                    "enabled": true
+                }
+            }
+        });
+        std::fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&existing).unwrap(),
+        )
+        .unwrap();
+
+        install_for_agent(&AgentTarget::Opencode, &config_path, dir.path()).unwrap();
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(
+            config["someSetting"], "value",
+            "Existing settings preserved"
+        );
+        assert!(
+            config["mcp"]["otherTool"].is_object(),
+            "Other MCP servers preserved under 'mcp' key"
+        );
+        assert!(
+            config["mcp"]["vectorcode"].is_object(),
+            "VectorCode entry added under 'mcp' key"
+        );
+        assert_eq!(
+            config["mcp"]["vectorcode"]["type"], "local",
+            "VectorCode entry should have OpenCode format"
+        );
+    }
+
+    #[test]
+    fn mcp_config_key_per_agent() {
+        // OpenCode uses "mcp"
+        assert_eq!(AgentTarget::Opencode.mcp_config_key(), "mcp");
+        // All others use "mcpServers"
+        assert_eq!(AgentTarget::ClaudeCode.mcp_config_key(), "mcpServers");
+        assert_eq!(AgentTarget::Cursor.mcp_config_key(), "mcpServers");
+        assert_eq!(AgentTarget::GeminiCli.mcp_config_key(), "mcpServers");
+        assert_eq!(AgentTarget::Antigravity.mcp_config_key(), "mcpServers");
+    }
+
+    #[test]
+    fn mcp_server_entry_opencode_format() {
         let entry = AgentTarget::Opencode.mcp_server_entry(std::path::Path::new("/tmp/test"));
-        assert!(entry["command"].is_string(), "Should have command field");
+        // OpenCode format: command is an array with binary + all args
+        assert!(entry["command"].is_array(), "Should have command as array");
+        let command = entry["command"].as_array().unwrap();
+        assert!(
+            command.len() >= 5,
+            "Should have binary + serve + --mcp + --project-path + path"
+        );
+        assert!(
+            entry["enabled"].as_bool() == Some(true),
+            "Should have enabled: true"
+        );
+        assert_eq!(entry["type"], "local", "Should have type: local");
+        // No env field in OpenCode format
+        assert!(entry.get("env").is_none(), "Should not have env field");
+        // No args field in OpenCode format
+        assert!(entry.get("args").is_none(), "Should not have args field");
+    }
+
+    #[test]
+    fn mcp_server_entry_standard_format() {
+        let entry = AgentTarget::Cursor.mcp_server_entry(std::path::Path::new("/tmp/test"));
+        // Standard format: separate command string and args array
+        assert!(
+            entry["command"].is_string(),
+            "Should have command as string"
+        );
         assert!(entry["args"].is_array(), "Should have args array");
         let args = entry["args"].as_array().unwrap();
         assert!(
@@ -528,6 +669,12 @@ mod tests {
             "Should have serve, --mcp, --project-path, and path"
         );
         assert!(entry["env"].is_object(), "Should have env object");
+        // No enabled or type in standard format
+        assert!(
+            entry.get("enabled").is_none(),
+            "Should not have enabled field"
+        );
+        assert!(entry.get("type").is_none(), "Should not have type field");
     }
 
     // ─── Skill file & instructions tests ────────────────────────────────

@@ -332,7 +332,7 @@ model = "{model}"
 [indexing]
 max_file_size = 1_048_576
 exclude_dirs = [".vectorcode", ".git", "node_modules", "target", "__pycache__", "vendor", "dist", "build", ".next"]
-exclude_extensions = [".min.js", ".map", ".lock", ".svg", ".png", ".jpg", ".ico", ".woff", ".woff2", ".ttf"]
+exclude_extensions = [".min.js", ".map", ".lock", ".svg", ".png", ".jpg", ".ico", ".woff", ".woff2", ".ttf", ".md"]
 
 [watcher]
 debounce_ms = 2000

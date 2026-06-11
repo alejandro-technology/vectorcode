@@ -122,7 +122,7 @@ fn chunk_rust_fixture() {
         "Should produce chunks from Rust fixture"
     );
     assert!(
-        chunks.len() >= 1,
+        !chunks.is_empty(),
         "Should produce at least 1 chunk (impl), got {}",
         chunks.len()
     );
@@ -200,5 +200,138 @@ fn chunk_different_files_produce_different_ids() {
             c1.id, c2.id,
             "Different file paths should produce different chunk IDs"
         );
+    }
+}
+
+// --- Phase 8: Multi-language integration tests ---
+
+#[test]
+fn chunk_csharp_fixture() {
+    let source = fs::read_to_string("tests/fixtures/sample_cs/calculator.cs")
+        .expect("Failed to read C# fixture");
+    let chunks = chunk_file(&source, "calculator.cs", SupportedLanguage::CSharp);
+
+    assert!(!chunks.is_empty(), "Should produce chunks from C# fixture");
+
+    for chunk in &chunks {
+        assert_eq!(chunk.language, "csharp");
+        assert_eq!(chunk.file_path, "calculator.cs");
+        assert!(chunk.start_line > 0);
+        assert!(!chunk.content.is_empty());
+    }
+
+    let has_class = chunks.iter().any(|c| c.content.contains("Calculator"));
+    assert!(has_class, "Should have extracted the Calculator class");
+}
+
+#[test]
+fn chunk_c_fixture() {
+    let source =
+        fs::read_to_string("tests/fixtures/sample_c/geometry.c").expect("Failed to read C fixture");
+    let chunks = chunk_file(&source, "geometry.c", SupportedLanguage::C);
+
+    assert!(!chunks.is_empty(), "Should produce chunks from C fixture");
+    assert!(
+        chunks.len() >= 2,
+        "Should produce at least 2 chunks (struct + functions), got {}",
+        chunks.len()
+    );
+
+    for chunk in &chunks {
+        assert_eq!(chunk.language, "c");
+        assert_eq!(chunk.file_path, "geometry.c");
+        assert!(chunk.start_line > 0);
+        assert!(!chunk.content.is_empty());
+    }
+}
+
+#[test]
+fn chunk_cpp_fixture() {
+    let source = fs::read_to_string("tests/fixtures/sample_cpp/processor.cpp")
+        .expect("Failed to read C++ fixture");
+    let chunks = chunk_file(&source, "processor.cpp", SupportedLanguage::Cpp);
+
+    assert!(!chunks.is_empty(), "Should produce chunks from C++ fixture");
+    assert!(
+        chunks.len() >= 2,
+        "Should produce at least 2 chunks (classes/namespaces), got {}",
+        chunks.len()
+    );
+
+    for chunk in &chunks {
+        assert_eq!(chunk.language, "cpp");
+        assert_eq!(chunk.file_path, "processor.cpp");
+        assert!(chunk.start_line > 0);
+        assert!(!chunk.content.is_empty());
+    }
+}
+
+#[test]
+fn chunk_ruby_fixture() {
+    let source = fs::read_to_string("tests/fixtures/sample_rb/calculator.rb")
+        .expect("Failed to read Ruby fixture");
+    let chunks = chunk_file(&source, "calculator.rb", SupportedLanguage::Ruby);
+
+    assert!(
+        !chunks.is_empty(),
+        "Should produce chunks from Ruby fixture"
+    );
+
+    for chunk in &chunks {
+        assert_eq!(chunk.language, "ruby");
+        assert_eq!(chunk.file_path, "calculator.rb");
+        assert!(chunk.start_line > 0);
+        assert!(!chunk.content.is_empty());
+    }
+
+    let has_module = chunks.iter().any(|c| c.content.contains("Calculator"));
+    assert!(has_module, "Should have extracted the Calculator module");
+}
+
+#[test]
+fn chunk_swift_fixture() {
+    let source = fs::read_to_string("tests/fixtures/sample_swift/calculator.swift")
+        .expect("Failed to read Swift fixture");
+    let chunks = chunk_file(&source, "calculator.swift", SupportedLanguage::Swift);
+
+    assert!(
+        !chunks.is_empty(),
+        "Should produce chunks from Swift fixture"
+    );
+    assert!(
+        chunks.len() >= 2,
+        "Should produce at least 2 chunks (class + protocol/enum/struct), got {}",
+        chunks.len()
+    );
+
+    for chunk in &chunks {
+        assert_eq!(chunk.language, "swift");
+        assert_eq!(chunk.file_path, "calculator.swift");
+        assert!(chunk.start_line > 0);
+        assert!(!chunk.content.is_empty());
+    }
+}
+
+#[test]
+fn chunk_kotlin_fixture() {
+    let source = fs::read_to_string("tests/fixtures/sample_kt/calculator.kt")
+        .expect("Failed to read Kotlin fixture");
+    let chunks = chunk_file(&source, "calculator.kt", SupportedLanguage::Kotlin);
+
+    assert!(
+        !chunks.is_empty(),
+        "Should produce chunks from Kotlin fixture"
+    );
+    assert!(
+        chunks.len() >= 2,
+        "Should produce at least 2 chunks (class + interface/object/enum), got {}",
+        chunks.len()
+    );
+
+    for chunk in &chunks {
+        assert_eq!(chunk.language, "kotlin");
+        assert_eq!(chunk.file_path, "calculator.kt");
+        assert!(chunk.start_line > 0);
+        assert!(!chunk.content.is_empty());
     }
 }

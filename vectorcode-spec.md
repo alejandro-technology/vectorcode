@@ -1422,7 +1422,7 @@ Each fixture should have a `queries.json` with expected search results:
 ```bash
 #!/bin/sh
 set -e
-REPO="your-org/vectorcode"
+REPO="alejandro-technology/vectorcode"
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 # Map arch names
@@ -1440,7 +1440,7 @@ echo "vectorcode installed to /usr/local/bin/vectorcode"
 ```ruby
 class Vectorcode < Formula
   desc "Semantic code search MCP server using embeddings"
-  homepage "https://github.com/your-org/vectorcode"
+  homepage "https://github.com/alejandro-technology/vectorcode"
   # ...
 end
 ```

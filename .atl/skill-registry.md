@@ -6,6 +6,7 @@ Last updated: 2026-06-11
 
 ## Sources scanned
 
+- skills
 - .agents/skills
 - /Users/alejandro/.pi/agent/skills
 - /Users/alejandro/.config/agents/skills
@@ -41,6 +42,7 @@ Last updated: 2026-06-11
 | `judgment-day` | Trigger: judgment day, dual review, adversarial review, juzgar. Run blind dual review, fix confirmed issues, then re-judge. | user | `/Users/alejandro/.config/opencode/skills/judgment-day/SKILL.md` |
 | `rust-best-practices` | Guide for writing idiomatic Rust code based on Apollo GraphQL's best practices handbook. Use this skill when: (1) writing new Rust code or functions, (2) reviewing or refactoring existing Rust code, (3) deciding between borrowing vs cloning or ownership patterns, (4) implementing error handling with Result types, (5) optimizing Rust code for performance, (6) writing tests or documentation for Rust projects. | project | `/Users/alejandro/Documents/PROJECTS/MCP/vector-code/.agents/skills/rust-best-practices/SKILL.md` |
 | `rust-mcp-server-generator` | Generate a complete Rust Model Context Protocol server project with tools, prompts, resources, and tests using the official rmcp SDK | project | `/Users/alejandro/Documents/PROJECTS/MCP/vector-code/.agents/skills/rust-mcp-server-generator/SKILL.md` |
+| `semantic-search` | Use when searching for code by concept, meaning, or behavior — not by exact symbol name or literal string. Ideal for queries like "payment retry logic", "user authentication flow", "error handling for database connections", or "functions similar to createUser". Do NOT use for exact string matches (use grep) or known symbol lookups (use codegraph_explore). | project | `/Users/alejandro/Documents/PROJECTS/MCP/vector-code/skills/semantic-search/SKILL.md` |
 | `skill-creator` | Trigger: new skills, agent instructions, documenting AI usage patterns. Create LLM-first skills with valid frontmatter. | user | `/Users/alejandro/.config/opencode/skills/skill-creator/SKILL.md` |
 | `skill-improver` | Trigger: improve skills, audit skills, refactor skills, skill quality. Audit and upgrade existing LLM-first skills. | user | `/Users/alejandro/.config/opencode/skills/skill-improver/SKILL.md` |
 | `work-unit-commits` | Plan commits as reviewable work units. Trigger: implementation, commit splitting, chained PRs, or keeping tests and docs with code. | user | `/Users/alejandro/.config/opencode/skills/work-unit-commits/SKILL.md` |

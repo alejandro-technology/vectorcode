@@ -378,6 +378,9 @@ mod tests {
         let result = rt.block_on(execute(&serve_args, project_path));
         assert!(result.is_err(), "Should fail with Gemini provider missing key");
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Gemini") || err.contains("api key"), "Got: {err}");
+        assert!(
+            err.contains("API key") || err.contains("GEMINI_API_KEY"),
+            "Got: {err}"
+        );
     }
 }

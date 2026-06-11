@@ -31,7 +31,7 @@ cargo install --path .
 ### Using install.sh (macOS/Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/your-org/vectorcode/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/alejandro-technology/vectorcode/main/install.sh | bash
 ```
 
 ### Configure Your Agent

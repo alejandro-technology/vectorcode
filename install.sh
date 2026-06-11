@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # VectorCode installer for macOS and Linux
-# Usage: curl -fsSL https://raw.githubusercontent.com/your-org/vectorcode/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/alejandro-technology/vectorcode/main/install.sh | bash
 
-REPO="your-org/vectorcode"
+REPO="alejandro-technology/vectorcode"
 BINARY_NAME="vectorcode"
 INSTALL_DIR="/usr/local/bin"
 

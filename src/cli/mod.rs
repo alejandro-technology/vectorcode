@@ -187,6 +187,7 @@ pub fn init_tracing(verbose: bool, quiet: bool) {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use serial_test::serial;
 
     #[test]
     fn cli_debug_assert_passes() {
@@ -342,26 +343,36 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Flaky: depends on global model cache state. Hangs if model is present."]
+    #[serial(onnx)]
     fn create_embedder_onnx_without_model_errors() {
-        let mut config = Config::default();
-        config.provider.name = "onnx".to_string();
-        let result = create_embedder_from_config(&config);
-        assert!(result.is_err());
-        let err_msg = format!("{}", result.err().unwrap());
-        assert!(err_msg.contains("ONNX"), "Got: {err_msg}");
-    }
-
-    #[test]
-    fn create_embedder_onnx_error_mentions_vectorcode_init() {
-        let mut config = Config::default();
-        config.provider.name = "onnx".to_string();
-        let result = create_embedder_from_config(&config);
+        // Deterministic: uses an empty temp dir — model not cached, so
+        // ModelManager returns an error before reaching ONNX Runtime init.
+        let empty_dir = tempfile::tempdir().unwrap();
+        let result = crate::embedder::onnx::OnnxEmbedder::from_model_dir(
+            empty_dir.path().to_path_buf(),
+        );
         assert!(result.is_err());
         let err_msg = format!("{}", result.err().unwrap());
         assert!(
             err_msg.contains("vectorcode init"),
-            "Error should suggest running init, got: {err_msg}"
+            "Error should suggest running vectorcode init, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    #[serial(onnx)]
+    fn create_embedder_onnx_error_is_embedder_error_variant() {
+        // Deterministic: empty model dir → error, verify it's the right
+        // error variant (EmbedderError, not a panic or unexpected type).
+        let empty_dir = tempfile::tempdir().unwrap();
+        let result = crate::embedder::onnx::OnnxEmbedder::from_model_dir(
+            empty_dir.path().to_path_buf(),
+        );
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.err().unwrap());
+        assert!(
+            err_msg.contains("ONNX"),
+            "Error should be an ONNX-related embedder error, got: {err_msg}"
         );
     }
 

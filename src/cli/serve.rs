@@ -3,6 +3,11 @@
 use anyhow::Result;
 use clap::Args;
 
+use crate::cli::create_embedder_from_config;
+use crate::config;
+use crate::mcp::{AppState, McpServer};
+use crate::store::db::Database;
+
 /// Arguments for `vectorcode serve`.
 #[derive(Args, Debug)]
 pub struct ServeArgs {
@@ -21,7 +26,8 @@ pub struct ServeArgs {
 
 /// Execute the `serve` command.
 ///
-/// Currently a stub — MCP server implementation is in the next phase.
+/// Creates the MCP server with shared application state and runs the
+/// JSON-RPC message loop over stdio.
 pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result<()> {
     if !args.mcp {
         anyhow::bail!("Only --mcp mode is supported. Use: vectorcode serve --mcp");
@@ -35,20 +41,48 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
         );
     }
 
-    // TODO: Implement MCP server (Phase 6)
-    // This will:
-    // 1. Load config and create embedder
-    // 2. Open database
-    // 3. Start file watcher if not --no-watch
-    // 4. Start MCP server on stdio
+    // Load config
+    let mut cfg = config::load_config(project_path)?;
+    cfg.apply_env_overrides();
+
+    // Open database
+    let db_path = vc_dir.join("index.db");
+    let db = Database::open(&db_path).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Read dimensions from meta to init schema if needed
+    let meta = crate::store::meta::read_index_meta(db.conn())?;
+    if let Some(ref m) = meta {
+        db.init_schema(m.dimensions)?;
+    }
+
+    // Create embedder
+    let embedder = create_embedder_from_config(&cfg)?;
+
     let watch = !args.no_watch;
-    eprintln!("MCP server starting on stdio...");
-    eprintln!("  Project: {}", project_path.display());
-    eprintln!("  Watch:   {watch}");
-    eprintln!("  Debounce: {}ms", args.debounce);
-    eprintln!();
-    eprintln!("Note: MCP server implementation is coming in the next phase.");
-    eprintln!("The serve command will be fully functional after Phase 6.");
+    tracing::info!("MCP server starting on stdio");
+    tracing::info!("  Project: {}", project_path.display());
+    tracing::info!("  Watch:   {watch}");
+    tracing::info!("  Debounce: {}ms", args.debounce);
+
+    // Create AppState and McpServer
+    let state = AppState {
+        db,
+        embedder,
+        config: cfg,
+        project_path: project_path.to_path_buf(),
+    };
+
+    let mut server = McpServer::new(state);
+
+    // Set up Ctrl+C handler
+    let _ctrl_c = tokio::spawn(async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("Received Ctrl+C, shutting down...");
+        // The server loop will exit when stdin closes
+    });
+
+    // Run the MCP server main loop
+    server.run().await?;
 
     Ok(())
 }
@@ -125,11 +159,12 @@ mod tests {
     }
 
     #[test]
-    fn serve_succeeds_after_init() {
+    fn serve_fails_with_onnx_provider_no_model() {
+        // ONNX provider requires bundled model files which aren't available yet
         let dir = tempfile::tempdir().unwrap();
         let project_path = dir.path();
 
-        // Init first
+        // Init with onnx provider (default)
         let init_args = crate::cli::init::InitArgs {
             provider: crate::cli::ProviderArg::Onnx,
             model: None,
@@ -140,17 +175,15 @@ mod tests {
         rt.block_on(crate::cli::init::execute(&init_args, project_path, true))
             .unwrap();
 
-        // Serve should succeed (stub)
+        // Serve should fail because ONNX embedder can't be created
         let serve_args = ServeArgs {
             mcp: true,
             no_watch: false,
             debounce: 2000,
         };
         let result = rt.block_on(execute(&serve_args, project_path));
-        assert!(
-            result.is_ok(),
-            "Serve stub should succeed: {:?}",
-            result.err()
-        );
+        assert!(result.is_err(), "Should fail with ONNX provider");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("ONNX"), "Got: {err}");
     }
 }

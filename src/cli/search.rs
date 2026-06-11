@@ -61,7 +61,7 @@ pub async fn execute(args: &SearchArgs, project_path: &std::path::Path, quiet: b
 
     // Create embedder
     let embedder: Arc<dyn crate::embedder::Embedder> =
-        match crate::cli::create_embedder_from_config(&config) {
+        match crate::cli::create_embedder_from_config(&config).await {
             Ok(e) => e,
             Err(_) => {
                 if !quiet {
@@ -76,7 +76,7 @@ pub async fn execute(args: &SearchArgs, project_path: &std::path::Path, quiet: b
 
     // Create searcher
     let searcher = crate::engine::Searcher::new(
-        std::sync::Arc::new(std::sync::Mutex::new(Database::open(&db_path)?)),
+        std::sync::Arc::new(tokio::sync::Mutex::new(Database::open(&db_path)?)),
         embedder,
         config.search.clone(),
     );

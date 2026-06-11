@@ -96,7 +96,7 @@ pub async fn execute(args: &IndexArgs, project_path: &std::path::Path, quiet: bo
     eprintln!("DEBUG: creating embedder...");
     // Create embedder
     let embedder: Arc<dyn crate::embedder::Embedder> =
-        match crate::cli::create_embedder_from_config(&config) {
+        match crate::cli::create_embedder_from_config(&config).await {
             Ok(e) => e,
             Err(_) => {
                 // Fall back to MockEmbedder for testing
@@ -113,7 +113,7 @@ pub async fn execute(args: &IndexArgs, project_path: &std::path::Path, quiet: bo
     eprintln!("DEBUG: embedder created.");
     // Create indexer and run
     let indexer = crate::engine::Indexer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(Database::open(&db_path)?)),
+        std::sync::Arc::new(tokio::sync::Mutex::new(Database::open(&db_path)?)),
         embedder,
         config.indexing.clone(),
     );

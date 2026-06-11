@@ -39,7 +39,7 @@ impl Default for SearchOptions {
 
 /// Semantic search engine over indexed code chunks (spec §10).
 pub struct Searcher {
-    db: Arc<std::sync::Mutex<Database>>,
+    db: Arc<tokio::sync::Mutex<Database>>,
     embedder: Arc<dyn Embedder>,
     config: SearchConfig,
 }
@@ -47,7 +47,7 @@ pub struct Searcher {
 impl Searcher {
     /// Create a new Searcher with the given database, embedder, and config.
     pub fn new(
-        db: Arc<std::sync::Mutex<Database>>,
+        db: Arc<tokio::sync::Mutex<Database>>,
         embedder: Arc<dyn Embedder>,
         config: SearchConfig,
     ) -> Self {
@@ -75,7 +75,7 @@ impl Searcher {
     /// 3. Performs vector similarity search
     /// 4. Applies language and path filters
     /// 5. Returns ranked results above threshold
-    pub async fn search(self, query: &str, options: SearchOptions) -> Result<Vec<SearchResult>> {
+    pub async fn search(&self, query: &str, options: SearchOptions) -> Result<Vec<SearchResult>> {
         // Step 1: Enrich query for better embedding
         let enriched = enrich_query(query);
 
@@ -92,11 +92,10 @@ impl Searcher {
         let fetch_limit = fetch_limit.max(50);
         let threshold = options.threshold;
 
-        let mut results = tokio::task::spawn_blocking(move || {
-            let db = self.db.lock().unwrap();
-            vectors::search_similar(db.conn(), &query_vec, fetch_limit, threshold)
-        })
-        .await??;
+        let mut results = {
+            let db = self.db.lock().await;
+            vectors::search_similar(db.conn(), &query_vec, fetch_limit, threshold)?
+        };
 
         // Step 4: Filter by language
         if let Some(lang) = &options.language {
@@ -149,7 +148,7 @@ mod tests {
         let embedder = Arc::new(MockEmbedder::new(64));
         let config = SearchConfig::default();
         Searcher::new(
-            std::sync::Arc::new(std::sync::Mutex::new(db)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(db)),
             embedder,
             config,
         )
@@ -239,7 +238,7 @@ mod tests {
             default_threshold: 0.5,
         };
         let searcher = Searcher::new(
-            std::sync::Arc::new(std::sync::Mutex::new(db)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(db)),
             embedder,
             config,
         );
@@ -268,7 +267,7 @@ mod tests {
 
         let config = SearchConfig::default();
         let searcher = Searcher::new(
-            std::sync::Arc::new(std::sync::Mutex::new(db)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(db)),
             embedder.clone(),
             config,
         );
@@ -332,7 +331,7 @@ mod tests {
 
         let config = SearchConfig::default();
         let searcher = Searcher::new(
-            std::sync::Arc::new(std::sync::Mutex::new(db)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(db)),
             embedder.clone(),
             config,
         );
@@ -388,7 +387,7 @@ mod tests {
 
         let config = SearchConfig::default();
         let searcher = Searcher::new(
-            std::sync::Arc::new(std::sync::Mutex::new(db)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(db)),
             embedder.clone(),
             config,
         );
@@ -440,7 +439,7 @@ mod tests {
 
         let config = SearchConfig::default();
         let searcher = Searcher::new(
-            std::sync::Arc::new(std::sync::Mutex::new(db)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(db)),
             embedder.clone(),
             config,
         );
@@ -483,7 +482,7 @@ mod tests {
 
         let config = SearchConfig::default();
         let searcher = Searcher::new(
-            std::sync::Arc::new(std::sync::Mutex::new(db)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(db)),
             embedder.clone(),
             config,
         );
@@ -537,7 +536,7 @@ mod tests {
 
         let config = SearchConfig::default();
         let searcher = Searcher::new(
-            std::sync::Arc::new(std::sync::Mutex::new(db)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(db)),
             embedder.clone(),
             config,
         );

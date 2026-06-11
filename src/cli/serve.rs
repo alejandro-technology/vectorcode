@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::Args;
@@ -14,6 +15,9 @@ use crate::mcp::{AppState, McpServer};
 use crate::store::db::Database;
 use crate::store::files;
 use crate::watcher::FileWatcher;
+
+/// Timeout for MCP server initialization (embedder creation + schema setup).
+const MCP_INIT_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Arguments for `vectorcode serve`.
 #[derive(Args, Debug)]
@@ -59,8 +63,15 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
     // Override debounce from CLI arg
     cfg.watcher.debounce_ms = args.debounce;
 
-    // Create embedder first — we need its dimensions to ensure schema exists
-    let embedder = create_embedder_from_config(&cfg)?;
+    // Create embedder first — we need its dimensions to ensure schema exists.
+    // Wrap in timeout to handle ONNX CoreML hangs (spec §P5).
+    let embedder =
+        match tokio::time::timeout(MCP_INIT_TIMEOUT, create_embedder_from_config(&cfg)).await {
+            Ok(result) => result?,
+            Err(_elapsed) => {
+                anyhow::bail!("MCP server initialization timed out after 90 seconds");
+            }
+        };
 
     // Open database and ensure schema exists (idempotent via user_version check)
     let db_path = vc_dir.join("index.db");
@@ -111,7 +122,7 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
 
     // Create AppState and McpServer
     let state = AppState {
-        db: Arc::new(std::sync::Mutex::new(db)),
+        db: Arc::new(tokio::sync::Mutex::new(db)),
         embedder: embedder.clone(),
         config: cfg.clone(),
         project_path: project_path.to_path_buf(),
@@ -232,7 +243,7 @@ fn run_connect_time_catchup(
     // Open a fresh DB handle for the indexer (SQLite handles concurrent access)
     let sync_db = Database::open(db_path).map_err(|e| anyhow::anyhow!("{e}"))?;
     let indexer = Indexer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(sync_db)),
+        std::sync::Arc::new(tokio::sync::Mutex::new(sync_db)),
         embedder,
         cfg.indexing.clone(),
     );
@@ -354,7 +365,7 @@ async fn run_watcher_background(
         let sync_result = tokio::task::spawn_blocking(move || {
             let sync_db = Database::open(&db_path_clone)?;
             let indexer = Indexer::new(
-                std::sync::Arc::new(std::sync::Mutex::new(sync_db)),
+                std::sync::Arc::new(tokio::sync::Mutex::new(sync_db)),
                 embedder_clone,
                 indexing_config_clone,
             );
@@ -462,7 +473,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project_path = dir.path();
 
-        // Init with gemini provider
+        // Init with geminiProvider
         let init_args = crate::cli::init::InitArgs {
             provider: Some(crate::cli::ProviderArg::Gemini),
             model: None,
@@ -489,5 +500,10 @@ mod tests {
             err.contains("API key") || err.contains("GEMINI_API_KEY"),
             "Got: {err}"
         );
+    }
+
+    #[test]
+    fn mcp_init_timeout_is_90_seconds() {
+        assert_eq!(MCP_INIT_TIMEOUT, Duration::from_secs(90));
     }
 }

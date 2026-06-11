@@ -24,7 +24,7 @@ use self::transport::McpTransport;
 
 /// Shared application state accessible by MCP tool handlers.
 pub struct AppState {
-    pub db: Arc<std::sync::Mutex<Database>>,
+    pub db: Arc<tokio::sync::Mutex<Database>>,
     pub embedder: Arc<dyn Embedder>,
     pub config: Config,
     pub project_path: PathBuf,
@@ -52,6 +52,9 @@ impl McpServer {
     /// Continues until stdin closes (EOF) or an unrecoverable error occurs.
     pub async fn run(&mut self) -> Result<()> {
         info!("MCP server starting on stdio");
+
+        // Signal readiness to clients parsing stderr
+        eprintln!("MCP_READY");
 
         loop {
             // Read a message from stdin
@@ -132,27 +135,37 @@ impl McpServer {
                     }
                 }
             }
+            "ping" => {
+                let result = handler::handle_ping();
+                serde_json::to_value(make_response(id, result)).unwrap_or_default()
+            }
             "tools/call" => {
                 // Extract tool name and arguments from params
                 let tool_name = request.params["name"].as_str().unwrap_or("");
                 let arguments = &request.params["arguments"];
 
-                let state = self.state.lock().await;
-                let result = handler::handle_tool_call(tool_name, arguments, &state).await;
+                // Validate required 'name' parameter
+                if tool_name.is_empty() {
+                    serde_json::to_value(make_error(
+                        id,
+                        -32602,
+                        "Missing required parameter: 'name'".to_string(),
+                    ))
+                    .unwrap_or_default()
+                } else {
+                    let state = self.state.lock().await;
+                    let result = handler::handle_tool_call(tool_name, arguments, &state).await;
 
-                match serde_json::to_value(result) {
-                    Ok(val) => serde_json::to_value(make_response(id, val)).unwrap_or_default(),
-                    Err(e) => {
-                        serde_json::to_value(make_error(id, -32603, format!("Internal error: {e}")))
-                            .unwrap_or_default()
+                    match serde_json::to_value(result) {
+                        Ok(val) => serde_json::to_value(make_response(id, val)).unwrap_or_default(),
+                        Err(e) => serde_json::to_value(make_error(
+                            id,
+                            -32603,
+                            format!("Internal error: {e}"),
+                        ))
+                        .unwrap_or_default(),
                     }
                 }
-            }
-            "notifications/initialized" => {
-                // JSON-RPC notification — clients send this after initialize handshake.
-                // Per JSON-RPC 2.0 §4.1 we do NOT send a response.
-                debug!("Received notifications/initialized (id present, ignoring)");
-                return None;
             }
             other => {
                 let is_notification = other.starts_with("notifications/");

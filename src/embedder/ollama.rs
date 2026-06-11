@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 /// Default batch size for Ollama requests.
-const OLLAMA_BATCH_SIZE: usize = 100;
+const OLLAMA_BATCH_SIZE: usize = 50;
 
 /// Ollama embedding provider.
 ///
@@ -91,12 +91,94 @@ impl OllamaEmbedder {
             })?;
         Ok(response.embeddings)
     }
+
+    /// Send a single chunk of texts to Ollama with retry on connection/timeout errors.
+    async fn embed_chunk_with_retry(&self, chunk: &[&str]) -> EmbedderResult<Vec<Vec<f32>>> {
+        let url = self.embed_url();
+
+        for attempt in 0..crate::embedder::http::MAX_RETRIES {
+            let body = self.build_request(chunk);
+            let send_result = self.client.post(&url).json(&body).send().await;
+
+            match send_result {
+                Ok(response) => {
+                    let status = response.status().as_u16();
+
+                    if response.status().is_success() {
+                        let response_body =
+                            response
+                                .text()
+                                .await
+                                .map_err(|e| VectorCodeError::EmbedderError {
+                                    message: format!(
+                                        "Failed to read Ollama batch response body: {e}"
+                                    ),
+                                })?;
+                        return Self::parse_response(&response_body);
+                    }
+
+                    // Retryable HTTP status
+                    if crate::embedder::http::should_retry(status) {
+                        let backoff = crate::embedder::http::calculate_backoff(
+                            attempt,
+                            crate::embedder::http::BASE_BACKOFF_MS,
+                            crate::embedder::http::MAX_BACKOFF_MS,
+                            crate::embedder::http::jitter_factor(),
+                        );
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+
+                    // Non-retryable HTTP error
+                    let response_body = response.text().await.unwrap_or_default();
+                    return Err(VectorCodeError::EmbedderError {
+                        message: format!("Ollama batch API error (HTTP {status}): {response_body}"),
+                    });
+                }
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    if is_retryable_error(&err_msg)
+                        && attempt < crate::embedder::http::MAX_RETRIES - 1
+                    {
+                        let backoff = crate::embedder::http::calculate_backoff(
+                            attempt,
+                            crate::embedder::http::BASE_BACKOFF_MS,
+                            crate::embedder::http::MAX_BACKOFF_MS,
+                            crate::embedder::http::jitter_factor(),
+                        );
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+
+                    // Final failure — include URL in error
+                    return Err(VectorCodeError::EmbedderError {
+                        message: ollama_final_error_message(&url, attempt + 1),
+                    });
+                }
+            }
+        }
+
+        Err(VectorCodeError::EmbedderError {
+            message: ollama_final_error_message(&url, crate::embedder::http::MAX_RETRIES),
+        })
+    }
 }
 
 impl Default for OllamaEmbedder {
     fn default() -> Self {
         Self::new().expect("Default Ollama config should always be valid")
     }
+}
+
+/// Check if an error message indicates a retryable connection/timeout error.
+fn is_retryable_error(error_msg: &str) -> bool {
+    let lower = error_msg.to_lowercase();
+    lower.contains("connection") || lower.contains("timeout") || lower.contains("timed out")
+}
+
+/// Build the final error message for Ollama batch failures, including the URL.
+fn ollama_final_error_message(url: &str, attempts: u32) -> String {
+    format!("Ollama batch request failed after {attempts} attempts. URL: {url}")
 }
 
 /// Ollama embed request body.
@@ -153,39 +235,10 @@ impl Embedder for OllamaEmbedder {
     }
 
     async fn embed_batch(&self, texts: &[&str]) -> EmbedderResult<Vec<Vec<f32>>> {
-        let url = self.embed_url();
         let mut all_embeddings = Vec::with_capacity(texts.len());
 
         for chunk in texts.chunks(OLLAMA_BATCH_SIZE) {
-            let body = self.build_request(chunk);
-
-            let response = self
-                .client
-                .post(&url)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| VectorCodeError::EmbedderError {
-                    message: format!("Ollama batch HTTP request failed: {e}"),
-                })?;
-
-            let status = response.status().as_u16();
-            if !response.status().is_success() {
-                let response_body = response.text().await.unwrap_or_default();
-                return Err(VectorCodeError::EmbedderError {
-                    message: format!("Ollama batch API error (HTTP {status}): {response_body}"),
-                });
-            }
-
-            let response_body =
-                response
-                    .text()
-                    .await
-                    .map_err(|e| VectorCodeError::EmbedderError {
-                        message: format!("Failed to read Ollama batch response body: {e}"),
-                    })?;
-
-            let mut batch_vectors = Self::parse_response(&response_body)?;
+            let mut batch_vectors = self.embed_chunk_with_retry(chunk).await?;
             all_embeddings.append(&mut batch_vectors);
         }
 
@@ -339,5 +392,44 @@ mod tests {
         assert_eq!(OllamaEmbedder::DEFAULT_URL, "http://localhost:11434");
         assert_eq!(OllamaEmbedder::DEFAULT_DIMENSIONS, 768);
         assert_eq!(OllamaEmbedder::MAX_TOKENS, 8192);
+    }
+
+    #[test]
+    fn ollama_chunk_size_is_50() {
+        assert_eq!(OLLAMA_BATCH_SIZE, 50, "Chunk size should be 50 per spec");
+    }
+
+    #[test]
+    fn ollama_chunk_count_for_120_texts() {
+        // 120 texts with chunk size 50 → 3 chunks (50 + 50 + 20)
+        let texts: Vec<&str> = (0..120).map(|_| "test").collect();
+        let chunks: Vec<&[&str]> = texts.chunks(OLLAMA_BATCH_SIZE).collect();
+        assert_eq!(chunks.len(), 3, "120 texts should split into 3 chunks");
+        assert_eq!(chunks[0].len(), 50);
+        assert_eq!(chunks[1].len(), 50);
+        assert_eq!(chunks[2].len(), 20);
+    }
+
+    #[test]
+    fn is_retryable_error_detects_connection_errors() {
+        // Connection errors should be retryable
+        assert!(is_retryable_error("connection error"));
+        assert!(is_retryable_error("Connection refused"));
+        assert!(is_retryable_error("timeout"));
+        assert!(is_retryable_error("request timed out"));
+        // Non-retryable errors
+        assert!(!is_retryable_error("invalid JSON"));
+        assert!(!is_retryable_error("model not found"));
+    }
+
+    #[test]
+    fn final_error_message_includes_url() {
+        let url = "http://localhost:11434/api/embed";
+        let msg = ollama_final_error_message(url, 5);
+        assert!(msg.contains(url), "Error should include URL, got: {msg}");
+        assert!(
+            msg.contains("5"),
+            "Error should include retry count, got: {msg}"
+        );
     }
 }

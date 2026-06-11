@@ -20,7 +20,7 @@ pub fn handle_initialize() -> InitializeResult {
     InitializeResult {
         protocol_version: "2024-11-05".to_string(),
         capabilities: ServerCapabilities {
-            tools: serde_json::json!({}),
+            tools: serde_json::json!({"listChanged": true}),
         },
         server_info: ServerInfo {
             name: "vectorcode".to_string(),
@@ -36,6 +36,13 @@ pub fn handle_tools_list() -> ToolsListResult {
     all_tools_list()
 }
 
+/// Handle the "ping" method (MCP spec § utilities/ping).
+///
+/// Returns an empty result object `{}` to indicate server liveness.
+pub fn handle_ping() -> serde_json::Value {
+    serde_json::json!({})
+}
+
 /// Handle a "tools/call" method by dispatching to the appropriate tool handler.
 ///
 /// Extracts the tool name and arguments from the JSON-RPC params, then
@@ -49,7 +56,7 @@ pub async fn handle_tool_call(
 
     match name {
         "vec_search" => handle_vec_search(state, arguments).await,
-        "vec_status" => handle_vec_status(state, arguments),
+        "vec_status" => handle_vec_status(state, arguments).await,
         "vec_reindex" => handle_vec_reindex(state, arguments).await,
         other => {
             error!("Unknown tool: {other}");
@@ -116,12 +123,16 @@ async fn handle_vec_search(state: &AppState, arguments: &serde_json::Value) -> T
 /// Handle the `vec_status` tool call (spec §11.3).
 ///
 /// Reads index metadata and returns formatted status text.
-fn handle_vec_status(state: &AppState, arguments: &serde_json::Value) -> ToolCallResult {
-    // Parse optional project_path (for now, we use the state's project_path)
-    let _params: VecStatusParams =
-        serde_json::from_value(arguments.clone()).unwrap_or(VecStatusParams { project_path: None });
+async fn handle_vec_status(state: &AppState, arguments: &serde_json::Value) -> ToolCallResult {
+    // Parse optional project_path with explicit error handling
+    let _params: VecStatusParams = match serde_json::from_value(arguments.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            return make_error_result(format!("Invalid vec_status parameters: {e}"));
+        }
+    };
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock().await;
     match meta::read_index_meta(db.conn()) {
         Ok(Some(index_meta)) => {
             let text = format_status_text(&index_meta);
@@ -138,15 +149,16 @@ fn handle_vec_status(state: &AppState, arguments: &serde_json::Value) -> ToolCal
 ///
 /// Triggers a full or incremental re-index of the project.
 async fn handle_vec_reindex(state: &AppState, arguments: &serde_json::Value) -> ToolCallResult {
-    let params: VecReindexParams =
-        serde_json::from_value(arguments.clone()).unwrap_or(VecReindexParams {
-            path: None,
-            full: false,
-        });
+    let params: VecReindexParams = match serde_json::from_value(arguments.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            return make_error_result(format!("Invalid vec_reindex parameters: {e}"));
+        }
+    };
 
     // If full reindex requested, reinitialize the schema
     if params.full {
-        let db = state.db.lock().unwrap();
+        let db = state.db.lock().await;
         if let Err(e) = db.init_schema(state.embedder.dimensions()) {
             return make_error_result(format!("Failed to reinitialize schema: {e}"));
         }
@@ -260,7 +272,7 @@ mod tests {
         crate::store::meta::write_index_meta(db.conn(), &meta).unwrap();
 
         AppState {
-            db: std::sync::Arc::new(std::sync::Mutex::new(db)),
+            db: Arc::new(tokio::sync::Mutex::new(db)),
             embedder: Arc::new(MockEmbedder::new(64)),
             config: Config::default(),
             project_path: std::path::PathBuf::from("/tmp/test-project"),
@@ -292,6 +304,11 @@ mod tests {
     fn handle_initialize_has_tools_capability() {
         let result = handle_initialize();
         assert!(result.capabilities.tools.is_object());
+        assert_eq!(
+            result.capabilities.tools["listChanged"],
+            serde_json::json!(true),
+            "tools capability should include listChanged: true"
+        );
     }
 
     // ─── handle_tools_list tests ─────────────────────────────────────
@@ -300,6 +317,18 @@ mod tests {
     fn handle_tools_list_returns_three_tools() {
         let result = handle_tools_list();
         assert_eq!(result.tools.len(), 3);
+    }
+
+    // ─── handle_ping tests ───────────────────────────────────────────
+
+    #[test]
+    fn handle_ping_returns_empty_object() {
+        let result = handle_ping();
+        assert!(result.is_object(), "Ping should return a JSON object");
+        assert!(
+            result.as_object().unwrap().is_empty(),
+            "Ping should return an empty object {{}}"
+        );
     }
 
     #[test]
@@ -357,12 +386,41 @@ mod tests {
         assert!(result.content[0].text.contains("Invalid"));
     }
 
+    #[tokio::test]
+    async fn handle_vec_status_invalid_params_returns_descriptive_error() {
+        let state = setup_test_state();
+        // Send a truly invalid structure (string instead of object)
+        let result = handle_vec_status(&state, &serde_json::json!("not an object")).await;
+        assert_eq!(result.is_error, Some(true));
+        assert!(
+            result.content[0]
+                .text
+                .contains("Invalid vec_status parameters"),
+            "Got: {}",
+            result.content[0].text
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_vec_reindex_invalid_params_returns_descriptive_error() {
+        let state = setup_test_state();
+        let result = handle_vec_reindex(&state, &serde_json::json!("not an object")).await;
+        assert_eq!(result.is_error, Some(true));
+        assert!(
+            result.content[0]
+                .text
+                .contains("Invalid vec_reindex parameters"),
+            "Got: {}",
+            result.content[0].text
+        );
+    }
+
     // ─── handle_vec_status tests ─────────────────────────────────────
 
-    #[test]
-    fn handle_vec_status_with_meta_returns_formatted_text() {
+    #[tokio::test]
+    async fn handle_vec_status_with_meta_returns_formatted_text() {
         let state = setup_test_state();
-        let result = handle_vec_status(&state, &serde_json::json!({}));
+        let result = handle_vec_status(&state, &serde_json::json!({})).await;
         assert!(result.is_error.is_none());
         let text = &result.content[0].text;
         assert!(text.contains("Provider:    mock"));
@@ -372,19 +430,19 @@ mod tests {
         assert!(text.contains("Chunks:      200 stored"));
     }
 
-    #[test]
-    fn handle_vec_status_without_meta_returns_error() {
+    #[tokio::test]
+    async fn handle_vec_status_without_meta_returns_error() {
         let db = Database::open_in_memory().unwrap();
         db.init_schema(64).unwrap();
         // Don't write meta — simulate uninitialized index
         let state = AppState {
-            db: std::sync::Arc::new(std::sync::Mutex::new(db)),
+            db: Arc::new(tokio::sync::Mutex::new(db)),
             embedder: Arc::new(MockEmbedder::new(64)),
             config: Config::default(),
             project_path: std::path::PathBuf::from("/tmp"),
             watcher: None,
         };
-        let result = handle_vec_status(&state, &serde_json::json!({}));
+        let result = handle_vec_status(&state, &serde_json::json!({})).await;
         assert_eq!(result.is_error, Some(true));
         assert!(result.content[0].text.contains("not found"));
     }

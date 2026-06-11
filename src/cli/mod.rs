@@ -114,17 +114,20 @@ pub fn resolve_project_path(cli_path: Option<&PathBuf>) -> PathBuf {
 
 /// Create an embedder from config — maps ProviderConfig to the correct implementation.
 ///
-/// For ONNX: loads from cached model via `OnnxEmbedder::from_cache()`.
+/// For ONNX: loads from cached model via `OnnxEmbedder::from_cache_with_timeout()`
+/// (uses `spawn_blocking` + 60s timeout to avoid blocking the async runtime).
 /// For API providers: reads API keys from config (which already has env overrides applied).
 /// Falls back to MockEmbedder for testing when real providers aren't available.
-pub fn create_embedder_from_config(config: &Config) -> Result<Arc<dyn Embedder>> {
+pub async fn create_embedder_from_config(config: &Config) -> Result<Arc<dyn Embedder>> {
     match config.provider.name.as_str() {
         "onnx" => {
-            let embedder = crate::embedder::onnx::OnnxEmbedder::from_cache().map_err(|e| {
-                anyhow::anyhow!(
-                    "ONNX model not downloaded. Run `vectorcode init` to download it. ({e})"
-                )
-            })?;
+            let embedder = crate::embedder::onnx::OnnxEmbedder::from_cache_with_timeout()
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "ONNX model not downloaded. Run `vectorcode init` to download it. ({e})"
+                    )
+                })?;
             Ok(Arc::new(embedder))
         }
         "gemini" => {
@@ -325,7 +328,8 @@ mod tests {
     fn create_embedder_unknown_provider_errors() {
         let mut config = Config::default();
         config.provider.name = "nonexistent".to_string();
-        let result = create_embedder_from_config(&config);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(create_embedder_from_config(&config));
         assert!(result.is_err());
         let err_msg = format!("{}", result.err().unwrap());
         assert!(err_msg.contains("Unknown provider"), "Got: {err_msg}");
@@ -335,7 +339,8 @@ mod tests {
     fn create_embedder_mock_provider_works() {
         let mut config = Config::default();
         config.provider.name = "mock".to_string();
-        let result = create_embedder_from_config(&config);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(create_embedder_from_config(&config));
         assert!(result.is_ok());
         let embedder = result.unwrap();
         assert_eq!(embedder.provider_name(), "mock");
@@ -379,7 +384,8 @@ mod tests {
         let mut config = Config::default();
         config.provider.name = "gemini".to_string();
         // No gemini config section
-        let result = create_embedder_from_config(&config);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(create_embedder_from_config(&config));
         assert!(result.is_err());
     }
 
@@ -392,7 +398,8 @@ mod tests {
             model: "gemini-embedding-001".to_string(),
             dimensions: 768,
         });
-        let result = create_embedder_from_config(&config);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(create_embedder_from_config(&config));
         assert!(result.is_err());
     }
 
@@ -400,7 +407,8 @@ mod tests {
     fn create_embedder_openai_without_config_errors() {
         let mut config = Config::default();
         config.provider.name = "openai".to_string();
-        let result = create_embedder_from_config(&config);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(create_embedder_from_config(&config));
         assert!(result.is_err());
     }
 
@@ -412,7 +420,8 @@ mod tests {
             url: "http://localhost:11434".to_string(),
             model: "nomic-embed-text".to_string(),
         });
-        let result = create_embedder_from_config(&config);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(create_embedder_from_config(&config));
         assert!(result.is_ok());
         let embedder = result.unwrap();
         assert_eq!(embedder.provider_name(), "ollama");

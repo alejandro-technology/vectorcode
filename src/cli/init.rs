@@ -149,7 +149,7 @@ pub async fn execute(args: &InitArgs, project_path: &std::path::Path, quiet: boo
         let embedder = std::sync::Arc::new(MockEmbedder::new(dims))
             as std::sync::Arc<dyn crate::embedder::Embedder>;
         let indexer = crate::engine::Indexer::new(
-            std::sync::Arc::new(std::sync::Mutex::new(Database::open(&db_path)?)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(Database::open(&db_path)?)),
             embedder,
             config.indexing.clone(),
         );

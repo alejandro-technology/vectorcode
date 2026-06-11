@@ -10,7 +10,11 @@ use async_trait::async_trait;
 use ort::session::Session;
 use ort::value::Tensor;
 use std::path::PathBuf;
+use std::time::Duration;
 use tokenizers::Tokenizer;
+
+/// Timeout for ONNX session creation (macOS CoreML EP can hang).
+const SESSION_CREATION_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// ONNX Runtime embedding provider.
 ///
@@ -51,6 +55,16 @@ impl OnnxEmbedder {
             message: format!("Failed to create ONNX session builder: {e}"),
         })?;
 
+        // If ORT_DISABLE_COREML is set, use CPU execution provider only.
+        // This avoids the macOS CoreML EP hang during session creation.
+        if std::env::var("ORT_DISABLE_COREML").is_ok() {
+            builder = builder
+                .with_execution_providers([ort::execution_providers::CPU::default().build()])
+                .map_err(|e| VectorCodeError::EmbedderError {
+                    message: format!("Failed to set CPU execution provider: {e}"),
+                })?;
+        }
+
         let session = builder.commit_from_memory(model_bytes).map_err(|e| {
             VectorCodeError::EmbedderError {
                 message: format!("Failed to load ONNX model: {e}"),
@@ -84,6 +98,42 @@ impl OnnxEmbedder {
     fn from_model_manager(manager: &ModelManager) -> EmbedderResult<Self> {
         let (model_bytes, tokenizer_bytes) = manager.load_model()?;
         Self::new(&model_bytes, &tokenizer_bytes)
+    }
+
+    /// Async wrapper around `from_cache()` with a 60-second timeout.
+    ///
+    /// Uses `spawn_blocking` to avoid blocking the async runtime during
+    /// ONNX session creation (which can hang on macOS with CoreML EP).
+    pub async fn from_cache_with_timeout() -> EmbedderResult<Self> {
+        let manager = ModelManager::new();
+        Self::from_model_manager_with_timeout(&manager).await
+    }
+
+    /// Async wrapper around `from_model_dir()` with a 60-second timeout.
+    pub async fn from_model_dir_with_timeout(model_dir: PathBuf) -> EmbedderResult<Self> {
+        let manager = ModelManager::with_model_dir(model_dir);
+        Self::from_model_manager_with_timeout(&manager).await
+    }
+
+    /// Internal: load from `ModelManager` with `spawn_blocking` + timeout.
+    async fn from_model_manager_with_timeout(manager: &ModelManager) -> EmbedderResult<Self> {
+        // Clone the data we need before entering spawn_blocking
+        let (model_bytes, tokenizer_bytes) = manager.load_model()?;
+
+        let result = tokio::time::timeout(
+            SESSION_CREATION_TIMEOUT,
+            tokio::task::spawn_blocking(move || Self::new(&model_bytes, &tokenizer_bytes)),
+        )
+        .await;
+
+        match result {
+            Ok(join_result) => join_result.map_err(|e| VectorCodeError::EmbedderError {
+                message: format!("ONNX session creation task panicked: {e}"),
+            })?,
+            Err(_elapsed) => Err(VectorCodeError::EmbedderError {
+                message: onnx_timeout_error_message(),
+            }),
+        }
     }
 
     /// Tokenize input text and prepare model inputs.
@@ -157,6 +207,13 @@ impl OnnxEmbedder {
 
         pooled
     }
+}
+
+/// Build the error message for ONNX session creation timeout.
+pub fn onnx_timeout_error_message() -> String {
+    "ONNX model loading timed out after 60s. \
+     Try setting ORT_DISABLE_COREML=1 or switch provider."
+        .to_string()
 }
 
 #[async_trait]
@@ -287,6 +344,51 @@ mod tests {
         assert!(
             err_msg.contains("vectorcode init"),
             "Error should suggest running init, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn from_cache_with_timeout_errors_when_model_not_downloaded() {
+        let empty_dir = tempfile::tempdir().unwrap();
+        let manager = crate::embedder::model_manager::ModelManager::with_model_dir(
+            empty_dir.path().to_path_buf(),
+        );
+        let result = OnnxEmbedder::from_model_manager_with_timeout(&manager).await;
+        assert!(
+            result.is_err(),
+            "from_cache_with_timeout should fail when model files are missing"
+        );
+        let err_msg = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => unreachable!(),
+        };
+        assert!(
+            err_msg.contains("vectorcode init"),
+            "Error should suggest running init, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn from_cache_with_timeout_returns_error_not_panic() {
+        let empty_dir = tempfile::tempdir().unwrap();
+        let result =
+            OnnxEmbedder::from_model_dir_with_timeout(empty_dir.path().to_path_buf()).await;
+        assert!(
+            result.is_err(),
+            "Should return error, not panic, when model is missing"
+        );
+    }
+
+    #[test]
+    fn timeout_error_message_contains_helpful_hints() {
+        let msg = crate::embedder::onnx::onnx_timeout_error_message();
+        assert!(
+            msg.contains("timed out"),
+            "Error should mention 'timed out', got: {msg}"
+        );
+        assert!(
+            msg.contains("ORT_DISABLE_COREML"),
+            "Error should mention 'ORT_DISABLE_COREML', got: {msg}"
         );
     }
 

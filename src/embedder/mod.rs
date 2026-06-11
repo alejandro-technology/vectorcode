@@ -3,8 +3,12 @@
 //! The `Embedder` trait defines the interface for all embedding providers.
 //! Providers implement this trait to generate vector embeddings from text.
 
+pub mod gemini;
+pub mod http;
 pub mod mock;
+pub mod ollama;
 pub mod onnx;
+pub mod openai;
 
 use crate::error::VectorCodeError;
 use async_trait::async_trait;

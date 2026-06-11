@@ -60,6 +60,12 @@ impl McpTransport {
     }
 }
 
+impl Default for McpTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,6 +74,11 @@ mod tests {
     fn mcp_transport_can_be_created() {
         // Just verify the constructor works without panicking
         let _transport = McpTransport::new();
+    }
+
+    #[test]
+    fn mcp_transport_default_works() {
+        let _transport = McpTransport::default();
     }
 
     #[tokio::test]

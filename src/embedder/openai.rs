@@ -134,14 +134,12 @@ impl Embedder for OpenAiEmbedder {
                             message: format!("Failed to read OpenAI response body: {e}"),
                         })?;
                 let vectors = Self::parse_response(&response_body)?;
-                return vectors.into_iter().next().ok_or_else(|| {
-                    {
-                        VectorCodeError::EmbedderError {
-                            message: "OpenAI returned empty data array".to_string(),
-                        }
-                    }
-                    .into()
-                });
+                return vectors
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| VectorCodeError::EmbedderError {
+                        message: "OpenAI returned empty data array".to_string(),
+                    });
             }
 
             if should_retry(status) && attempt < MAX_RETRIES {

@@ -144,14 +144,12 @@ impl Embedder for OllamaEmbedder {
             })?;
 
         let vectors = Self::parse_response(&response_body)?;
-        vectors.into_iter().next().ok_or_else(|| {
-            {
-                VectorCodeError::EmbedderError {
-                    message: "Ollama returned empty embeddings array".to_string(),
-                }
-            }
-            .into()
-        })
+        vectors
+            .into_iter()
+            .next()
+            .ok_or_else(|| VectorCodeError::EmbedderError {
+                message: "Ollama returned empty embeddings array".to_string(),
+            })
     }
 
     async fn embed_batch(&self, texts: &[&str]) -> EmbedderResult<Vec<Vec<f32>>> {

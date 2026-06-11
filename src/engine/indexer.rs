@@ -85,7 +85,7 @@ impl Indexer {
         // Step 3: Embed and store
         info!("[3/3] Embedding {} chunks...", chunks_new);
         if !new_chunks.is_empty() {
-            let texts: Vec<String> = new_chunks.iter().map(|c| enrich_chunk_content(c)).collect();
+            let texts: Vec<String> = new_chunks.iter().map(enrich_chunk_content).collect();
             let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
             let embeddings = self.embedder.embed_batch(&text_refs).await?;
 
@@ -140,7 +140,7 @@ impl Indexer {
         let chunks_new = new_chunks.len();
 
         if !new_chunks.is_empty() {
-            let texts: Vec<String> = new_chunks.iter().map(|c| enrich_chunk_content(c)).collect();
+            let texts: Vec<String> = new_chunks.iter().map(enrich_chunk_content).collect();
             let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
             let embeddings = self.embedder.embed_batch(&text_refs).await?;
 
@@ -292,7 +292,7 @@ pub fn discover_files(project_path: &Path, config: &IndexingConfig) -> Vec<PathB
     builder.hidden(false);
     builder.filter_entry(move |entry| {
         // Skip excluded directories
-        if entry.file_type().map_or(false, |ft| ft.is_dir()) {
+        if entry.file_type().is_some_and(|ft| ft.is_dir()) {
             let name = entry.file_name().to_str().unwrap_or("");
             if exclude_dirs.iter().any(|d| d == name) {
                 return false;

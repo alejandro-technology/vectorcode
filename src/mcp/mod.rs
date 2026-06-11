@@ -17,6 +17,7 @@ use tracing::{debug, info, warn};
 use crate::config::schema::Config;
 use crate::embedder::Embedder;
 use crate::store::db::Database;
+use crate::watcher::FileWatcher;
 
 use self::schema::*;
 use self::transport::McpTransport;
@@ -27,6 +28,8 @@ pub struct AppState {
     pub embedder: Arc<dyn Embedder>,
     pub config: Config,
     pub project_path: PathBuf,
+    /// Optional file watcher for auto-sync and staleness detection (spec §14).
+    pub watcher: Option<Arc<tokio::sync::RwLock<FileWatcher>>>,
 }
 
 /// MCP server that processes JSON-RPC messages over stdio.

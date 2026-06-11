@@ -8,6 +8,7 @@ use tracing::{error, info};
 use crate::engine::indexer::Indexer;
 use crate::engine::searcher::{SearchOptions, Searcher};
 use crate::store::meta;
+use crate::watcher::PendingFile;
 
 use super::schema::*;
 use super::AppState;
@@ -94,8 +95,21 @@ async fn handle_vec_search(state: &AppState, arguments: &serde_json::Value) -> T
 
     match searcher.search(&params.query, options).await {
         Ok(results) => {
+            // Check for staleness — spec §14.2
+            let staleness_banner = match &state.watcher {
+                Some(watcher) => {
+                    let pending = watcher.read().await.pending_files().await;
+                    build_staleness_banner(&results, &pending)
+                }
+                None => None,
+            };
+
             let text = format_search_results_text(&params.query, params.threshold, &results);
-            make_text_result(text)
+            let final_text = match staleness_banner {
+                Some(banner) => format!("{banner}\n{text}"),
+                None => text,
+            };
+            make_text_result(final_text)
         }
         Err(e) => {
             error!("vec_search failed: {e}");
@@ -184,6 +198,54 @@ fn open_db_for_state(state: &AppState) -> anyhow::Result<crate::store::db::Datab
     crate::store::db::Database::open(&db_path).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+/// Build a staleness banner if any search result files have pending changes (spec §14.2).
+///
+/// Returns `Some(banner)` if there are matching pending files, `None` otherwise.
+fn build_staleness_banner(
+    results: &[crate::types::SearchResult],
+    pending: &[PendingFile],
+) -> Option<String> {
+    if pending.is_empty() || results.is_empty() {
+        return None;
+    }
+
+    let now = std::time::SystemTime::now();
+    let mut stale_entries: Vec<String> = Vec::new();
+
+    for result in results {
+        for pf in pending {
+            // Compare by checking if the result file_path is a suffix of the pending path
+            let pending_str = pf.path.to_string_lossy();
+            if pending_str.ends_with(&result.file_path) || result.file_path == pending_str.as_ref()
+            {
+                let ago = now
+                    .duration_since(pf.modified_at)
+                    .unwrap_or_default()
+                    .as_secs();
+                let time_str = if ago < 60 {
+                    format!("{ago}s ago")
+                } else {
+                    format!("{}m ago", ago / 60)
+                };
+                stale_entries.push(format!("  - {} (modified {})", result.file_path, time_str));
+                break;
+            }
+        }
+    }
+
+    if stale_entries.is_empty() {
+        return None;
+    }
+
+    let entries = stale_entries.join("\n");
+    Some(format!(
+        "⚠️ Some files referenced below were modified since the last index sync\n\
+         and may not reflect the latest content:\n\
+         {entries}\n\
+         Use grep or read these files directly for accurate content.\n"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +253,7 @@ mod tests {
     use crate::embedder::mock::MockEmbedder;
     use crate::store::db::Database;
     use crate::types::IndexMeta;
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     fn setup_test_state() -> AppState {
@@ -215,6 +278,7 @@ mod tests {
             embedder: Arc::new(MockEmbedder::new(64)),
             config: Config::default(),
             project_path: std::path::PathBuf::from("/tmp/test-project"),
+            watcher: None,
         }
     }
 
@@ -332,6 +396,7 @@ mod tests {
             embedder: Arc::new(MockEmbedder::new(64)),
             config: Config::default(),
             project_path: std::path::PathBuf::from("/tmp"),
+            watcher: None,
         };
         let result = handle_vec_status(&state, &serde_json::json!({}));
         assert_eq!(result.is_error, Some(true));
@@ -376,6 +441,93 @@ mod tests {
         assert!(
             text.contains("..."),
             "Long content should be truncated with ..."
+        );
+    }
+
+    // ─── staleness banner tests ──────────────────────────────────────
+
+    #[test]
+    fn build_staleness_banner_none_when_no_pending() {
+        let results = vec![crate::types::SearchResult {
+            file_path: "src/main.rs".to_string(),
+            start_line: 1,
+            end_line: 5,
+            symbol: None,
+            kind: "function_item".to_string(),
+            language: "rust".to_string(),
+            parent_context: None,
+            content: "fn main() {}".to_string(),
+            score: 0.9,
+        }];
+        let banner = build_staleness_banner(&results, &[]);
+        assert!(banner.is_none(), "No pending files → no banner");
+    }
+
+    #[test]
+    fn build_staleness_banner_none_when_no_results() {
+        let pending = vec![PendingFile {
+            path: PathBuf::from("/project/src/main.rs"),
+            modified_at: std::time::SystemTime::now(),
+        }];
+        let banner = build_staleness_banner(&[], &pending);
+        assert!(banner.is_none(), "No results → no banner");
+    }
+
+    #[test]
+    fn build_staleness_banner_matches_pending_to_results() {
+        let results = vec![crate::types::SearchResult {
+            file_path: "src/payment/retry.ts".to_string(),
+            start_line: 10,
+            end_line: 20,
+            symbol: Some("retryPayment".to_string()),
+            kind: "function_declaration".to_string(),
+            language: "typescript".to_string(),
+            parent_context: None,
+            content: "function retryPayment() {}".to_string(),
+            score: 0.85,
+        }];
+        let pending = vec![PendingFile {
+            path: PathBuf::from("/project/src/payment/retry.ts"),
+            modified_at: std::time::SystemTime::now(),
+        }];
+        let banner = build_staleness_banner(&results, &pending);
+        assert!(
+            banner.is_some(),
+            "Should produce banner when result matches pending"
+        );
+        let banner = banner.unwrap();
+        assert!(banner.contains("⚠️"), "Banner should contain warning emoji");
+        assert!(
+            banner.contains("src/payment/retry.ts"),
+            "Banner should mention the stale file"
+        );
+        assert!(
+            banner.contains("modified"),
+            "Banner should mention modification time"
+        );
+    }
+
+    #[test]
+    fn build_staleness_banner_none_when_no_overlap() {
+        let results = vec![crate::types::SearchResult {
+            file_path: "src/auth.ts".to_string(),
+            start_line: 1,
+            end_line: 5,
+            symbol: None,
+            kind: "function_declaration".to_string(),
+            language: "typescript".to_string(),
+            parent_context: None,
+            content: "function auth() {}".to_string(),
+            score: 0.7,
+        }];
+        let pending = vec![PendingFile {
+            path: PathBuf::from("/project/src/payment/retry.ts"),
+            modified_at: std::time::SystemTime::now(),
+        }];
+        let banner = build_staleness_banner(&results, &pending);
+        assert!(
+            banner.is_none(),
+            "No overlap between results and pending → no banner"
         );
     }
 }

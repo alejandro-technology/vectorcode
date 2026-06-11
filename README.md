@@ -1,12 +1,25 @@
-# VectorCode
+<div align="center">
 
-Semantic code search MCP server using embeddings. Find code by meaning, not just by name.
+<img width="1920" height="1080" alt="VectorCode banner" src="docs/assets/VectorCodeBanner.webp" />
+
+<h1>VectorCode</h1>
+
+<p><strong>Semantic code search MCP server using embeddings. Find code by meaning, not just by name.</strong></p>
+
+<p>
+<a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+<img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey" alt="Platform">
+
+</p>
+
+</div>
 
 ## What is VectorCode?
 
 VectorCode fills the gap between exact string matching (`grep`) and structural analysis (CodeGraph). It enables **semantic search** over your codebase — finding code by concept when you don't know the exact symbol name, pattern, or terminology.
 
 **Example queries that VectorCode answers:**
+
 - "code that handles payment retries"
 - "where do we validate user permissions"
 - "functions similar to createUser"
@@ -43,6 +56,7 @@ vectorcode install
 This auto-detects your AI coding agents and adds VectorCode to their MCP configuration.
 
 Supported agents:
+
 - **OpenCode** — `opencode.json` → `mcpServers`
 - **Claude Code** — `~/.claude/claude_desktop_config.json`
 - **Cursor** — `.cursor/mcp.json`
@@ -59,6 +73,7 @@ vectorcode init
 ```
 
 Options:
+
 - `--provider <onnx|gemini|ollama|openai>` — Embedding provider (default: onnx)
 - `--model <name>` — Model name for the provider
 - `--dims <n>` — Embedding dimensions
@@ -169,34 +184,36 @@ default_threshold = 0.3
 
 ### Environment Variable Overrides
 
-| Variable | Description |
-|----------|-------------|
-| `VECTORCODE_PROVIDER` | Override provider name |
-| `GEMINI_API_KEY` | Gemini API key |
-| `OPENAI_API_KEY` | OpenAI API key |
-| `VECTORCODE_NO_WATCH` | Set to `1` to disable watcher |
-| `VECTORCODE_DEBOUNCE_MS` | Override debounce interval |
+| Variable                 | Description                   |
+| ------------------------ | ----------------------------- |
+| `VECTORCODE_PROVIDER`    | Override provider name        |
+| `GEMINI_API_KEY`         | Gemini API key                |
+| `OPENAI_API_KEY`         | OpenAI API key                |
+| `VECTORCODE_NO_WATCH`    | Set to `1` to disable watcher |
+| `VECTORCODE_DEBOUNCE_MS` | Override debounce interval    |
 
 ## Supported Languages
 
-| Language | Extensions | Tree-sitter Grammar |
-|----------|-----------|-------------------|
-| TypeScript | `.ts` | tree-sitter-typescript |
-| TSX | `.tsx` | tree-sitter-typescript |
+| Language   | Extensions                    | Tree-sitter Grammar    |
+| ---------- | ----------------------------- | ---------------------- |
+| TypeScript | `.ts`                         | tree-sitter-typescript |
+| TSX        | `.tsx`                        | tree-sitter-typescript |
 | JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` | tree-sitter-javascript |
-| Python | `.py` | tree-sitter-python |
-| Rust | `.rs` | tree-sitter-rust |
-| Go | `.go` | tree-sitter-go |
-| Java | `.java` | tree-sitter-java |
+| Python     | `.py`                         | tree-sitter-python     |
+| Rust       | `.rs`                         | tree-sitter-rust       |
+| Go         | `.go`                         | tree-sitter-go         |
+| Java       | `.java`                       | tree-sitter-java       |
 
 ## MCP Tools
 
 When running as an MCP server, VectorCode exposes three tools:
 
 ### `vec_search`
+
 Semantic code search — find code by meaning, not just by name.
 
 Parameters:
+
 - `query` (required) — Natural language description of what you're looking for
 - `limit` (optional, default: 10) — Maximum results
 - `threshold` (optional, default: 0.3) — Minimum similarity score (0.0–1.0)
@@ -204,12 +221,15 @@ Parameters:
 - `path` (optional) — Filter by file path prefix
 
 ### `vec_status`
+
 Check the status of the VectorCode index.
 
 ### `vec_reindex`
+
 Force re-indexing of the codebase or specific files.
 
 Parameters:
+
 - `path` (optional) — Specific file or directory
 - `full` (optional, default: false) — Drop and rebuild from scratch
 

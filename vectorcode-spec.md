@@ -492,7 +492,6 @@ Tree-sitter grammars to include (start with these, expand later):
 | C# | `tree-sitter-c-sharp` | P1 | `.cs` |
 | C/C++ | `tree-sitter-c`, `tree-sitter-cpp` | P1 | `.c`, `.h`, `.cpp`, `.hpp`, `.cc` |
 | Ruby | `tree-sitter-ruby` | P2 | `.rb` |
-| PHP | `tree-sitter-php` | P2 | `.php` |
 | Swift | `tree-sitter-swift` | P2 | `.swift` |
 | Kotlin | `tree-sitter-kotlin` | P2 | `.kt`, `.kts` |
 

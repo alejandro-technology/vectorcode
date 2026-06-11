@@ -1,0 +1,19 @@
+[provider]
+name = "onnx"
+
+[provider.onnx]
+model = "all-MiniLM-L6-v2"
+
+[indexing]
+max_file_size = 1_048_576
+exclude_dirs = [".vectorcode", ".git", "node_modules", "target", "__pycache__", "vendor", "dist", "build", ".next"]
+exclude_extensions = [".min.js", ".map", ".lock", ".svg", ".png", ".jpg", ".ico", ".woff", ".woff2", ".ttf"]
+concurrency = 8
+
+[watcher]
+debounce_ms = 2000
+disabled = false
+
+[search]
+default_limit = 10
+default_threshold = 0.3

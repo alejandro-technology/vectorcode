@@ -102,34 +102,51 @@ impl OnnxEmbedder {
 
     /// Async wrapper around `from_cache()` with a 60-second timeout.
     ///
-    /// Uses `spawn_blocking` to avoid blocking the async runtime during
-    /// ONNX session creation (which can hang on macOS with CoreML EP).
+    /// Runs ONNX session creation on a raw OS thread (not tokio's blocking
+    /// pool) so the process can exit even if the library hangs.
     pub async fn from_cache_with_timeout() -> EmbedderResult<Self> {
         let manager = ModelManager::new();
         Self::from_model_manager_with_timeout(&manager).await
     }
 
     /// Async wrapper around `from_model_dir()` with a 60-second timeout.
+    ///
+    /// Uses a raw OS thread so the process can exit even if the library hangs.
     pub async fn from_model_dir_with_timeout(model_dir: PathBuf) -> EmbedderResult<Self> {
         let manager = ModelManager::with_model_dir(model_dir);
         Self::from_model_manager_with_timeout(&manager).await
     }
 
-    /// Internal: load from `ModelManager` with `spawn_blocking` + timeout.
+    /// Internal: load from `ModelManager` with a timeout.
+    ///
+    /// Uses `std::thread::spawn` for the ONNX work so the thread is NOT
+    /// tracked by tokio. This prevents tokio runtime shutdown from hanging
+    /// when ONNX initialization blocks indefinitely (e.g. missing dylib,
+    /// CoreML EP compile, or auto-download).
+    ///
+    /// The async side uses `tokio::sync::oneshot` — when the timeout fires,
+    /// the receiver is dropped and the raw thread's `send()` fails gracefully.
     async fn from_model_manager_with_timeout(manager: &ModelManager) -> EmbedderResult<Self> {
-        // Clone the data we need before entering spawn_blocking
         let (model_bytes, tokenizer_bytes) = manager.load_model()?;
 
-        let result = tokio::time::timeout(
-            SESSION_CREATION_TIMEOUT,
-            tokio::task::spawn_blocking(move || Self::new(&model_bytes, &tokenizer_bytes)),
-        )
-        .await;
+        let (tx, rx) = tokio::sync::oneshot::channel::<EmbedderResult<Self>>();
 
-        match result {
-            Ok(join_result) => join_result.map_err(|e| VectorCodeError::EmbedderError {
-                message: format!("ONNX session creation task panicked: {e}"),
-            })?,
+        // Run ONNX session creation on a raw OS thread, NOT on tokio's
+        // blocking pool.  If this thread hangs (missing dylib, CoreML EP
+        // compile, etc.), the process can still exit because the thread is
+        // not joined by the tokio runtime.
+        std::thread::spawn(move || {
+            let result = Self::new(&model_bytes, &tokenizer_bytes);
+            // If the receiver was dropped (timeout), send fails — that's
+            // fine, the thread just exits silently.
+            let _ = tx.send(result);
+        });
+
+        match tokio::time::timeout(SESSION_CREATION_TIMEOUT, rx).await {
+            Ok(Ok(embedder)) => embedder,
+            Ok(Err(_recv_err)) => Err(VectorCodeError::EmbedderError {
+                message: "ONNX session creation channel closed unexpectedly".to_string(),
+            }),
             Err(_elapsed) => Err(VectorCodeError::EmbedderError {
                 message: onnx_timeout_error_message(),
             }),
@@ -211,8 +228,15 @@ impl OnnxEmbedder {
 
 /// Build the error message for ONNX session creation timeout.
 pub fn onnx_timeout_error_message() -> String {
-    "ONNX model loading timed out after 60s. \
-     Try setting ORT_DISABLE_COREML=1 or switch provider."
+    "ONNX Runtime initialization timed out after 60s.\n\
+     \n\
+     This usually means the ONNX Runtime shared library (libonnxruntime.dylib)\n\
+     is not installed or is hanging during initialization.\n\
+     \n\
+     Fix options:\n\
+       • Install ONNX Runtime:  brew install onnxruntime\n\
+       • Or switch to a different provider:  vectorcode init --provider ollama\n\
+       • Or set ORT_DISABLE_COREML=1 if CoreML EP is the culprit"
         .to_string()
 }
 

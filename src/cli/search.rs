@@ -63,12 +63,13 @@ pub async fn execute(args: &SearchArgs, project_path: &std::path::Path, quiet: b
     let embedder: Arc<dyn crate::embedder::Embedder> =
         match crate::cli::create_embedder_from_config(&config).await {
             Ok(e) => e,
-            Err(_) => {
+            Err(err) => {
                 if !quiet {
                     eprintln!(
-                        "Warning: Could not create {} embedder, using mock embedder",
+                        "Warning: Could not create {} embedder: {err}",
                         config.provider.name
                     );
+                    eprintln!("Using mock embedder for testing (results will be fake).");
                 }
                 Arc::new(MockEmbedder::new(index_meta.dimensions))
             }

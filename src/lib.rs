@@ -1,9 +1,12 @@
+pub mod cli;
 pub mod config;
 pub mod embedder;
 pub mod engine;
 pub mod error;
+pub mod mcp;
 pub mod store;
 pub mod types;
+pub mod watcher;
 
 // Re-exports for convenience
 pub use config::load_config;

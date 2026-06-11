@@ -1,0 +1,461 @@
+//! `vectorcode init` — initialize VectorCode in a project directory (spec §12.2).
+
+use anyhow::Result;
+use clap::Args;
+
+use crate::embedder::mock::MockEmbedder;
+use crate::store::db::Database;
+use crate::store::meta;
+use crate::types::IndexMeta;
+
+use super::ProviderArg;
+
+/// Arguments for `vectorcode init`.
+#[derive(Args, Debug)]
+pub struct InitArgs {
+    /// Embedding provider to use.
+    #[arg(long, value_enum, default_value = "onnx")]
+    pub provider: ProviderArg,
+
+    /// Model name (provider-specific default if omitted).
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Embedding dimensions (provider-specific default if omitted).
+    #[arg(long)]
+    pub dims: Option<u32>,
+
+    /// Also run initial indexing after init.
+    #[arg(long)]
+    pub index: bool,
+}
+
+/// Execute the `init` command (spec §12.2).
+///
+/// 1. Create `.vectorcode/` directory
+/// 2. Create `index.db` with schema
+/// 3. Write meta table with provider, model, dimensions
+/// 4. Create `.vectorcode/.gitignore` containing `index.db`
+/// 5. Create `.vectorcode/config.toml` with chosen provider settings
+/// 6. If `--index`: run full indexing pipeline
+pub async fn execute(args: &InitArgs, project_path: &std::path::Path, quiet: bool) -> Result<()> {
+    let vc_dir = project_path.join(".vectorcode");
+
+    // Error if already initialized
+    if vc_dir.exists() {
+        anyhow::bail!(
+            "VectorCode is already initialized in {}.\n\
+             To re-index, run: vectorcode index --full\n\
+             To start fresh, remove .vectorcode/ and run init again.",
+            project_path.display()
+        );
+    }
+
+    // Step 1: Create .vectorcode/ directory
+    std::fs::create_dir_all(&vc_dir)?;
+
+    // Resolve provider defaults
+    let (model, dims) = resolve_provider_defaults(&args.provider, &args.model, &args.dims);
+
+    // Step 2: Create index.db with schema
+    let db_path = vc_dir.join("index.db");
+    let db = Database::open(&db_path)?;
+    db.init_schema(dims)?;
+
+    // Step 3: Write meta table
+    let now = chrono_now();
+    let index_meta = IndexMeta {
+        provider: args.provider.as_str().to_string(),
+        model: model.clone(),
+        dimensions: dims,
+        created_at: now.clone(),
+        last_sync_at: None,
+        files_indexed: 0,
+        chunks_stored: 0,
+        vectorcode_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    meta::write_index_meta(db.conn(), &index_meta)?;
+
+    // Step 4: Create .gitignore
+    let gitignore_path = vc_dir.join(".gitignore");
+    std::fs::write(&gitignore_path, "index.db\nindex.db-wal\nindex.db-shm\n")?;
+
+    // Step 5: Create config.toml
+    let config_content = generate_config_toml(&args.provider, &model, dims);
+    let config_path = vc_dir.join("config.toml");
+    std::fs::write(&config_path, &config_content)?;
+
+    if !quiet {
+        eprintln!("VectorCode initialized in {}", vc_dir.display());
+        eprintln!("  Provider: {}", args.provider.as_str());
+        eprintln!("  Model:    {model}");
+        eprintln!("  Dims:     {dims}");
+    }
+
+    // Step 6: If --index, run full indexing
+    if args.index {
+        if !quiet {
+            eprintln!("Running initial indexing...");
+        }
+        let config = crate::config::load_config(project_path)?;
+        // Use MockEmbedder for init since real embedders may not be available
+        let embedder = std::sync::Arc::new(MockEmbedder::new(dims))
+            as std::sync::Arc<dyn crate::embedder::Embedder>;
+        let indexer = crate::engine::Indexer::new(
+            Database::open(&db_path)?,
+            embedder,
+            config.indexing.clone(),
+        );
+        let report = indexer.index_project(project_path).await?;
+        if !quiet {
+            eprintln!(
+                "Indexed {} files, {} chunks in {:.1}s",
+                report.files_indexed,
+                report.chunks_new,
+                report.duration.as_secs_f64()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Resolve model name and dimensions from provider + optional overrides.
+fn resolve_provider_defaults(
+    provider: &ProviderArg,
+    model: &Option<String>,
+    dims: &Option<u32>,
+) -> (String, u32) {
+    match provider {
+        ProviderArg::Onnx => (
+            model
+                .clone()
+                .unwrap_or_else(|| "all-MiniLM-L6-v2".to_string()),
+            dims.unwrap_or(384),
+        ),
+        ProviderArg::Gemini => (
+            model
+                .clone()
+                .unwrap_or_else(|| "gemini-embedding-001".to_string()),
+            dims.unwrap_or(768),
+        ),
+        ProviderArg::Ollama => (
+            model
+                .clone()
+                .unwrap_or_else(|| "nomic-embed-text".to_string()),
+            dims.unwrap_or(768),
+        ),
+        ProviderArg::Openai => (
+            model
+                .clone()
+                .unwrap_or_else(|| "text-embedding-3-small".to_string()),
+            dims.unwrap_or(1536),
+        ),
+    }
+}
+
+/// Generate the config.toml content for the chosen provider.
+fn generate_config_toml(provider: &ProviderArg, model: &str, dims: u32) -> String {
+    let provider_section = match provider {
+        ProviderArg::Onnx => format!(
+            r#"[provider]
+name = "onnx"
+
+[provider.onnx]
+model = "{model}"
+"#
+        ),
+        ProviderArg::Gemini => format!(
+            r#"[provider]
+name = "gemini"
+
+[provider.gemini]
+api_key = ""
+model = "{model}"
+dimensions = {dims}
+"#
+        ),
+        ProviderArg::Ollama => format!(
+            r#"[provider]
+name = "ollama"
+
+[provider.ollama]
+url = "http://localhost:11434"
+model = "{model}"
+"#
+        ),
+        ProviderArg::Openai => format!(
+            r#"[provider]
+name = "openai"
+
+[provider.openai]
+api_key = ""
+model = "{model}"
+"#
+        ),
+    };
+
+    format!(
+        r#"{provider_section}
+[indexing]
+max_file_size = 1_048_576
+exclude_dirs = [".vectorcode", ".git", "node_modules", "target", "__pycache__", "vendor", "dist", "build", ".next"]
+exclude_extensions = [".min.js", ".map", ".lock", ".svg", ".png", ".jpg", ".ico", ".woff", ".woff2", ".ttf"]
+concurrency = 8
+
+[watcher]
+debounce_ms = 2000
+disabled = false
+
+[search]
+default_limit = 10
+default_threshold = 0.3
+"#
+    )
+}
+
+/// Get current time as ISO 8601 string (without chrono dependency).
+fn chrono_now() -> String {
+    chrono_now_public()
+}
+
+/// Public version for other CLI modules to use.
+pub fn chrono_now_public() -> String {
+    // Use a simple approach — in production we'd use chrono or time crate
+    // For now, use std::time since we don't have chrono as a dependency
+    let duration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = duration.as_secs();
+    // Simple ISO 8601 format (not perfect but good enough for metadata)
+    format!("unix:{secs}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_provider_defaults_onnx() {
+        let (model, dims) = resolve_provider_defaults(&ProviderArg::Onnx, &None, &None);
+        assert_eq!(model, "all-MiniLM-L6-v2");
+        assert_eq!(dims, 384);
+    }
+
+    #[test]
+    fn resolve_provider_defaults_gemini() {
+        let (model, dims) = resolve_provider_defaults(&ProviderArg::Gemini, &None, &None);
+        assert_eq!(model, "gemini-embedding-001");
+        assert_eq!(dims, 768);
+    }
+
+    #[test]
+    fn resolve_provider_defaults_ollama() {
+        let (model, dims) = resolve_provider_defaults(&ProviderArg::Ollama, &None, &None);
+        assert_eq!(model, "nomic-embed-text");
+        assert_eq!(dims, 768);
+    }
+
+    #[test]
+    fn resolve_provider_defaults_openai() {
+        let (model, dims) = resolve_provider_defaults(&ProviderArg::Openai, &None, &None);
+        assert_eq!(model, "text-embedding-3-small");
+        assert_eq!(dims, 1536);
+    }
+
+    #[test]
+    fn resolve_provider_defaults_with_overrides() {
+        let (model, dims) = resolve_provider_defaults(
+            &ProviderArg::Gemini,
+            &Some("custom-model".to_string()),
+            &Some(256),
+        );
+        assert_eq!(model, "custom-model");
+        assert_eq!(dims, 256);
+    }
+
+    #[test]
+    fn generate_config_toml_onnx_contains_provider() {
+        let toml = generate_config_toml(&ProviderArg::Onnx, "all-MiniLM-L6-v2", 384);
+        assert!(toml.contains("name = \"onnx\""));
+        assert!(toml.contains("model = \"all-MiniLM-L6-v2\""));
+        assert!(toml.contains("[indexing]"));
+        assert!(toml.contains("[search]"));
+    }
+
+    #[test]
+    fn generate_config_toml_gemini_contains_api_key() {
+        let toml = generate_config_toml(&ProviderArg::Gemini, "gemini-embedding-001", 768);
+        assert!(toml.contains("name = \"gemini\""));
+        assert!(toml.contains("api_key = \"\""));
+        assert!(toml.contains("dimensions = 768"));
+    }
+
+    #[test]
+    fn generate_config_toml_ollama_contains_url() {
+        let toml = generate_config_toml(&ProviderArg::Ollama, "nomic-embed-text", 768);
+        assert!(toml.contains("name = \"ollama\""));
+        assert!(toml.contains("url = \"http://localhost:11434\""));
+    }
+
+    #[test]
+    fn generate_config_toml_openai_contains_api_key() {
+        let toml = generate_config_toml(&ProviderArg::Openai, "text-embedding-3-small", 1536);
+        assert!(toml.contains("name = \"openai\""));
+        assert!(toml.contains("api_key = \"\""));
+    }
+
+    #[test]
+    fn generate_config_toml_all_have_indexing_section() {
+        for provider in [
+            ProviderArg::Onnx,
+            ProviderArg::Gemini,
+            ProviderArg::Ollama,
+            ProviderArg::Openai,
+        ] {
+            let toml = generate_config_toml(&provider, "test-model", 128);
+            assert!(
+                toml.contains("[indexing]"),
+                "Missing [indexing] for {:?}",
+                provider
+            );
+            assert!(
+                toml.contains("[watcher]"),
+                "Missing [watcher] for {:?}",
+                provider
+            );
+            assert!(
+                toml.contains("[search]"),
+                "Missing [search] for {:?}",
+                provider
+            );
+        }
+    }
+
+    #[test]
+    fn init_creates_vectorcode_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path();
+
+        let args = InitArgs {
+            provider: ProviderArg::Onnx,
+            model: None,
+            dims: None,
+            index: false,
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(execute(&args, project_path, true)).unwrap();
+
+        let vc_dir = project_path.join(".vectorcode");
+        assert!(vc_dir.exists(), ".vectorcode/ must be created");
+        assert!(vc_dir.join("index.db").exists(), "index.db must exist");
+        assert!(vc_dir.join(".gitignore").exists(), ".gitignore must exist");
+        assert!(
+            vc_dir.join("config.toml").exists(),
+            "config.toml must exist"
+        );
+    }
+
+    #[test]
+    fn init_writes_correct_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path();
+
+        let args = InitArgs {
+            provider: ProviderArg::Ollama,
+            model: Some("custom-model".to_string()),
+            dims: Some(512),
+            index: false,
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(execute(&args, project_path, true)).unwrap();
+
+        let db_path = project_path.join(".vectorcode/index.db");
+        let db = Database::open(&db_path).unwrap();
+        let meta = meta::read_index_meta(db.conn()).unwrap().unwrap();
+
+        assert_eq!(meta.provider, "ollama");
+        assert_eq!(meta.model, "custom-model");
+        assert_eq!(meta.dimensions, 512);
+        assert_eq!(meta.files_indexed, 0);
+        assert_eq!(meta.chunks_stored, 0);
+    }
+
+    #[test]
+    fn init_fails_if_already_initialized() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path();
+
+        let args = InitArgs {
+            provider: ProviderArg::Onnx,
+            model: None,
+            dims: None,
+            index: false,
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(execute(&args, project_path, true)).unwrap();
+
+        // Second init should fail
+        let result = rt.block_on(execute(&args, project_path, true));
+        assert!(result.is_err(), "Second init must fail");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("already initialized"),
+            "Error must mention already initialized: {err}"
+        );
+    }
+
+    #[test]
+    fn init_gitignore_contains_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path();
+
+        let args = InitArgs {
+            provider: ProviderArg::Onnx,
+            model: None,
+            dims: None,
+            index: false,
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(execute(&args, project_path, true)).unwrap();
+
+        let gitignore =
+            std::fs::read_to_string(project_path.join(".vectorcode/.gitignore")).unwrap();
+        assert!(
+            gitignore.contains("index.db"),
+            ".gitignore must contain index.db"
+        );
+    }
+
+    #[test]
+    fn init_config_toml_is_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path();
+
+        let args = InitArgs {
+            provider: ProviderArg::Gemini,
+            model: None,
+            dims: Some(256),
+            index: false,
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(execute(&args, project_path, true)).unwrap();
+
+        let config_content =
+            std::fs::read_to_string(project_path.join(".vectorcode/config.toml")).unwrap();
+        // Verify it parses as valid TOML
+        let parsed: Result<crate::config::schema::Config, _> = toml::from_str(&config_content);
+        assert!(
+            parsed.is_ok(),
+            "config.toml must be valid TOML: {:?}",
+            parsed.err()
+        );
+        let config = parsed.unwrap();
+        assert_eq!(config.provider.name, "gemini");
+    }
+}

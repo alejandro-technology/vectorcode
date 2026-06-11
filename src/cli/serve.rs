@@ -72,11 +72,6 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
     info!("  Watch:   {watch}");
     info!("  Debounce: {}ms", args.debounce);
 
-    // Connect-time catch-up (spec §14.3) — reconcile files before serving
-    if watch {
-        run_connect_time_catchup(&db, embedder.clone(), &cfg, project_path)?;
-    }
-
     // Create file watcher if enabled
     let watcher = if watch {
         let watcher_config = &cfg.watcher;
@@ -129,6 +124,28 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
 
     let mut server = McpServer::new(state);
 
+    // Spawn connect-time catch-up on a blocking thread (spec §14.3).
+    // Runs on the blocking pool so the MCP message loop enters immediately
+    // and the client's initialize request is answered without timeout.
+    // Uses spawn_blocking because Indexer (rusqlite internals) is !Send.
+    if watch {
+        let catchup_db_path = db_path.clone();
+        let catchup_embedder = embedder.clone();
+        let catchup_cfg = cfg.clone();
+        let catchup_project = project_path.to_path_buf();
+
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = run_connect_time_catchup(
+                &catchup_db_path,
+                catchup_embedder,
+                &catchup_cfg,
+                &catchup_project,
+            ) {
+                tracing::warn!("Connect-time catch-up failed: {e}");
+            }
+        });
+    }
+
     // Set up Ctrl+C handler
     let _ctrl_c = tokio::spawn(async {
         let _ = tokio::signal::ctrl_c().await;
@@ -146,13 +163,19 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
 ///
 /// Compares file mtimes on disk against the `files` table and runs incremental
 /// sync on any files that changed while no MCP server was running.
+///
+/// Called from `spawn_blocking` so the MCP message loop starts immediately
+/// and the client's `initialize` request is answered without timeout.
 fn run_connect_time_catchup(
-    db: &Database,
+    db_path: &std::path::Path,
     embedder: Arc<dyn crate::embedder::Embedder>,
     cfg: &config::schema::Config,
     project_path: &std::path::Path,
 ) -> Result<()> {
     info!("Running connect-time catch-up sync...");
+
+    // Open DB to list tracked files
+    let db = Database::open(db_path).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let tracked_files = files::list_all_files(db.conn())?;
     let mut changed_paths = Vec::new();
@@ -190,13 +213,12 @@ fn run_connect_time_catchup(
         changed_paths.len()
     );
 
-    // Open a new DB handle for the indexer (the original is borrowed)
-    let db_path = project_path.join(".vectorcode").join("index.db");
-    let sync_db = Database::open(&db_path).map_err(|e| anyhow::anyhow!("{e}"))?;
-
+    // Open a fresh DB handle for the indexer (SQLite handles concurrent access)
+    let sync_db = Database::open(db_path).map_err(|e| anyhow::anyhow!("{e}"))?;
     let indexer = Indexer::new(sync_db, embedder, cfg.indexing.clone());
 
-    // Use a blocking runtime context for the sync
+    // block_on is safe here because we are on a spawn_blocking thread,
+    // not the main async runtime.
     let rt = tokio::runtime::Handle::current();
     let report = rt.block_on(indexer.index_files(&changed_paths, project_path))?;
 
@@ -376,7 +398,10 @@ mod tests {
             debounce: 2000,
         };
         let result = rt.block_on(execute(&serve_args, project_path));
-        assert!(result.is_err(), "Should fail with Gemini provider missing key");
+        assert!(
+            result.is_err(),
+            "Should fail with Gemini provider missing key"
+        );
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("API key") || err.contains("GEMINI_API_KEY"),

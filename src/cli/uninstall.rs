@@ -238,8 +238,12 @@ mod tests {
         let config_path = dir.path().join("config.json");
 
         // Install
-        let installed =
-            crate::cli::install::install_for_agent(&AgentTarget::Opencode, &config_path, dir.path()).unwrap();
+        let installed = crate::cli::install::install_for_agent(
+            &AgentTarget::Opencode,
+            &config_path,
+            dir.path(),
+        )
+        .unwrap();
         assert!(installed);
 
         // Verify entry exists

@@ -95,7 +95,7 @@ pub fn resolve_project_path(cli_path: Option<&PathBuf>) -> PathBuf {
     }
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    
+
     // Walk up the tree looking for .vectorcode
     let mut current = cwd.as_path();
     loop {
@@ -107,7 +107,7 @@ pub fn resolve_project_path(cli_path: Option<&PathBuf>) -> PathBuf {
             None => break, // Reached root without finding it
         }
     }
-    
+
     // Fallback to cwd if not found anywhere (commands will handle the "not initialized" error)
     cwd
 }
@@ -282,10 +282,10 @@ mod tests {
         let temp_path = std::fs::canonicalize(temp.path()).unwrap();
         let prev_cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(&temp_path).unwrap();
-        
+
         let resolved = resolve_project_path(None);
         assert_eq!(resolved, temp_path);
-        
+
         std::env::set_current_dir(prev_cwd).unwrap();
     }
 
@@ -293,22 +293,22 @@ mod tests {
     fn resolve_project_path_finds_parent_dir() {
         let temp = tempfile::tempdir().unwrap();
         let project_root = std::fs::canonicalize(temp.path()).unwrap();
-        
+
         // Create .vectorcode in root
         std::fs::create_dir(project_root.join(".vectorcode")).unwrap();
-        
+
         // Create a deep subdirectory
         let deep_dir = project_root.join("src").join("cli").join("nested");
         std::fs::create_dir_all(&deep_dir).unwrap();
-        
+
         // Change cwd to deep directory
         let prev_cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(&deep_dir).unwrap();
-        
+
         // Resolve without explicit path should find the root
         let resolved = resolve_project_path(None);
         assert_eq!(resolved, project_root);
-        
+
         // Restore cwd
         std::env::set_current_dir(prev_cwd).unwrap();
     }
@@ -348,9 +348,8 @@ mod tests {
         // Deterministic: uses an empty temp dir — model not cached, so
         // ModelManager returns an error before reaching ONNX Runtime init.
         let empty_dir = tempfile::tempdir().unwrap();
-        let result = crate::embedder::onnx::OnnxEmbedder::from_model_dir(
-            empty_dir.path().to_path_buf(),
-        );
+        let result =
+            crate::embedder::onnx::OnnxEmbedder::from_model_dir(empty_dir.path().to_path_buf());
         assert!(result.is_err());
         let err_msg = format!("{}", result.err().unwrap());
         assert!(
@@ -365,9 +364,8 @@ mod tests {
         // Deterministic: empty model dir → error, verify it's the right
         // error variant (EmbedderError, not a panic or unexpected type).
         let empty_dir = tempfile::tempdir().unwrap();
-        let result = crate::embedder::onnx::OnnxEmbedder::from_model_dir(
-            empty_dir.path().to_path_buf(),
-        );
+        let result =
+            crate::embedder::onnx::OnnxEmbedder::from_model_dir(empty_dir.path().to_path_buf());
         assert!(result.is_err());
         let err_msg = format!("{}", result.err().unwrap());
         assert!(

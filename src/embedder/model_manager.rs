@@ -25,7 +25,10 @@ const MODEL_FILENAME: &str = "model.onnx";
 /// HuggingFace path for the quantized ONNX model, selected by platform.
 /// Falls back to the unquantized `onnx/model.onnx` (~90MB) if no quantized variant matches.
 const ONNX_MODEL_PATH: &str = {
-    if cfg!(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux"))) {
+    if cfg!(all(
+        target_arch = "aarch64",
+        any(target_os = "macos", target_os = "linux")
+    )) {
         "onnx/model_qint8_arm64.onnx" // ~23MB, optimized for ARM64
     } else if cfg!(all(
         target_arch = "x86_64",

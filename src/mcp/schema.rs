@@ -13,6 +13,8 @@ pub struct JsonRpcRequest {
     /// Must be "2.0".
     pub jsonrpc: String,
     /// Request identifier (string or number).
+    /// Notifications omit this field per JSON-RPC 2.0 §4.1.
+    #[serde(default)]
     pub id: serde_json::Value,
     /// Method name (e.g., "initialize", "tools/list", "tools/call").
     pub method: String,

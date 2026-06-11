@@ -437,8 +437,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("opencode.json");
 
-        let result =
-            install_for_agent(&AgentTarget::Opencode, &config_path, dir.path()).unwrap();
+        let result = install_for_agent(&AgentTarget::Opencode, &config_path, dir.path()).unwrap();
         assert!(result, "Should return true when config is created");
 
         assert!(config_path.exists(), "Config file should be created");
@@ -470,13 +469,11 @@ mod tests {
         let config_path = dir.path().join("config.json");
 
         // First install
-        let result1 =
-            install_for_agent(&AgentTarget::Cursor, &config_path, dir.path()).unwrap();
+        let result1 = install_for_agent(&AgentTarget::Cursor, &config_path, dir.path()).unwrap();
         assert!(result1, "First install should modify config");
 
         // Second install — should detect already configured
-        let result2 =
-            install_for_agent(&AgentTarget::Cursor, &config_path, dir.path()).unwrap();
+        let result2 = install_for_agent(&AgentTarget::Cursor, &config_path, dir.path()).unwrap();
         assert!(!result2, "Second install should be idempotent (no changes)");
     }
 
@@ -526,7 +523,10 @@ mod tests {
         assert!(entry["command"].is_string(), "Should have command field");
         assert!(entry["args"].is_array(), "Should have args array");
         let args = entry["args"].as_array().unwrap();
-        assert!(args.len() >= 4, "Should have serve, --mcp, --project-path, and path");
+        assert!(
+            args.len() >= 4,
+            "Should have serve, --mcp, --project-path, and path"
+        );
         assert!(entry["env"].is_object(), "Should have env object");
     }
 
@@ -578,7 +578,7 @@ mod tests {
         // Guard: if !force && skill_path.exists() { skip write }
         // force=false, exists=true → should NOT write
         let _force = false; // guard condition: only write if force || !exists
-        // Verify existing content preserved
+                            // Verify existing content preserved
         let content = std::fs::read_to_string(&skill_path).unwrap();
         assert_eq!(
             content, "existing content",

@@ -77,11 +77,11 @@ impl McpServer {
 
             debug!("Received method: {}", request.method);
 
-            // Dispatch to handler
-            let response = self.dispatch(request).await;
-
-            // Write response to stdout
-            self.transport.write_message(&response).await?;
+            // Dispatch to handler (returns None for notifications)
+            if let Some(response) = self.dispatch(request).await {
+                // Write response to stdout
+                self.transport.write_message(&response).await?;
+            }
         }
 
         info!("MCP server shut down cleanly");
@@ -89,10 +89,19 @@ impl McpServer {
     }
 
     /// Dispatch a JSON-RPC request to the appropriate handler.
-    async fn dispatch(&self, request: JsonRpcRequest) -> serde_json::Value {
+    ///
+    /// Returns `None` for notifications (no `id` field per JSON-RPC 2.0 §4.1).
+    /// Returns `Some(response)` for requests that expect a response.
+    async fn dispatch(&self, request: JsonRpcRequest) -> Option<serde_json::Value> {
+        // JSON-RPC 2.0 §4.1: notifications have no "id" and MUST NOT receive a response
+        if request.id.is_null() {
+            debug!("Received notification: {}", request.method);
+            return None;
+        }
+
         let id = request.id.clone();
 
-        match request.method.as_str() {
+        let response = match request.method.as_str() {
             "initialize" => {
                 let result = handler::handle_initialize();
                 serde_json::to_value(make_response(id, serde_json::to_value(result).unwrap()))
@@ -115,10 +124,10 @@ impl McpServer {
                     .unwrap()
             }
             "notifications/initialized" => {
-                // Notification — no response needed, but we send an ack
-                // Actually, notifications don't get responses in JSON-RPC.
-                // But MCP clients may expect something. Let's return a minimal response.
-                debug!("Received notifications/initialized");
+                // JSON-RPC notification — clients send this after initialize handshake.
+                // Per JSON-RPC 2.0 §4.1 we do NOT send a response.
+                // The early null-id check above already handles this for well-behaved clients.
+                debug!("Received notifications/initialized (unexpected id present)");
                 serde_json::to_value(make_response(id, serde_json::json!({}))).unwrap()
             }
             other => {
@@ -126,6 +135,8 @@ impl McpServer {
                 serde_json::to_value(make_error(id, -32601, format!("Method not found: {other}")))
                     .unwrap()
             }
-        }
+        };
+
+        Some(response)
     }
 }

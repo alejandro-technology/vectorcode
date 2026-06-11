@@ -44,7 +44,7 @@ pub type ProgressCallback = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Orchestrates the full and incremental indexing pipeline (spec §9).
 pub struct Indexer {
-    db: Database,
+    db: Arc<std::sync::Mutex<Database>>,
     embedder: Arc<dyn Embedder>,
     config: IndexingConfig,
     progress: Option<ProgressCallback>,
@@ -52,7 +52,11 @@ pub struct Indexer {
 
 impl Indexer {
     /// Create a new Indexer with the given database, embedder, and config.
-    pub fn new(db: Database, embedder: Arc<dyn Embedder>, config: IndexingConfig) -> Self {
+    pub fn new(
+        db: Arc<std::sync::Mutex<Database>>,
+        embedder: Arc<dyn Embedder>,
+        config: IndexingConfig,
+    ) -> Self {
         Self {
             db,
             embedder,
@@ -101,7 +105,7 @@ impl Indexer {
 
         // Step 2: Process files — chunk and detect changes
         let (new_chunks, files_indexed, chunks_skipped) =
-            self.process_file_entries(&file_paths, project_path)?;
+            self.process_file_entries(&file_paths, project_path).await?;
 
         let chunks_new = new_chunks.len();
         self.report_progress(&format!(
@@ -127,20 +131,24 @@ impl Indexer {
                 .into());
             }
 
+            let db = self.db.lock().unwrap();
+            db.conn().execute("BEGIN", [])?;
             for (chunk, embedding) in new_chunks.iter().zip(embeddings.iter()) {
-                chunks::insert_chunk(self.db.conn(), chunk)?;
-                vectors::insert_vector(self.db.conn(), &chunk.id, embedding)?;
+                chunks::insert_chunk(db.conn(), chunk)?;
+                vectors::insert_vector(db.conn(), &chunk.id, embedding)?;
             }
+            db.conn().execute("COMMIT", [])?;
         }
 
         // Clean stale chunks (files that no longer exist on disk)
-        let _stale = chunks::delete_stale_chunks(self.db.conn(), &valid_paths)?;
+        let _stale = chunks::delete_stale_chunks(self.db.lock().unwrap().conn(), &valid_paths)?;
 
         // Count total chunks in DB
-        let chunks_total: i64 =
-            self.db
-                .conn()
-                .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
+        let chunks_total: i64 = {
+            let db = self.db.lock().unwrap();
+            db.conn()
+                .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?
+        };
 
         let duration = start.elapsed();
         self.report_progress(&format!(
@@ -173,7 +181,7 @@ impl Indexer {
         let files_scanned = file_paths.len();
 
         let (new_chunks, files_indexed, chunks_skipped) =
-            self.process_file_entries(file_paths, project_path)?;
+            self.process_file_entries(file_paths, project_path).await?;
 
         let chunks_new = new_chunks.len();
 
@@ -193,17 +201,21 @@ impl Indexer {
                 .into());
             }
 
+            let db = self.db.lock().unwrap();
+            db.conn().execute("BEGIN", [])?;
             for (chunk, embedding) in new_chunks.iter().zip(embeddings.iter()) {
-                chunks::insert_chunk(self.db.conn(), chunk)?;
-                vectors::insert_vector(self.db.conn(), &chunk.id, embedding)?;
+                chunks::insert_chunk(db.conn(), chunk)?;
+                vectors::insert_vector(db.conn(), &chunk.id, embedding)?;
             }
+            db.conn().execute("COMMIT", [])?;
         }
 
         // Count total chunks in DB
-        let chunks_total: i64 =
-            self.db
-                .conn()
-                .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
+        let chunks_total: i64 = {
+            let db = self.db.lock().unwrap();
+            db.conn()
+                .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?
+        };
 
         let duration = start.elapsed();
 
@@ -220,7 +232,7 @@ impl Indexer {
     /// Process a list of files: read, chunk, detect changes, collect new chunks.
     ///
     /// Returns (new_chunks, files_indexed, chunks_skipped).
-    fn process_file_entries(
+    async fn process_file_entries(
         &self,
         file_paths: &[PathBuf],
         project_path: &Path,
@@ -228,6 +240,11 @@ impl Indexer {
         let mut new_chunks: Vec<Chunk> = Vec::new();
         let mut files_indexed = 0;
         let mut chunks_skipped = 0;
+
+        {
+            let db = self.db.lock().unwrap();
+            db.conn().execute("BEGIN", [])?;
+        }
 
         for file_path in file_paths {
             let relative_path = file_path
@@ -237,7 +254,7 @@ impl Indexer {
                 .to_string();
 
             // Get file metadata
-            let metadata = match std::fs::metadata(file_path) {
+            let metadata = match tokio::fs::metadata(file_path).await {
                 Ok(m) => m,
                 Err(_) => continue,
             };
@@ -258,17 +275,20 @@ impl Indexer {
             let size = metadata.len() as i64;
 
             // Read file content (skip binary/unreadable files)
-            let content = match std::fs::read_to_string(file_path) {
+            let content = match tokio::fs::read_to_string(file_path).await {
                 Ok(c) => c,
                 Err(_) => continue,
             };
             let content_hash = compute_content_hash(&content);
 
+            let mut db_guard = self.db.lock().unwrap();
+            let db_conn = db_guard.conn_mut();
+
             // Get existing chunks for this file
-            let existing_chunks = chunks::list_chunks_by_file(self.db.conn(), &relative_path)?;
+            let existing_chunks = chunks::list_chunks_by_file(db_conn, &relative_path)?;
 
             // Check if file is unchanged (mtime + size + hash all match)
-            if let Some(file_record) = files::get_file(self.db.conn(), &relative_path)? {
+            if let Some(file_record) = files::get_file(db_conn, &relative_path)? {
                 if file_record.mtime == mtime
                     && file_record.size == size
                     && file_record.hash == content_hash
@@ -290,14 +310,14 @@ impl Indexer {
             // Delete old chunks that are no longer present in the file
             for old_chunk in &existing_chunks {
                 if !new_chunk_ids.contains(&old_chunk.id) {
-                    chunks::delete_chunk(self.db.conn(), &old_chunk.id)?;
+                    chunks::delete_chunk(db_conn, &old_chunk.id)?;
                 }
             }
 
             // Filter out chunks that already exist with the same content hash
             let mut file_new_chunks = Vec::new();
             for mut chunk in file_chunks {
-                if chunks::chunk_exists_with_hash(self.db.conn(), &chunk.id, &chunk.content_hash)? {
+                if chunks::chunk_exists_with_hash(db_conn, &chunk.id, &chunk.content_hash)? {
                     chunks_skipped += 1;
                     continue;
                 }
@@ -315,14 +335,12 @@ impl Indexer {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64;
-            files::upsert_file(
-                self.db.conn(),
-                &relative_path,
-                mtime,
-                size,
-                &content_hash,
-                now,
-            )?;
+            files::upsert_file(db_conn, &relative_path, mtime, size, &content_hash, now)?;
+        }
+
+        {
+            let db = self.db.lock().unwrap();
+            db.conn().execute("COMMIT", [])?;
         }
 
         Ok((new_chunks, files_indexed, chunks_skipped))
@@ -410,7 +428,11 @@ mod tests {
         let db = setup_test_db();
         let embedder = Arc::new(MockEmbedder::new(64));
         let config = IndexingConfig::default();
-        Indexer::new(db, embedder, config)
+        Indexer::new(
+            std::sync::Arc::new(std::sync::Mutex::new(db)),
+            embedder,
+            config,
+        )
     }
 
     /// Create a minimal TypeScript file that produces at least one chunk (>100 bytes).
@@ -665,7 +687,8 @@ def filter_active_users(users: list) -> list:
         );
 
         // Verify chunks are in the DB
-        let all_chunks = chunks::list_chunks_by_file(indexer.db.conn(), "app.ts").unwrap();
+        let all_chunks =
+            chunks::list_chunks_by_file(indexer.db.lock().unwrap().conn(), "app.ts").unwrap();
         assert!(
             !all_chunks.is_empty(),
             "Chunks should be stored in DB for app.ts"
@@ -744,8 +767,10 @@ def filter_active_users(users: list) -> list:
         assert!(report.chunks_new >= 1, "Should produce new chunks");
 
         // Verify only a.ts has chunks
-        let a_chunks = chunks::list_chunks_by_file(indexer.db.conn(), "a.ts").unwrap();
-        let b_chunks = chunks::list_chunks_by_file(indexer.db.conn(), "b.ts").unwrap();
+        let a_chunks =
+            chunks::list_chunks_by_file(indexer.db.lock().unwrap().conn(), "a.ts").unwrap();
+        let b_chunks =
+            chunks::list_chunks_by_file(indexer.db.lock().unwrap().conn(), "b.ts").unwrap();
         assert!(!a_chunks.is_empty(), "a.ts should have chunks");
         assert!(b_chunks.is_empty(), "b.ts should NOT have chunks");
     }
@@ -767,8 +792,10 @@ def filter_active_users(users: list) -> list:
         );
 
         // Verify both languages are stored
-        let ts_chunks = chunks::list_chunks_by_file(indexer.db.conn(), "app.ts").unwrap();
-        let py_chunks = chunks::list_chunks_by_file(indexer.db.conn(), "main.py").unwrap();
+        let ts_chunks =
+            chunks::list_chunks_by_file(indexer.db.lock().unwrap().conn(), "app.ts").unwrap();
+        let py_chunks =
+            chunks::list_chunks_by_file(indexer.db.lock().unwrap().conn(), "main.py").unwrap();
         assert!(!ts_chunks.is_empty(), "Should have TypeScript chunks");
         assert!(!py_chunks.is_empty(), "Should have Python chunks");
     }
@@ -795,13 +822,15 @@ def filter_active_users(users: list) -> list:
         indexer.index_project(dir.path()).await.unwrap();
 
         // Verify vectors are stored by searching
-        let ts_chunks = chunks::list_chunks_by_file(indexer.db.conn(), "app.ts").unwrap();
+        let ts_chunks =
+            chunks::list_chunks_by_file(indexer.db.lock().unwrap().conn(), "app.ts").unwrap();
         assert!(!ts_chunks.is_empty());
 
         // Each chunk should have a corresponding vector
         for chunk in &ts_chunks {
             let results =
-                vectors::search_similar(indexer.db.conn(), &[0.0; 64], 100, -1.0).unwrap();
+                vectors::search_similar(indexer.db.lock().unwrap().conn(), &[0.0; 64], 100, -1.0)
+                    .unwrap();
             let found = results.iter().any(|r| r.file_path == chunk.file_path);
             assert!(found, "Chunk {} should have a stored vector", chunk.id);
         }

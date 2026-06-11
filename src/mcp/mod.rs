@@ -24,7 +24,7 @@ use self::transport::McpTransport;
 
 /// Shared application state accessible by MCP tool handlers.
 pub struct AppState {
-    pub db: Database,
+    pub db: Arc<std::sync::Mutex<Database>>,
     pub embedder: Arc<dyn Embedder>,
     pub config: Config,
     pub project_path: PathBuf,
@@ -100,7 +100,7 @@ impl McpServer {
                 -32600,
                 "Invalid Request: jsonrpc must be '2.0'".to_string(),
             );
-            return Some(serde_json::to_value(error_resp).unwrap());
+            return Some(serde_json::to_value(error_resp).unwrap_or_default());
         }
 
         // JSON-RPC 2.0 §4.1: notifications have no "id" and MUST NOT receive a response
@@ -114,13 +114,23 @@ impl McpServer {
         let response = match request.method.as_str() {
             "initialize" => {
                 let result = handler::handle_initialize();
-                serde_json::to_value(make_response(id, serde_json::to_value(result).unwrap()))
-                    .unwrap()
+                match serde_json::to_value(result) {
+                    Ok(val) => serde_json::to_value(make_response(id, val)).unwrap_or_default(),
+                    Err(e) => {
+                        serde_json::to_value(make_error(id, -32603, format!("Internal error: {e}")))
+                            .unwrap_or_default()
+                    }
+                }
             }
             "tools/list" => {
                 let result = handler::handle_tools_list();
-                serde_json::to_value(make_response(id, serde_json::to_value(result).unwrap()))
-                    .unwrap()
+                match serde_json::to_value(result) {
+                    Ok(val) => serde_json::to_value(make_response(id, val)).unwrap_or_default(),
+                    Err(e) => {
+                        serde_json::to_value(make_error(id, -32603, format!("Internal error: {e}")))
+                            .unwrap_or_default()
+                    }
+                }
             }
             "tools/call" => {
                 // Extract tool name and arguments from params
@@ -130,8 +140,13 @@ impl McpServer {
                 let state = self.state.lock().await;
                 let result = handler::handle_tool_call(tool_name, arguments, &state).await;
 
-                serde_json::to_value(make_response(id, serde_json::to_value(result).unwrap()))
-                    .unwrap()
+                match serde_json::to_value(result) {
+                    Ok(val) => serde_json::to_value(make_response(id, val)).unwrap_or_default(),
+                    Err(e) => {
+                        serde_json::to_value(make_error(id, -32603, format!("Internal error: {e}")))
+                            .unwrap_or_default()
+                    }
+                }
             }
             "notifications/initialized" => {
                 // JSON-RPC notification — clients send this after initialize handshake.
@@ -147,7 +162,7 @@ impl McpServer {
                 }
                 warn!("Unknown method: {other}");
                 serde_json::to_value(make_error(id, -32601, format!("Method not found: {other}")))
-                    .unwrap()
+                    .unwrap_or_default()
             }
         };
 

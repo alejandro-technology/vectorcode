@@ -112,8 +112,11 @@ pub async fn execute(args: &IndexArgs, project_path: &std::path::Path, quiet: bo
 
     eprintln!("DEBUG: embedder created.");
     // Create indexer and run
-    let indexer =
-        crate::engine::Indexer::new(Database::open(&db_path)?, embedder, config.indexing.clone());
+    let indexer = crate::engine::Indexer::new(
+        std::sync::Arc::new(std::sync::Mutex::new(Database::open(&db_path)?)),
+        embedder,
+        config.indexing.clone(),
+    );
 
     // Set up progress callback for CLI mode (visual progress bars)
     let progress_bar = if quiet {

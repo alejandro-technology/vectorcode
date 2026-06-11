@@ -75,8 +75,11 @@ pub async fn execute(args: &SearchArgs, project_path: &std::path::Path, quiet: b
         };
 
     // Create searcher
-    let searcher =
-        crate::engine::Searcher::new(Database::open(&db_path)?, embedder, config.search.clone());
+    let searcher = crate::engine::Searcher::new(
+        std::sync::Arc::new(std::sync::Mutex::new(Database::open(&db_path)?)),
+        embedder,
+        config.search.clone(),
+    );
 
     // Build search options
     let options = SearchOptions {

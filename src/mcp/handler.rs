@@ -76,12 +76,7 @@ async fn handle_vec_search(state: &AppState, arguments: &serde_json::Value) -> T
 
     // Create searcher and execute search
     let searcher = Searcher::new(
-        // We need a new Database handle — SQLite doesn't support shared connections
-        // across threads easily. For the MCP server, we open a new connection.
-        match open_db_for_state(state) {
-            Ok(db) => db,
-            Err(e) => return make_error_result(format!("Database error: {e}")),
-        },
+        state.db.clone(),
         state.embedder.clone(),
         state.config.search.clone(),
     );
@@ -126,7 +121,8 @@ fn handle_vec_status(state: &AppState, arguments: &serde_json::Value) -> ToolCal
     let _params: VecStatusParams =
         serde_json::from_value(arguments.clone()).unwrap_or(VecStatusParams { project_path: None });
 
-    match meta::read_index_meta(state.db.conn()) {
+    let db = state.db.lock().unwrap();
+    match meta::read_index_meta(db.conn()) {
         Ok(Some(index_meta)) => {
             let text = format_status_text(&index_meta);
             make_text_result(text)
@@ -148,19 +144,19 @@ async fn handle_vec_reindex(state: &AppState, arguments: &serde_json::Value) -> 
             full: false,
         });
 
-    let db = match open_db_for_state(state) {
-        Ok(db) => db,
-        Err(e) => return make_error_result(format!("Database error: {e}")),
-    };
-
     // If full reindex requested, reinitialize the schema
     if params.full {
+        let db = state.db.lock().unwrap();
         if let Err(e) = db.init_schema(state.embedder.dimensions()) {
             return make_error_result(format!("Failed to reinitialize schema: {e}"));
         }
     }
 
-    let indexer = Indexer::new(db, state.embedder.clone(), state.config.indexing.clone());
+    let indexer = Indexer::new(
+        state.db.clone(),
+        state.embedder.clone(),
+        state.config.indexing.clone(),
+    );
 
     match indexer.index_project(&state.project_path).await {
         Ok(report) => {
@@ -186,16 +182,6 @@ async fn handle_vec_reindex(state: &AppState, arguments: &serde_json::Value) -> 
             make_error_result(format!("Re-indexing failed: {e}"))
         }
     }
-}
-
-/// Open a new database connection for the given state.
-///
-/// SQLite connections are not easily shared across async tasks, so we open
-/// a new connection for each tool call. This is safe because SQLite WAL mode
-/// supports concurrent readers.
-fn open_db_for_state(state: &AppState) -> anyhow::Result<crate::store::db::Database> {
-    let db_path = state.project_path.join(".vectorcode").join("index.db");
-    crate::store::db::Database::open(&db_path).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// Build a staleness banner if any search result files have pending changes (spec §14.2).
@@ -274,7 +260,7 @@ mod tests {
         crate::store::meta::write_index_meta(db.conn(), &meta).unwrap();
 
         AppState {
-            db,
+            db: std::sync::Arc::new(std::sync::Mutex::new(db)),
             embedder: Arc::new(MockEmbedder::new(64)),
             config: Config::default(),
             project_path: std::path::PathBuf::from("/tmp/test-project"),
@@ -392,7 +378,7 @@ mod tests {
         db.init_schema(64).unwrap();
         // Don't write meta — simulate uninitialized index
         let state = AppState {
-            db,
+            db: std::sync::Arc::new(std::sync::Mutex::new(db)),
             embedder: Arc::new(MockEmbedder::new(64)),
             config: Config::default(),
             project_path: std::path::PathBuf::from("/tmp"),

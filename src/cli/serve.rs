@@ -111,7 +111,7 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
 
     // Create AppState and McpServer
     let state = AppState {
-        db,
+        db: Arc::new(std::sync::Mutex::new(db)),
         embedder: embedder.clone(),
         config: cfg.clone(),
         project_path: project_path.to_path_buf(),
@@ -231,7 +231,11 @@ fn run_connect_time_catchup(
 
     // Open a fresh DB handle for the indexer (SQLite handles concurrent access)
     let sync_db = Database::open(db_path).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let indexer = Indexer::new(sync_db, embedder, cfg.indexing.clone());
+    let indexer = Indexer::new(
+        std::sync::Arc::new(std::sync::Mutex::new(sync_db)),
+        embedder,
+        cfg.indexing.clone(),
+    );
 
     // block_on is safe here because we are on a spawn_blocking thread,
     // not the main async runtime.
@@ -349,7 +353,11 @@ async fn run_watcher_background(
 
         let sync_result = tokio::task::spawn_blocking(move || {
             let sync_db = Database::open(&db_path_clone)?;
-            let indexer = Indexer::new(sync_db, embedder_clone, indexing_config_clone);
+            let indexer = Indexer::new(
+                std::sync::Arc::new(std::sync::Mutex::new(sync_db)),
+                embedder_clone,
+                indexing_config_clone,
+            );
 
             // Create a local runtime for the async index_files call
             let rt = tokio::runtime::Handle::current();

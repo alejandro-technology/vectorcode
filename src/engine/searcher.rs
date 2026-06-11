@@ -39,14 +39,18 @@ impl Default for SearchOptions {
 
 /// Semantic search engine over indexed code chunks (spec §10).
 pub struct Searcher {
-    db: Database,
+    db: Arc<std::sync::Mutex<Database>>,
     embedder: Arc<dyn Embedder>,
     config: SearchConfig,
 }
 
 impl Searcher {
     /// Create a new Searcher with the given database, embedder, and config.
-    pub fn new(db: Database, embedder: Arc<dyn Embedder>, config: SearchConfig) -> Self {
+    pub fn new(
+        db: Arc<std::sync::Mutex<Database>>,
+        embedder: Arc<dyn Embedder>,
+        config: SearchConfig,
+    ) -> Self {
         Self {
             db,
             embedder,
@@ -71,7 +75,7 @@ impl Searcher {
     /// 3. Performs vector similarity search
     /// 4. Applies language and path filters
     /// 5. Returns ranked results above threshold
-    pub async fn search(&self, query: &str, options: SearchOptions) -> Result<Vec<SearchResult>> {
+    pub async fn search(self, query: &str, options: SearchOptions) -> Result<Vec<SearchResult>> {
         // Step 1: Enrich query for better embedding
         let enriched = enrich_query(query);
 
@@ -86,9 +90,13 @@ impl Searcher {
             options.limit
         };
         let fetch_limit = fetch_limit.max(50);
+        let threshold = options.threshold;
 
-        let mut results =
-            vectors::search_similar(self.db.conn(), &query_vec, fetch_limit, options.threshold)?;
+        let mut results = tokio::task::spawn_blocking(move || {
+            let db = self.db.lock().unwrap();
+            vectors::search_similar(db.conn(), &query_vec, fetch_limit, threshold)
+        })
+        .await??;
 
         // Step 4: Filter by language
         if let Some(lang) = &options.language {
@@ -140,7 +148,11 @@ mod tests {
         let db = setup_test_db();
         let embedder = Arc::new(MockEmbedder::new(64));
         let config = SearchConfig::default();
-        Searcher::new(db, embedder, config)
+        Searcher::new(
+            std::sync::Arc::new(std::sync::Mutex::new(db)),
+            embedder,
+            config,
+        )
     }
 
     /// Insert a chunk and its vector into the database.
@@ -226,7 +238,11 @@ mod tests {
             default_limit: 25,
             default_threshold: 0.5,
         };
-        let searcher = Searcher::new(db, embedder, config);
+        let searcher = Searcher::new(
+            std::sync::Arc::new(std::sync::Mutex::new(db)),
+            embedder,
+            config,
+        );
         let opts = searcher.default_search_options();
         assert_eq!(opts.limit, 25);
         assert!((opts.threshold - 0.5).abs() < f32::EPSILON);
@@ -251,7 +267,11 @@ mod tests {
         .await;
 
         let config = SearchConfig::default();
-        let searcher = Searcher::new(db, embedder.clone(), config);
+        let searcher = Searcher::new(
+            std::sync::Arc::new(std::sync::Mutex::new(db)),
+            embedder.clone(),
+            config,
+        );
 
         // Search with the exact same content — should find it (self-similarity = 1.0)
         let options = SearchOptions {
@@ -311,7 +331,11 @@ mod tests {
         .await;
 
         let config = SearchConfig::default();
-        let searcher = Searcher::new(db, embedder.clone(), config);
+        let searcher = Searcher::new(
+            std::sync::Arc::new(std::sync::Mutex::new(db)),
+            embedder.clone(),
+            config,
+        );
 
         // Search with language filter for TypeScript only
         let options = SearchOptions {
@@ -363,7 +387,11 @@ mod tests {
         .await;
 
         let config = SearchConfig::default();
-        let searcher = Searcher::new(db, embedder.clone(), config);
+        let searcher = Searcher::new(
+            std::sync::Arc::new(std::sync::Mutex::new(db)),
+            embedder.clone(),
+            config,
+        );
 
         let options = SearchOptions {
             path: Some("src/auth/".to_string()),
@@ -411,7 +439,11 @@ mod tests {
         }
 
         let config = SearchConfig::default();
-        let searcher = Searcher::new(db, embedder.clone(), config);
+        let searcher = Searcher::new(
+            std::sync::Arc::new(std::sync::Mutex::new(db)),
+            embedder.clone(),
+            config,
+        );
 
         let options = SearchOptions {
             limit: 2,
@@ -450,7 +482,11 @@ mod tests {
         .await;
 
         let config = SearchConfig::default();
-        let searcher = Searcher::new(db, embedder.clone(), config);
+        let searcher = Searcher::new(
+            std::sync::Arc::new(std::sync::Mutex::new(db)),
+            embedder.clone(),
+            config,
+        );
 
         // Use a very high threshold that should filter everything
         let options = SearchOptions {
@@ -500,7 +536,11 @@ mod tests {
         }
 
         let config = SearchConfig::default();
-        let searcher = Searcher::new(db, embedder.clone(), config);
+        let searcher = Searcher::new(
+            std::sync::Arc::new(std::sync::Mutex::new(db)),
+            embedder.clone(),
+            config,
+        );
 
         let options = SearchOptions {
             threshold: 0.0,

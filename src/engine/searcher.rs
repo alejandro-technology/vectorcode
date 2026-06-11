@@ -81,7 +81,7 @@ impl Searcher {
         // Step 3: Vector similarity search
         // Request extra results when post-filtering is needed
         let fetch_limit = if options.language.is_some() || options.path.is_some() {
-            options.limit * 5
+            options.limit.saturating_mul(5)
         } else {
             options.limit
         };

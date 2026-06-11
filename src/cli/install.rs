@@ -113,6 +113,30 @@ pub enum AgentTarget {
     Antigravity,
 }
 
+/// Return the platform-appropriate OpenCode config directory.
+#[cfg(target_os = "macos")]
+fn opencode_config_dir() -> Option<std::path::PathBuf> {
+    Some(dirs::home_dir()?.join("Library/Application Support/opencode"))
+}
+
+/// Return the platform-appropriate OpenCode config directory.
+#[cfg(not(target_os = "macos"))]
+fn opencode_config_dir() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|d| d.join("opencode"))
+}
+
+/// Return the platform-appropriate Cursor MCP config path.
+fn cursor_config_path() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(dirs::home_dir()?.join(".cursor/mcp.json"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        dirs::config_dir().map(|d| d.join("cursor/mcp.json"))
+    }
+}
+
 impl AgentTarget {
     pub fn display_name(&self) -> &'static str {
         match self {
@@ -126,8 +150,8 @@ impl AgentTarget {
 
     /// Get the config file path for this agent.
     pub(crate) fn config_path(&self) -> Option<std::path::PathBuf> {
-        let home = std::env::var("HOME").ok()?;
-        let home = std::path::Path::new(&home);
+        let home = std::env::var("HOME").ok();
+        let home_path = home.as_ref().map(|h| std::path::Path::new(h).to_path_buf());
 
         match self {
             Self::Opencode => {
@@ -136,18 +160,18 @@ impl AgentTarget {
                 if local.exists() {
                     return Some(local.to_path_buf());
                 }
-                Some(home.join(".config/opencode/opencode.json"))
+                opencode_config_dir().map(|d| d.join("opencode.json"))
             }
-            Self::ClaudeCode => Some(home.join(".claude/claude_desktop_config.json")),
+            Self::ClaudeCode => home_path.map(|h| h.join(".claude/claude_desktop_config.json")),
             Self::Cursor => {
                 let local = std::path::Path::new(".cursor/mcp.json");
                 if local.exists() {
                     return Some(local.to_path_buf());
                 }
-                Some(home.join(".cursor/mcp.json"))
+                cursor_config_path()
             }
-            Self::GeminiCli => Some(home.join(".gemini/settings.json")),
-            Self::Antigravity => Some(home.join(".gemini/antigravity/settings.json")),
+            Self::GeminiCli => home_path.map(|h| h.join(".gemini/settings.json")),
+            Self::Antigravity => home_path.map(|h| h.join(".gemini/antigravity/settings.json")),
         }
     }
 
@@ -327,7 +351,24 @@ pub(crate) fn install_for_agent(
     // Read existing config or create empty
     let mut config: serde_json::Value = if config_path.exists() {
         let content = std::fs::read_to_string(config_path)?;
-        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+        match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                let backup_path = config_path.with_extension("json.bak");
+                std::fs::write(&backup_path, &content)?;
+                tracing::warn!(
+                    "Config file {} is invalid JSON ({}). Backed up to {}",
+                    config_path.display(),
+                    e,
+                    backup_path.display()
+                );
+                return Err(anyhow::anyhow!(
+                    "Agent config at {} is not valid JSON. A backup was created at {}. Fix the config manually and retry.",
+                    config_path.display(),
+                    backup_path.display()
+                ));
+            }
+        }
     } else {
         serde_json::json!({})
     };
@@ -356,9 +397,11 @@ pub(crate) fn install_for_agent(
         std::fs::create_dir_all(parent)?;
     }
 
-    // Write config
+    // Write config atomically: write to .tmp first, then rename
     let json = serde_json::to_string_pretty(&config)?;
-    std::fs::write(config_path, json)?;
+    let tmp_path = config_path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, &json)?;
+    std::fs::rename(&tmp_path, config_path)?;
 
     info!(
         "Installed VectorCode for {} at {}",

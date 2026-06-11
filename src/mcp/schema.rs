@@ -13,9 +13,9 @@ pub struct JsonRpcRequest {
     /// Must be "2.0".
     pub jsonrpc: String,
     /// Request identifier (string or number).
-    /// Notifications omit this field per JSON-RPC 2.0 §4.1.
-    #[serde(default)]
-    pub id: serde_json::Value,
+    /// `None` means notification — no response per JSON-RPC 2.0 §4.1.
+    /// `Some(Value::Null)` means explicit `"id": null` which MUST receive a response.
+    pub id: Option<serde_json::Value>,
     /// Method name (e.g., "initialize", "tools/list", "tools/call").
     pub method: String,
     /// Optional parameters.
@@ -363,7 +363,7 @@ mod tests {
         let json = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
         let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.jsonrpc, "2.0");
-        assert_eq!(req.id, serde_json::json!(1));
+        assert_eq!(req.id, Some(serde_json::json!(1)));
         assert_eq!(req.method, "initialize");
     }
 
@@ -372,7 +372,7 @@ mod tests {
         let json = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#;
         let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.method, "tools/list");
-        assert_eq!(req.id, serde_json::json!(2));
+        assert_eq!(req.id, Some(serde_json::json!(2)));
     }
 
     #[test]
@@ -389,7 +389,7 @@ mod tests {
     fn json_rpc_request_deserialize_string_id() {
         let json = r#"{"jsonrpc":"2.0","id":"abc-123","method":"initialize","params":{}}"#;
         let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.id, serde_json::json!("abc-123"));
+        assert_eq!(req.id, Some(serde_json::json!("abc-123")));
     }
 
     #[test]

@@ -52,6 +52,21 @@ pub async fn execute(args: &InitArgs, project_path: &std::path::Path, quiet: boo
         );
     }
 
+    // Acquire an exclusive lock file to prevent concurrent init (TOCTOU guard).
+    // The lock is created before any mutations and held until the function returns.
+    // We use a parent-level lock since vc_dir doesn't exist yet.
+    let lock_path = project_path.join(".vectorcode.init.lock");
+    let _lock = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Another init is running or a stale lock exists at {}. Remove it and retry.",
+                lock_path.display()
+            )
+        })?;
+
     // Resolve provider: use CLI arg if given, otherwise interactive prompt
     let provider = match &args.provider {
         Some(p) => p.clone(),
@@ -148,6 +163,10 @@ pub async fn execute(args: &InitArgs, project_path: &std::path::Path, quiet: boo
             );
         }
     }
+
+    // Clean up the lock file on success
+    drop(_lock);
+    let _ = std::fs::remove_file(&lock_path);
 
     Ok(())
 }
@@ -314,7 +333,6 @@ model = "{model}"
 max_file_size = 1_048_576
 exclude_dirs = [".vectorcode", ".git", "node_modules", "target", "__pycache__", "vendor", "dist", "build", ".next"]
 exclude_extensions = [".min.js", ".map", ".lock", ".svg", ".png", ".jpg", ".ico", ".woff", ".woff2", ".ttf"]
-concurrency = 8
 
 [watcher]
 debounce_ms = 2000

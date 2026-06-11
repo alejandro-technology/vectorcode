@@ -58,6 +58,39 @@ pub fn delete_chunk(conn: &Connection, id: &str) -> Result<(), VectorCodeError> 
     Ok(())
 }
 
+/// Delete all chunks (and associated vectors) for a given file path.
+///
+/// Returns the number of chunks deleted.
+pub fn delete_chunks_for_file(
+    conn: &Connection,
+    file_path: &str,
+) -> Result<usize, VectorCodeError> {
+    let has_vec = crate::store::vectors::has_vec_extension(conn);
+
+    if has_vec {
+        // Delete vec_chunks rows via chunk_vec_map mapping
+        conn.execute(
+            "DELETE FROM vec_chunks WHERE rowid IN (
+                SELECT vec_rowid FROM chunk_vec_map
+                WHERE chunk_id IN (SELECT id FROM chunks WHERE file_path = ?1)
+            )",
+            [file_path],
+        )?;
+        conn.execute(
+            "DELETE FROM chunk_vec_map WHERE chunk_id IN (SELECT id FROM chunks WHERE file_path = ?1)",
+            [file_path],
+        )?;
+    } else {
+        conn.execute(
+            "DELETE FROM vectors_data WHERE chunk_id IN (SELECT id FROM chunks WHERE file_path = ?1)",
+            [file_path],
+        )?;
+    }
+
+    let count = conn.execute("DELETE FROM chunks WHERE file_path = ?1", [file_path])?;
+    Ok(count)
+}
+
 /// List all chunks for a given file path.
 pub fn list_chunks_by_file(
     conn: &Connection,
@@ -110,18 +143,23 @@ pub fn delete_stale_chunks(
     }
 
     let mut deleted = 0;
+    let has_vec = crate::store::vectors::has_vec_extension(conn);
     for path in &all_paths {
         if !valid_paths.contains(path) {
             // Delete vectors for chunks in this file
-            // Handle both vec_chunks and vectors_data paths
-            if crate::store::vectors::has_vec_extension(conn) {
-                // Delete from chunk_vec_map and vec_chunks for chunks in this file
+            if has_vec {
+                // Delete vec_chunks rows via chunk_vec_map mapping
+                conn.execute(
+                    "DELETE FROM vec_chunks WHERE rowid IN (
+                        SELECT vec_rowid FROM chunk_vec_map
+                        WHERE chunk_id IN (SELECT id FROM chunks WHERE file_path = ?1)
+                    )",
+                    [path],
+                )?;
                 conn.execute(
                     "DELETE FROM chunk_vec_map WHERE chunk_id IN (SELECT id FROM chunks WHERE file_path = ?1)",
                     [path],
                 )?;
-                // Note: vec_chunks rows are orphaned but will be cleaned up separately
-                // or we could delete them by rowid, but that requires a JOIN which is complex
             } else {
                 conn.execute(
                     "DELETE FROM vectors_data WHERE chunk_id IN (SELECT id FROM chunks WHERE file_path = ?1)",
@@ -132,6 +170,20 @@ pub fn delete_stale_chunks(
             deleted += count;
         }
     }
+
+    // Safety net: clean up any orphaned vec_chunks rows whose chunk_id no longer
+    // exists in chunks (catches edge cases from partial failures or prior bugs)
+    if has_vec {
+        conn.execute(
+            "DELETE FROM vec_chunks WHERE rowid IN (
+                SELECT vec_rowid FROM chunk_vec_map WHERE chunk_id NOT IN (
+                    SELECT id FROM chunks
+                )
+            )",
+            [],
+        )?;
+    }
+
     Ok(deleted)
 }
 

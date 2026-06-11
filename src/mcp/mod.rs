@@ -93,13 +93,23 @@ impl McpServer {
     /// Returns `None` for notifications (no `id` field per JSON-RPC 2.0 §4.1).
     /// Returns `Some(response)` for requests that expect a response.
     async fn dispatch(&self, request: JsonRpcRequest) -> Option<serde_json::Value> {
+        // JSON-RPC 2.0 §4.1: validate jsonrpc version
+        if request.jsonrpc != "2.0" {
+            let error_resp = make_error(
+                request.id.clone().unwrap_or(serde_json::Value::Null),
+                -32600,
+                "Invalid Request: jsonrpc must be '2.0'".to_string(),
+            );
+            return Some(serde_json::to_value(error_resp).unwrap());
+        }
+
         // JSON-RPC 2.0 §4.1: notifications have no "id" and MUST NOT receive a response
-        if request.id.is_null() {
+        if request.id.is_none() {
             debug!("Received notification: {}", request.method);
             return None;
         }
 
-        let id = request.id.clone();
+        let id = request.id.clone().unwrap();
 
         let response = match request.method.as_str() {
             "initialize" => {
@@ -126,11 +136,15 @@ impl McpServer {
             "notifications/initialized" => {
                 // JSON-RPC notification — clients send this after initialize handshake.
                 // Per JSON-RPC 2.0 §4.1 we do NOT send a response.
-                // The early null-id check above already handles this for well-behaved clients.
-                debug!("Received notifications/initialized (unexpected id present)");
-                serde_json::to_value(make_response(id, serde_json::json!({}))).unwrap()
+                debug!("Received notifications/initialized (id present, ignoring)");
+                return None;
             }
             other => {
+                let is_notification = other.starts_with("notifications/");
+                if is_notification {
+                    debug!("Received notification: {other}");
+                    return None;
+                }
                 warn!("Unknown method: {other}");
                 serde_json::to_value(make_error(id, -32601, format!("Method not found: {other}")))
                     .unwrap()

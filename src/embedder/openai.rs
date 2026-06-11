@@ -11,6 +11,7 @@ use crate::embedder::{Embedder, EmbedderResult};
 use crate::error::VectorCodeError;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 /// Maximum items per batch request (OpenAI API limit).
 const OPENAI_BATCH_SIZE: usize = 2048;
@@ -41,7 +42,7 @@ impl OpenAiEmbedder {
     /// # Errors
     /// Returns `ApiKeyMissing` if `api_key` is empty.
     pub fn new(api_key: String) -> EmbedderResult<Self> {
-        Self::with_client(api_key, reqwest::Client::new())
+        Self::with_client(api_key, crate::embedder::http::build_http_client())
     }
 
     /// Create with a custom reqwest::Client (useful for testing).
@@ -105,6 +106,16 @@ struct OpenAiEmbeddingData {
     index: usize,
 }
 
+/// Read the `Retry-After` header from an HTTP response, if present and parseable.
+fn read_retry_after(response: &reqwest::Response) -> Option<Duration> {
+    response
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
 #[async_trait]
 impl Embedder for OpenAiEmbedder {
     async fn embed(&self, text: &str) -> EmbedderResult<Vec<f32>> {
@@ -142,11 +153,27 @@ impl Embedder for OpenAiEmbedder {
                     });
             }
 
-            if should_retry(status) && attempt < MAX_RETRIES {
-                let backoff =
-                    calculate_backoff(attempt, BASE_BACKOFF_MS, MAX_BACKOFF_MS, jitter_factor());
-                tokio::time::sleep(backoff).await;
-                continue;
+            if should_retry(status) {
+                if attempt < MAX_RETRIES {
+                    let backoff = calculate_backoff(
+                        attempt,
+                        BASE_BACKOFF_MS,
+                        MAX_BACKOFF_MS,
+                        jitter_factor(),
+                    );
+                    let effective = if status == 429 {
+                        read_retry_after(&response).unwrap_or(backoff.max(Duration::from_secs(30)))
+                    } else {
+                        backoff
+                    };
+                    tokio::time::sleep(effective).await;
+                    continue;
+                }
+                return Err(VectorCodeError::EmbedderError {
+                    message: format!(
+                        "OpenAI API: max retries ({MAX_RETRIES}) exceeded (HTTP {status})"
+                    ),
+                });
             }
 
             let response_body = response.text().await.unwrap_or_default();
@@ -194,15 +221,28 @@ impl Embedder for OpenAiEmbedder {
                     break;
                 }
 
-                if should_retry(status) && attempt < MAX_RETRIES {
-                    let backoff = calculate_backoff(
-                        attempt,
-                        BASE_BACKOFF_MS,
-                        MAX_BACKOFF_MS,
-                        jitter_factor(),
-                    );
-                    tokio::time::sleep(backoff).await;
-                    continue;
+                if should_retry(status) {
+                    if attempt < MAX_RETRIES {
+                        let backoff = calculate_backoff(
+                            attempt,
+                            BASE_BACKOFF_MS,
+                            MAX_BACKOFF_MS,
+                            jitter_factor(),
+                        );
+                        let effective = if status == 429 {
+                            read_retry_after(&response)
+                                .unwrap_or(backoff.max(Duration::from_secs(30)))
+                        } else {
+                            backoff
+                        };
+                        tokio::time::sleep(effective).await;
+                        continue;
+                    }
+                    return Err(VectorCodeError::EmbedderError {
+                        message: format!(
+                            "OpenAI batch API: max retries ({MAX_RETRIES}) exceeded (HTTP {status})"
+                        ),
+                    });
                 }
 
                 let response_body = response.text().await.unwrap_or_default();

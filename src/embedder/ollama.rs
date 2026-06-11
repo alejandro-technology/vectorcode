@@ -37,13 +37,13 @@ impl OllamaEmbedder {
         Self::with_client(
             Self::DEFAULT_URL.to_string(),
             Self::DEFAULT_MODEL.to_string(),
-            reqwest::Client::new(),
+            crate::embedder::http::build_http_client(),
         )
     }
 
     /// Create with custom URL and model.
     pub fn with_config(url: String, model: String) -> EmbedderResult<Self> {
-        Self::with_client(url, model, reqwest::Client::new())
+        Self::with_client(url, model, crate::embedder::http::build_http_client())
     }
 
     /// Create with a custom reqwest::Client (useful for testing).

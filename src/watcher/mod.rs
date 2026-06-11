@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::Result;
 use notify_debouncer_full::{
     new_debouncer,
-    notify::{self, RecursiveMode},
+    notify::{self, EventKind, RecursiveMode},
     DebounceEventResult, Debouncer, RecommendedCache,
 };
 use tokio::sync::{mpsc, RwLock};
@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::schema::WatcherConfig;
 
-use self::gitignore::{filter_paths, GitignoreFilter};
+use self::gitignore::{filter_paths, has_supported_extension, GitignoreFilter};
 
 /// A file that has been modified but not yet re-indexed.
 #[derive(Debug, Clone)]
@@ -43,7 +43,8 @@ pub struct FileWatcher {
     /// When dropped, the watcher thread is stopped.
     _debouncer: Debouncer<notify::RecommendedWatcher, RecommendedCache>,
     /// Receiver for debounced batches of changed file paths.
-    rx: mpsc::Receiver<Vec<PathBuf>>,
+    /// Each batch is a Vec of (path, is_removal) tuples.
+    rx: mpsc::UnboundedReceiver<Vec<(PathBuf, bool)>>,
     /// Files that have been detected as changed but not yet re-indexed.
     pending: Arc<RwLock<Vec<PendingFile>>>,
     /// The project root being watched.
@@ -62,8 +63,32 @@ impl FileWatcher {
         let pending_clone = pending.clone();
         let root_clone = project_root.clone();
 
-        // Channel for the debouncer callback → async receiver
-        let (tx, rx) = mpsc::channel::<Vec<PathBuf>>(64);
+        // Unbounded channels: notify callback runs on a std::thread, so we use
+        // unbounded channels to avoid blocking. (H14: prevents buffer overflow)
+        let (tx, rx) = mpsc::unbounded_channel::<Vec<(PathBuf, bool)>>();
+        let (tx_pending, mut rx_pending) = mpsc::unbounded_channel::<Vec<(PathBuf, bool)>>();
+
+        // Spawn a task to process pending updates from the channel (C7: replaces dead code).
+        // Only spawn if a tokio runtime is available (tests may not have one).
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                while let Some(updates) = rx_pending.recv().await {
+                    let mut pending = pending_clone.write().await;
+                    for (path, is_removal) in updates {
+                        if is_removal {
+                            // Remove from pending (file was deleted)
+                            pending.retain(|pf| pf.path != path);
+                        } else if !pending.iter().any(|pf| pf.path == path) {
+                            // Add to pending (file was modified/created)
+                            pending.push(PendingFile {
+                                path,
+                                modified_at: SystemTime::now(),
+                            });
+                        }
+                    }
+                }
+            });
+        }
 
         let debounce_duration = Duration::from_millis(config.debounce_ms);
 
@@ -74,55 +99,60 @@ impl FileWatcher {
             move |result: DebounceEventResult| {
                 match result {
                     Ok(events) => {
-                        // Extract unique file paths from events
-                        let mut paths: Vec<PathBuf> = events
-                            .iter()
-                            .flat_map(|e| e.paths.iter().cloned())
-                            .collect::<std::collections::HashSet<_>>()
-                            .into_iter()
-                            .collect();
+                        // Separate removals from other events (H13: handle deletions)
+                        let mut removal_paths: Vec<PathBuf> = Vec::new();
+                        let mut other_paths: Vec<PathBuf> = Vec::new();
 
-                        // Filter through gitignore + supported extensions
-                        paths = filter_paths(&paths, &root_clone, &gitignore);
-
-                        if paths.is_empty() {
-                            return;
+                        for event in &events {
+                            for path in &event.paths {
+                                match event.kind {
+                                    EventKind::Remove(_) => {
+                                        removal_paths.push(path.clone());
+                                    }
+                                    _ => {
+                                        other_paths.push(path.clone());
+                                    }
+                                }
+                            }
                         }
 
-                        debug!("Watcher detected {} changed files", paths.len());
+                        // Filter modifications through gitignore + extension check
+                        let filtered_mods = filter_paths(&other_paths, &root_clone, &gitignore);
 
-                        // Update pending files
-                        let now = SystemTime::now();
-                        let pending_files: Vec<PendingFile> = paths
-                            .iter()
-                            .map(|p| PendingFile {
-                                path: p.clone(),
-                                modified_at: now,
+                        // Filter removals: check extension + gitignore, but NOT is_file()
+                        // (deleted files don't exist on disk, so is_file() returns false)
+                        let filtered_removals: Vec<PathBuf> = removal_paths
+                            .into_iter()
+                            .filter(|p| {
+                                p.starts_with(&root_clone)
+                                    && !gitignore.is_ignored(p)
+                                    && has_supported_extension(p)
                             })
                             .collect();
 
-                        // Spawn a blocking task to update pending (since we're in a sync callback)
-                        let pending_inner = pending_clone.clone();
-                        let new_paths = paths.clone();
-                        std::thread::spawn(move || {
-                            let rt = tokio::runtime::Handle::try_current();
-                            if let Ok(handle) = rt {
-                                handle.spawn(async move {
-                                    let mut pending = pending_inner.write().await;
-                                    // Merge: add new pending files, dedup by path
-                                    for pf in pending_files {
-                                        if !pending.iter().any(|p| p.path == pf.path) {
-                                            pending.push(pf);
-                                        }
-                                    }
-                                });
-                            }
-                        });
+                        // Build batch: (path, is_removal) tuples
+                        let mut batch: Vec<(PathBuf, bool)> = Vec::new();
+                        for p in filtered_mods {
+                            batch.push((p, false));
+                        }
+                        for p in filtered_removals {
+                            batch.push((p, true));
+                        }
 
-                        // Send the batch through the channel (blocking send in callback thread)
-                        // Use try_send to avoid blocking the notify thread
-                        if let Err(e) = tx.try_send(new_paths) {
+                        if batch.is_empty() {
+                            return;
+                        }
+
+                        debug!("Watcher detected {} changed files", batch.len());
+
+                        // Send batch notification (unbounded, never blocks)
+                        if let Err(e) = tx.send(batch.clone()) {
                             warn!("Failed to send watcher batch: {e}");
+                        }
+
+                        // Send pending updates (unbounded, never blocks)
+                        if let Err(e) = tx_pending.send(batch) {
+                            warn!("Failed to send watcher pending updates: {e}");
                         }
                     }
                     Err(errors) => {
@@ -157,7 +187,8 @@ impl FileWatcher {
     /// Wait for the next debounced batch of changed file paths.
     ///
     /// Returns `None` when the watcher is shut down (channel closed).
-    pub async fn next_batch(&mut self) -> Option<Vec<PathBuf>> {
+    /// Each batch element is a `(path, is_removal)` tuple.
+    pub async fn next_batch(&mut self) -> Option<Vec<(PathBuf, bool)>> {
         self.rx.recv().await
     }
 
@@ -288,10 +319,10 @@ mod tests {
         let batch = tokio::time::timeout(Duration::from_secs(3), watcher.next_batch()).await;
 
         match batch {
-            Ok(Some(paths)) => {
+            Ok(Some(entries)) => {
                 assert!(
-                    paths.iter().any(|p| p.ends_with("new_file.rs")),
-                    "Should detect new_file.rs, got: {paths:?}"
+                    entries.iter().any(|(p, _)| p.ends_with("new_file.rs")),
+                    "Should detect new_file.rs, got: {entries:?}"
                 );
             }
             Ok(None) => panic!("Channel closed unexpectedly"),
@@ -322,10 +353,10 @@ mod tests {
 
         // Either timeout (no events) or empty batch — both are acceptable
         match batch {
-            Ok(Some(paths)) => {
+            Ok(Some(entries)) => {
                 assert!(
-                    !paths.iter().any(|p| p.ends_with("notes.txt")),
-                    "Should NOT include .txt files, got: {paths:?}"
+                    !entries.iter().any(|(p, _)| p.ends_with("notes.txt")),
+                    "Should NOT include .txt files, got: {entries:?}"
                 );
             }
             Ok(None) => {} // Channel closed

@@ -187,6 +187,9 @@ impl Database {
             return Ok(());
         }
 
+        // Wrap all mutations in a transaction for atomicity
+        self.conn.execute("BEGIN", [])?;
+
         let mut select_stmt = self
             .conn
             .prepare("SELECT chunk_id, embedding FROM vectors_data")?;
@@ -227,6 +230,9 @@ impl Database {
                 (&chunk_id, vec_rowid),
             )?;
         }
+
+        // Commit transaction after all inserts succeed
+        self.conn.execute("COMMIT", [])?;
 
         Ok(())
     }

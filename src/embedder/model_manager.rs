@@ -100,22 +100,40 @@ impl ModelManager {
     ) -> Result<(), VectorCodeError> {
         std::fs::create_dir_all(&self.model_dir)?;
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .expect("reqwest::Client::builder with valid config should not fail");
 
         // Download model file
         let model_bytes = Self::fetch_with_progress(&client, model_url, MODEL_FILENAME).await?;
         let tmp_model = self.model_dir.join("model.onnx.tmp");
-        std::fs::write(&tmp_model, &model_bytes)?;
+        {
+            let mut file = std::fs::File::create(&tmp_model)?;
+            std::io::Write::write_all(&mut file, &model_bytes)?;
+            file.sync_all()?;
+        }
         let final_model = self.model_dir.join(MODEL_FILENAME);
-        std::fs::rename(&tmp_model, &final_model)?;
+        std::fs::rename(&tmp_model, &final_model).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_model);
+            e
+        })?;
 
         // Download tokenizer file
         let tokenizer_bytes =
             Self::fetch_with_progress(&client, tokenizer_url, TOKENIZER_FILENAME).await?;
         let tmp_tokenizer = self.model_dir.join("tokenizer.json.tmp");
-        std::fs::write(&tmp_tokenizer, &tokenizer_bytes)?;
+        {
+            let mut file = std::fs::File::create(&tmp_tokenizer)?;
+            std::io::Write::write_all(&mut file, &tokenizer_bytes)?;
+            file.sync_all()?;
+        }
         let final_tokenizer = self.model_dir.join(TOKENIZER_FILENAME);
-        std::fs::rename(&tmp_tokenizer, &final_tokenizer)?;
+        std::fs::rename(&tmp_tokenizer, &final_tokenizer).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_tokenizer);
+            e
+        })?;
 
         tracing::info!(
             model_size = model_bytes.len(),

@@ -83,6 +83,12 @@ tar = "0.4"
 flate2 = "1"
 tempfile = "3"
 
+# Platform directories (config paths)
+dirs = "5"
+
+# SHA256 checksum verification
+sha2 = "0.10"
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"

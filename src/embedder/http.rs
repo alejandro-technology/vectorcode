@@ -1,9 +1,24 @@
 //! Shared HTTP helpers for embedding providers.
 //!
-//! Provides exponential backoff calculation, retry status checks, and jitter
-//! utilities used by Gemini, Ollama, and OpenAI providers.
+//! Provides HTTP client construction, exponential backoff calculation,
+//! retry status checks, and jitter utilities used by Gemini, Ollama, and OpenAI providers.
 
 use std::time::Duration;
+
+/// Default HTTP timeout for embedding provider requests.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Default connect timeout.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Build a reqwest::Client with sensible defaults for embedding providers.
+pub fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .build()
+        .expect("reqwest::Client::builder with valid config should not fail")
+}
 
 /// Maximum number of retry attempts for transient failures.
 pub const MAX_RETRIES: u32 = 5;

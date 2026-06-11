@@ -56,18 +56,18 @@ name = "mock"
 
     // Create the database
     let db = vectorcode::Database::open_in_memory().unwrap();
-    db.init_schema(64).unwrap();
+    db.init_schema(384).unwrap();
 
     // Copy the in-memory DB to a file (we need a real file for the server)
     let db_path = vc_dir.join("index.db");
     let file_db = vectorcode::Database::open(&db_path).unwrap();
-    file_db.init_schema(64).unwrap();
+    file_db.init_schema(384).unwrap();
 
     // Write meta
     let meta = vectorcode::IndexMeta {
         provider: "mock".to_string(),
         model: "mock-embedder".to_string(),
-        dimensions: 64,
+        dimensions: 384,
         created_at: "2026-06-10T20:00:00Z".to_string(),
         last_sync_at: Some("2026-06-10T20:05:00Z".to_string()),
         files_indexed: 42,
@@ -162,7 +162,7 @@ fn mcp_vec_status_returns_index_info() {
     assert!(text.contains("VectorCode Index Status"));
     assert!(text.contains("Provider:    mock"));
     assert!(text.contains("Model:       mock-embedder"));
-    assert!(text.contains("Dimensions:  64"));
+    assert!(text.contains("Dimensions:  384"));
     assert!(text.contains("Files:       42 indexed"));
     assert!(text.contains("Chunks:      200 stored"));
 

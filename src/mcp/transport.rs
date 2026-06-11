@@ -8,6 +8,9 @@ use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
+/// Maximum line size for JSON-RPC messages over stdio (1 MiB).
+const MAX_LINE_BYTES: u64 = 1_048_576;
+
 /// Stdio transport for MCP JSON-RPC communication.
 ///
 /// Uses `tokio::sync::Mutex` for thread-safe access to stdin/stdout.
@@ -36,6 +39,12 @@ impl McpTransport {
             let bytes_read = stdin.read_line(&mut line).await?;
             if bytes_read == 0 {
                 return Ok(None); // EOF
+            }
+            if bytes_read as u64 > MAX_LINE_BYTES {
+                return Err(anyhow::anyhow!(
+                    "JSON-RPC line exceeds maximum size of {} bytes",
+                    MAX_LINE_BYTES
+                ));
             }
             let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
             if trimmed.is_empty() {

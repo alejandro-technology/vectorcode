@@ -11,6 +11,7 @@ use crate::embedder::{Embedder, EmbedderResult};
 use crate::error::VectorCodeError;
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::time::Duration;
 
 /// Maximum items per batch request (Gemini API limit).
 const GEMINI_BATCH_SIZE: usize = 100;
@@ -76,23 +77,17 @@ impl GeminiEmbedder {
         })
     }
 
-    /// Build the single-embed endpoint URL.
+    /// Build the single-embed endpoint URL (no key in URL — uses header).
     fn embed_url(&self) -> String {
-        format!(
-            "{}/models/{}:embedContent?key={}",
-            Self::BASE_URL,
-            self.model,
-            self.api_key
-        )
+        format!("{}/models/{}:embedContent", Self::BASE_URL, self.model,)
     }
 
-    /// Build the batch-embed endpoint URL.
+    /// Build the batch-embed endpoint URL (no key in URL — uses header).
     fn batch_url(&self) -> String {
         format!(
-            "{}/models/{}:batchEmbedContents?key={}",
+            "{}/models/{}:batchEmbedContents",
             Self::BASE_URL,
             self.model,
-            self.api_key
         )
     }
 
@@ -157,6 +152,16 @@ struct GeminiBatchResponse {
     embeddings: Vec<GeminiEmbeddingValues>,
 }
 
+/// Read the `Retry-After` header from an HTTP response, if present and parseable.
+fn read_retry_after(response: &reqwest::Response) -> Option<Duration> {
+    response
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
 #[async_trait]
 impl Embedder for GeminiEmbedder {
     async fn embed(&self, text: &str) -> EmbedderResult<Vec<f32>> {
@@ -167,6 +172,7 @@ impl Embedder for GeminiEmbedder {
             let response = self
                 .client
                 .post(&url)
+                .header("x-goog-api-key", &self.api_key)
                 .json(&body)
                 .send()
                 .await
@@ -187,11 +193,28 @@ impl Embedder for GeminiEmbedder {
                 return Self::parse_embed_response(&response_body);
             }
 
-            if should_retry(status) && attempt < MAX_RETRIES {
-                let backoff =
-                    calculate_backoff(attempt, BASE_BACKOFF_MS, MAX_BACKOFF_MS, jitter_factor());
-                tokio::time::sleep(backoff).await;
-                continue;
+            if should_retry(status) {
+                if attempt < MAX_RETRIES {
+                    let backoff = calculate_backoff(
+                        attempt,
+                        BASE_BACKOFF_MS,
+                        MAX_BACKOFF_MS,
+                        jitter_factor(),
+                    );
+                    // If rate-limited, respect Retry-After header or use 30s floor
+                    let effective = if status == 429 {
+                        read_retry_after(&response).unwrap_or(backoff.max(Duration::from_secs(30)))
+                    } else {
+                        backoff
+                    };
+                    tokio::time::sleep(effective).await;
+                    continue;
+                }
+                return Err(VectorCodeError::EmbedderError {
+                    message: format!(
+                        "Gemini API: max retries ({MAX_RETRIES}) exceeded (HTTP {status})"
+                    ),
+                });
             }
 
             let response_body = response.text().await.unwrap_or_default();
@@ -216,6 +239,7 @@ impl Embedder for GeminiEmbedder {
                 let response = self
                     .client
                     .post(&url)
+                    .header("x-goog-api-key", &self.api_key)
                     .json(&body)
                     .send()
                     .await
@@ -238,15 +262,28 @@ impl Embedder for GeminiEmbedder {
                     break;
                 }
 
-                if should_retry(status) && attempt < MAX_RETRIES {
-                    let backoff = calculate_backoff(
-                        attempt,
-                        BASE_BACKOFF_MS,
-                        MAX_BACKOFF_MS,
-                        jitter_factor(),
-                    );
-                    tokio::time::sleep(backoff).await;
-                    continue;
+                if should_retry(status) {
+                    if attempt < MAX_RETRIES {
+                        let backoff = calculate_backoff(
+                            attempt,
+                            BASE_BACKOFF_MS,
+                            MAX_BACKOFF_MS,
+                            jitter_factor(),
+                        );
+                        let effective = if status == 429 {
+                            read_retry_after(&response)
+                                .unwrap_or(backoff.max(Duration::from_secs(30)))
+                        } else {
+                            backoff
+                        };
+                        tokio::time::sleep(effective).await;
+                        continue;
+                    }
+                    return Err(VectorCodeError::EmbedderError {
+                        message: format!(
+                            "Gemini batch API: max retries ({MAX_RETRIES}) exceeded (HTTP {status})"
+                        ),
+                    });
                 }
 
                 let response_body = response.text().await.unwrap_or_default();
@@ -341,8 +378,8 @@ mod tests {
             "URL should contain model name: {url}"
         );
         assert!(
-            url.contains("my-api-key"),
-            "URL should contain API key: {url}"
+            !url.contains("my-api-key"),
+            "URL must NOT contain API key (C1 fix): {url}"
         );
         assert!(
             url.contains("embedContent"),

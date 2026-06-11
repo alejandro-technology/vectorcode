@@ -116,6 +116,17 @@ impl Indexer {
             let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
             let embeddings = self.embedder.embed_batch(&text_refs).await?;
 
+            if new_chunks.len() != embeddings.len() {
+                return Err(crate::VectorCodeError::EmbedderError {
+                    message: format!(
+                        "Embedding count mismatch: expected {} chunks, got {} embeddings",
+                        new_chunks.len(),
+                        embeddings.len()
+                    ),
+                }
+                .into());
+            }
+
             for (chunk, embedding) in new_chunks.iter().zip(embeddings.iter()) {
                 chunks::insert_chunk(self.db.conn(), chunk)?;
                 vectors::insert_vector(self.db.conn(), &chunk.id, embedding)?;
@@ -171,14 +182,24 @@ impl Indexer {
             let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
             let embeddings = self.embedder.embed_batch(&text_refs).await?;
 
+            if new_chunks.len() != embeddings.len() {
+                return Err(crate::VectorCodeError::EmbedderError {
+                    message: format!(
+                        "Embedding count mismatch: expected {} chunks, got {} embeddings",
+                        new_chunks.len(),
+                        embeddings.len()
+                    ),
+                }
+                .into());
+            }
+
             for (chunk, embedding) in new_chunks.iter().zip(embeddings.iter()) {
                 chunks::insert_chunk(self.db.conn(), chunk)?;
                 vectors::insert_vector(self.db.conn(), &chunk.id, embedding)?;
             }
         }
 
-        // NOTE: No stale chunk cleanup for incremental sync
-
+        // Count total chunks in DB
         let chunks_total: i64 =
             self.db
                 .conn()
@@ -342,13 +363,13 @@ pub fn discover_files(project_path: &Path, config: &IndexingConfig) -> Vec<PathB
             }
         }
 
-        // Check excluded extensions
-        let path_str = path.to_str().unwrap_or("");
-        if config
+        // Check excluded extensions — match against filename suffix
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let excluded = config
             .exclude_extensions
             .iter()
-            .any(|ex| path_str.ends_with(ex))
-        {
+            .any(|ex| file_name.ends_with(ex));
+        if excluded {
             continue;
         }
 

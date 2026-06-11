@@ -10,7 +10,6 @@ use async_trait::async_trait;
 use ort::session::Session;
 use ort::value::Tensor;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use tokenizers::Tokenizer;
 
 /// ONNX Runtime embedding provider.
@@ -18,7 +17,7 @@ use tokenizers::Tokenizer;
 /// Loads a quantized all-MiniLM-L6-v2 model and produces 384-dimensional vectors.
 /// The model and tokenizer are loaded from memory (bundled via include_bytes!).
 pub struct OnnxEmbedder {
-    session: Mutex<Session>,
+    session: tokio::sync::Mutex<Session>,
     tokenizer: Tokenizer,
 }
 
@@ -59,7 +58,7 @@ impl OnnxEmbedder {
         })?;
 
         Ok(Self {
-            session: Mutex::new(session),
+            session: tokio::sync::Mutex::new(session),
             tokenizer,
         })
     }
@@ -188,33 +187,41 @@ impl Embedder for OnnxEmbedder {
                 },
             )?;
 
-        // Run session with named inputs
-        let mut session = self
-            .session
-            .lock()
-            .map_err(|e| VectorCodeError::EmbedderError {
-                message: format!("Failed to acquire session lock: {e}"),
-            })?;
-        let outputs = session
-            .run(ort::inputs![
-                "input_ids" => input_ids_tensor,
-                "attention_mask" => attention_mask_tensor,
-                "token_type_ids" => token_type_ids_tensor,
-            ])
-            .map_err(|e| VectorCodeError::EmbedderError {
-                message: format!("ONNX session run failed: {e}"),
-            })?;
+        // Run session with named inputs — scoped so lock is released promptly
+        let output_vec: Vec<f32> = {
+            let mut session = self.session.lock().await;
+            let outputs = session
+                .run(ort::inputs![
+                    "input_ids" => input_ids_tensor,
+                    "attention_mask" => attention_mask_tensor,
+                    "token_type_ids" => token_type_ids_tensor,
+                ])
+                .map_err(|e| VectorCodeError::EmbedderError {
+                    message: format!("ONNX session run failed: {e}"),
+                })?;
 
-        // Extract last_hidden_state — shape [1, seq_len, dims]
-        let (_, output_data) = outputs["last_hidden_state"]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| VectorCodeError::EmbedderError {
-                message: format!("Failed to extract output tensor: {e}"),
-            })?;
+            // Extract last_hidden_state — use .get() to avoid panic on unexpected output names
+            let (_, output_data) = outputs
+                .get("last_hidden_state")
+                .ok_or_else(|| VectorCodeError::EmbedderError {
+                    message: format!(
+                        "ONNX model output 'last_hidden_state' not found. \
+                         Available outputs: {:?}. \
+                         This embedder requires a MiniLM-L6-v2 model. \
+                         Try 'vectorcode init --provider onnx' to re-download.",
+                        outputs.keys().collect::<Vec<_>>()
+                    ),
+                })?
+                .try_extract_tensor::<f32>()
+                .map_err(|e| VectorCodeError::EmbedderError {
+                    message: format!("Failed to extract output tensor: {e}"),
+                })?;
+            output_data.to_vec()
+        }; // Lock released here
 
         // Apply mean pooling and normalize
         Ok(Self::pooling_and_normalize(
-            output_data,
+            &output_vec,
             &attention_mask,
             seq_len,
             dims,

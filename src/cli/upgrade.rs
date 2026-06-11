@@ -78,6 +78,15 @@ pub async fn execute(args: &UpgradeArgs) -> Result<()> {
     }
 
     println!("Successfully updated to v{target_version}!");
+    println!(
+        "{} installed to {}.",
+        env!("CARGO_PKG_NAME"),
+        std::env::current_exe().unwrap_or_default().display()
+    );
+    #[cfg(target_os = "macos")]
+    eprintln!(
+        "NOTE: On macOS, restart your terminal or run 'exec $SHELL -l' to use the new version."
+    );
     Ok(())
 }
 
@@ -108,6 +117,9 @@ async fn fetch_github_release_json() -> Result<String> {
 ///
 /// Returns the temp directory containing the extracted `vectorcode` binary.
 /// The caller is responsible for the directory lifetime.
+///
+/// If a `SHA256SUMS` file exists in the release, the tarball is verified.
+/// If not, a warning is logged but the download proceeds.
 async fn download_binary(version: &str) -> Result<tempfile::TempDir> {
     let target = release_target();
     let url = release_download_url(version, &target);
@@ -130,10 +142,88 @@ async fn download_binary(version: &str) -> Result<tempfile::TempDir> {
     }
 
     let bytes = response.bytes().await?;
+
+    // Attempt SHA256 checksum verification
+    verify_sha256_if_available(&client, version, &target, &bytes).await?;
+
     let temp_dir = tempfile::tempdir()?;
     extract_binary_from_tarball(&bytes, temp_dir.path())?;
 
     Ok(temp_dir)
+}
+
+/// Try to fetch `SHA256SUMS` from the release and verify the tarball.
+///
+/// If the sums file doesn't exist (404), logs a warning and returns Ok.
+/// If verification fails, returns an error.
+async fn verify_sha256_if_available(
+    client: &reqwest::Client,
+    version: &str,
+    target: &str,
+    tarball_bytes: &[u8],
+) -> Result<()> {
+    use sha2::Digest;
+
+    let sums_url = release_sums_url(version);
+    let resp = client
+        .get(&sums_url)
+        .send()
+        .await
+        .context("Failed to fetch SHA256SUMS")?;
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        tracing::warn!(
+            "No SHA256SUMS found for this release — skipping checksum verification. \
+             Consider adding checksums to your release artifacts."
+        );
+        return Ok(());
+    }
+
+    if !resp.status().is_success() {
+        tracing::warn!(
+            "SHA256SUMS fetch returned HTTP {} — skipping checksum verification.",
+            resp.status()
+        );
+        return Ok(());
+    }
+
+    let sums_content = resp.text().await.context("Failed to read SHA256SUMS")?;
+    let tarball_filename = format!("vectorcode-{target}.tar.gz");
+
+    // Parse the SHA256SUMS file: each line is "<hash>  <filename>" or "<hash> <filename>"
+    let expected_hash = sums_content.lines().find_map(|line| {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 && parts[1] == tarball_filename {
+            Some(parts[0].to_string())
+        } else {
+            None
+        }
+    });
+
+    let expected_hash = match expected_hash {
+        Some(h) => h,
+        None => {
+            tracing::warn!(
+                "SHA256SUMS does not contain an entry for {tarball_filename} — skipping verification."
+            );
+            return Ok(());
+        }
+    };
+
+    // Compute actual SHA256
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(tarball_bytes);
+    let actual_hash = format!("{:x}", hasher.finalize());
+
+    if actual_hash != expected_hash {
+        anyhow::bail!(
+            "SHA256 checksum mismatch!\n  Expected: {expected_hash}\n  Actual:   {actual_hash}\n\
+             The downloaded release may be corrupted or tampered with. Aborting."
+        );
+    }
+
+    eprintln!("SHA256 checksum verified.");
+    Ok(())
 }
 
 // ─── Pure functions (easily testable, no I/O) ────────────────────────────────
@@ -186,6 +276,13 @@ fn rustc_target_os() -> &'static str {
 fn release_download_url(version: &str, target: &str) -> String {
     format!(
         "https://github.com/alejandro-technology/vectorcode/releases/download/v{version}/vectorcode-{target}.tar.gz"
+    )
+}
+
+/// Build the URL for the SHA256SUMS file in a release.
+fn release_sums_url(version: &str) -> String {
+    format!(
+        "https://github.com/alejandro-technology/vectorcode/releases/download/v{version}/SHA256SUMS"
     )
 }
 

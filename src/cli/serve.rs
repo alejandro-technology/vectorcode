@@ -1,5 +1,6 @@
 //! `vectorcode serve` — start the MCP server (spec §12.5).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -65,6 +66,21 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
     let db_path = vc_dir.join("index.db");
     let db = Database::open(&db_path).map_err(|e| anyhow::anyhow!("{e}"))?;
     db.init_schema(embedder.dimensions())?;
+
+    // Validate provider dimensions match the existing index
+    if let Some(existing_meta) =
+        crate::store::meta::read_index_meta(db.conn()).map_err(|e| anyhow::anyhow!("{e}"))?
+    {
+        if existing_meta.dimensions != embedder.dimensions() {
+            anyhow::bail!(
+                "Provider dimension mismatch: index was built with {} dimensions, \
+                 but current provider uses {} dimensions. Re-index with 'vectorcode index' \
+                 or change the provider.",
+                existing_meta.dimensions,
+                embedder.dimensions()
+            );
+        }
+    }
 
     let watch = !args.no_watch && !cfg.watcher.disabled;
     info!("MCP server starting on stdio");
@@ -233,7 +249,7 @@ fn run_connect_time_catchup(
 }
 
 /// Background task that waits for debounced file change batches and runs
-/// incremental sync via the Indexer.
+/// incremental sync via the Indexer. Also handles file deletion events.
 async fn run_watcher_background(
     watcher: Arc<tokio::sync::RwLock<FileWatcher>>,
     db_path: std::path::PathBuf,
@@ -249,21 +265,79 @@ async fn run_watcher_background(
             w.next_batch().await
         };
 
-        let changed_paths = match batch {
-            Some(paths) => paths,
+        let entries = match batch {
+            Some(entries) => entries,
             None => {
                 info!("File watcher channel closed, background task exiting");
                 break;
             }
         };
 
-        if changed_paths.is_empty() {
+        if entries.is_empty() {
+            continue;
+        }
+
+        // Partition into modifications and removals
+        let mut mod_paths: Vec<PathBuf> = Vec::new();
+        let mut removal_paths: Vec<PathBuf> = Vec::new();
+        for (path, is_removal) in entries {
+            if is_removal {
+                removal_paths.push(path);
+            } else {
+                mod_paths.push(path);
+            }
+        }
+
+        // Handle file removals: delete chunks and file records from the index
+        if !removal_paths.is_empty() {
+            info!(
+                "Watcher batch: {} files removed, cleaning up index",
+                removal_paths.len()
+            );
+            let db_path_rm = db_path.clone();
+            let project_path_rm = project_path.clone();
+            let removals = removal_paths.clone();
+
+            let rm_result = tokio::task::spawn_blocking(move || {
+                let rm_db = Database::open(&db_path_rm)?;
+                for abs_path in &removals {
+                    // Convert absolute path to relative path for DB lookup
+                    let rel_path = abs_path
+                        .strip_prefix(&project_path_rm)
+                        .unwrap_or(abs_path)
+                        .to_string_lossy()
+                        .to_string();
+                    let _ = crate::store::chunks::delete_chunks_for_file(rm_db.conn(), &rel_path);
+                    let _ = crate::store::files::remove_file(rm_db.conn(), &rel_path);
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await;
+
+            match rm_result {
+                Ok(Ok(())) => {
+                    info!(
+                        "Watcher removal cleanup complete for {} files",
+                        removal_paths.len()
+                    );
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("Watcher removal cleanup failed: {e}");
+                }
+                Err(e) => {
+                    tracing::error!("Watcher removal cleanup task panicked: {e}");
+                }
+            }
+        }
+
+        // Handle file modifications: run incremental sync
+        if mod_paths.is_empty() {
             continue;
         }
 
         info!(
             "Watcher batch: {} files changed, running incremental sync",
-            changed_paths.len()
+            mod_paths.len()
         );
 
         // Run the sync in a blocking thread to avoid Send issues with rusqlite
@@ -271,7 +345,7 @@ async fn run_watcher_background(
         let project_path_clone = project_path.clone();
         let embedder_clone = embedder.clone();
         let indexing_config_clone = indexing_config.clone();
-        let paths_clone = changed_paths.clone();
+        let paths_clone = mod_paths.clone();
 
         let sync_result = tokio::task::spawn_blocking(move || {
             let sync_db = Database::open(&db_path_clone)?;
@@ -292,7 +366,7 @@ async fn run_watcher_background(
 
                 // Clear the synced files from pending
                 let w = watcher.read().await;
-                w.clear_pending_paths(&changed_paths).await;
+                w.clear_pending_paths(&mod_paths).await;
             }
             Ok(Err(e)) => {
                 tracing::error!("Watcher sync failed: {e}");

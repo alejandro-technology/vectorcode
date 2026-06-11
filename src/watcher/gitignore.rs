@@ -242,7 +242,7 @@ mod tests {
         fs::write(&rs_file, "fn main() {}").unwrap();
 
         let filter = GitignoreFilter::new(dir.path());
-        let result = filter_paths(&[rs_file.clone()], dir.path(), &filter);
+        let result = filter_paths(std::slice::from_ref(&rs_file), dir.path(), &filter);
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], rs_file);

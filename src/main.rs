@@ -30,13 +30,13 @@ async fn main() -> anyhow::Result<()> {
             vectorcode::cli::serve::execute(args, &project_path).await?;
         }
         Commands::Install(args) => {
-            vectorcode::cli::install::execute(args)?;
+            vectorcode::cli::install::execute(args, &project_path)?;
         }
         Commands::Uninstall(args) => {
             vectorcode::cli::uninstall::execute(args)?;
         }
         Commands::Upgrade(args) => {
-            vectorcode::cli::upgrade::execute(args)?;
+            vectorcode::cli::upgrade::execute(args).await?;
         }
     }
 

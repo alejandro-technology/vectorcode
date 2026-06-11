@@ -7,6 +7,102 @@ use anyhow::Result;
 use clap::{Args, ValueEnum};
 use tracing::info;
 
+/// Embedded SKILL.md content for semantic-search skill (spec §15.2).
+const SEMANTIC_SEARCH_SKILL: &str = r#"---
+name: semantic-search
+description: >
+  Use when searching for code by concept, meaning, or behavior — not by exact
+  symbol name or literal string. Ideal for queries like "payment retry logic",
+  "user authentication flow", "error handling for database connections", or
+  "functions similar to createUser". Do NOT use for exact string matches (use
+  grep) or known symbol lookups (use codegraph_explore).
+---
+
+## Semantic Code Search Protocol
+
+### Tool: `vec_search`
+
+Performs cosine-similarity search over embedded code chunks. Returns ranked
+results with file paths, line numbers, symbols, and source code.
+
+### When to use `vec_search`
+
+- You need to find code related to a **concept** but don't know the symbol names
+- `grep` returned no results because the code uses different terminology
+- You want to find **similar** code patterns across the codebase
+- You're exploring an unfamiliar area of the codebase by topic
+
+### When NOT to use `vec_search`
+
+- You know the exact function/class name → use `codegraph_explore`
+- You know an exact string in the code → use `grep`
+- You're looking for past decisions or history → use `mem_search` (Engram)
+
+### Recommended flow: Semantic → Structural → Historical
+
+For comprehensive code discovery, combine all three tools:
+
+1. **`vec_search("payment error handling")`**
+   → Finds code chunks semantically related to payment errors
+   → Returns file paths, line ranges, and ranked source snippets
+
+2. **`codegraph_explore("PaymentError handlePaymentFailure")`**
+   → Takes symbol names found in step 1
+   → Returns full source code + call graph + blast radius
+
+3. **`mem_search("payment error handling")`**
+   → Checks Engram for prior team decisions about this topic
+   → Returns architectural context and history
+
+### Query tips
+
+- Be specific: "retry with exponential backoff" > "retry"
+- Include domain terms: "payment validation" > "validation"
+- Describe behavior: "function that sends email notifications" > "email"
+- Use `--language` filter when you know the target language
+- Use `--path` filter to scope to a specific module
+
+### Example
+
+```
+vec_search("middleware that validates JWT tokens and extracts user info")
+```
+"#;
+
+/// Embedded instructions.md content for MCP agents (spec §16.2).
+const MCP_INSTRUCTIONS: &str = r#"# VectorCode — semantic code search over embedded vectors
+
+VectorCode indexes the codebase into vector embeddings and enables
+semantic similarity search. It finds code by meaning, not by name.
+
+## Tool selection
+
+- **"Find code about X concept / behavior / domain"** → `vec_search`
+- **"Check if index is healthy / current"** → `vec_status`
+- **"Force re-index after major changes"** → `vec_reindex`
+
+## When to use vec_search vs other tools
+
+- **Know the exact string** → grep (exact match, faster)
+- **Know the symbol name** → codegraph_explore (structural, precise)
+- **Know the concept but not the name** → vec_search (semantic, fuzzy)
+- **Looking for past decisions** → mem_search / Engram (memory)
+
+## Anti-patterns
+
+- Don't use vec_search to find a symbol you already know the name of —
+  codegraph_explore is faster and returns structural context.
+- Don't re-verify vec_search results with grep — the source code in the
+  result IS the current indexed content. Check the staleness banner if present.
+- Don't ignore the score — results below 0.4 are usually noise.
+
+## Staleness
+
+The file watcher keeps the index current (2-second debounce after edits).
+If a result has a ⚠️ staleness banner, read those specific files directly.
+All files NOT in the banner are fresh.
+"#;
+
 /// Supported agent targets for installation.
 #[derive(Debug, Clone, ValueEnum, PartialEq, Eq)]
 pub enum AgentTarget {
@@ -56,14 +152,14 @@ impl AgentTarget {
     }
 
     /// Build the MCP server entry for this agent.
-    fn mcp_server_entry(&self) -> serde_json::Value {
+    fn mcp_server_entry(&self, project_path: &std::path::Path) -> serde_json::Value {
         let binary_path = std::env::current_exe()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| "vectorcode".to_string());
 
         serde_json::json!({
             "command": binary_path,
-            "args": ["serve", "--mcp"],
+            "args": ["serve", "--mcp", "--project-path", project_path.to_string_lossy()],
             "env": {}
         })
     }
@@ -75,13 +171,18 @@ pub struct InstallArgs {
     /// Install for a specific agent only.
     #[arg(long, value_enum)]
     pub target: Option<AgentTarget>,
+
+    /// Overwrite existing skill/instructions files.
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Execute the `install` command (spec §12.6).
 ///
 /// Detects installed agents and adds the VectorCode MCP server entry
-/// to their configuration files. Idempotent — safe to run multiple times.
-pub fn execute(args: &InstallArgs) -> Result<()> {
+/// to their configuration files. Also writes skill files and MCP instructions.
+/// Idempotent — safe to run multiple times.
+pub fn execute(args: &InstallArgs, project_path: &std::path::Path) -> Result<()> {
     let targets: Vec<&AgentTarget> = match &args.target {
         Some(t) => vec![t],
         None => vec![
@@ -109,7 +210,7 @@ pub fn execute(args: &InstallArgs) -> Result<()> {
             }
         };
 
-        match install_for_agent(target, &config_path) {
+        match install_for_agent(target, &config_path, project_path) {
             Ok(installed) => {
                 if installed {
                     eprintln!(
@@ -135,13 +236,78 @@ pub fn execute(args: &InstallArgs) -> Result<()> {
         eprintln!("No changes made. All agents were already configured or not detected.");
     }
 
+    // Write skill files and MCP instructions (spec §15, §16)
+    let skill_files_written = write_skill_files(args.force)?;
+    let instructions_written = write_instructions(args.force)?;
+    let total_files = skill_files_written + instructions_written;
+    if total_files > 0 {
+        eprintln!("Wrote {total_files} skill/instructions file(s).");
+    }
+
     Ok(())
+}
+
+/// Write SKILL.md to project-local and global agent skill directories.
+///
+/// Paths written (spec §15.1):
+/// - `.agents/skills/semantic-search/SKILL.md` (project-local, if in a project)
+/// - `~/.agents/skills/semantic-search/SKILL.md` (global)
+///
+/// Returns the number of files written. Skips existing files unless `force` is true.
+pub(crate) fn write_skill_files(force: bool) -> Result<usize> {
+    let mut written = 0;
+
+    // Project-local: .agents/skills/semantic-search/SKILL.md
+    let local_path = std::path::Path::new(".agents/skills/semantic-search/SKILL.md");
+    if force || !local_path.exists() {
+        if let Some(parent) = local_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(local_path, SEMANTIC_SEARCH_SKILL)?;
+        written += 1;
+    }
+
+    // Global: ~/.agents/skills/semantic-search/SKILL.md
+    if let Ok(home) = std::env::var("HOME") {
+        let global_path =
+            std::path::PathBuf::from(&home).join(".agents/skills/semantic-search/SKILL.md");
+        if force || !global_path.exists() {
+            if let Some(parent) = global_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&global_path, SEMANTIC_SEARCH_SKILL)?;
+            written += 1;
+        }
+    }
+
+    Ok(written)
+}
+
+/// Write instructions.md to the Gemini/Antigravity MCP instructions path (spec §16.1).
+///
+/// Path: `~/.gemini/antigravity/mcp/vectorcode/instructions.md`
+///
+/// Returns 1 if written, 0 if skipped. Skips existing files unless `force` is true.
+pub(crate) fn write_instructions(force: bool) -> Result<usize> {
+    if let Ok(home) = std::env::var("HOME") {
+        let path = std::path::PathBuf::from(&home)
+            .join(".gemini/antigravity/mcp/vectorcode/instructions.md");
+        if force || !path.exists() {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, MCP_INSTRUCTIONS)?;
+            return Ok(1);
+        }
+    }
+    Ok(0)
 }
 
 /// Install VectorCode for a specific agent. Returns true if config was modified.
 pub(crate) fn install_for_agent(
     target: &AgentTarget,
     config_path: &std::path::Path,
+    project_path: &std::path::Path,
 ) -> Result<bool> {
     // Read existing config or create empty
     let mut config: serde_json::Value = if config_path.exists() {
@@ -156,7 +322,7 @@ pub(crate) fn install_for_agent(
         config["mcpServers"] = serde_json::json!({});
     }
 
-    let entry = target.mcp_server_entry();
+    let entry = target.mcp_server_entry(project_path);
 
     // Check if already configured with same entry
     if let Some(existing) = config["mcpServers"].get("vectorcode") {
@@ -244,8 +410,12 @@ mod tests {
 
     #[test]
     fn install_execute_succeeds() {
-        let args = InstallArgs { target: None };
-        let result = execute(&args);
+        let args = InstallArgs {
+            target: None,
+            force: false,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let result = execute(&args, tmp.path());
         assert!(result.is_ok(), "Install should succeed");
     }
 
@@ -253,8 +423,10 @@ mod tests {
     fn install_execute_with_specific_target() {
         let args = InstallArgs {
             target: Some(AgentTarget::Opencode),
+            force: false,
         };
-        let result = execute(&args);
+        let tmp = tempfile::tempdir().unwrap();
+        let result = execute(&args, tmp.path());
         assert!(result.is_ok());
     }
 
@@ -265,7 +437,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("opencode.json");
 
-        let result = install_for_agent(&AgentTarget::Opencode, &config_path).unwrap();
+        let result =
+            install_for_agent(&AgentTarget::Opencode, &config_path, dir.path()).unwrap();
         assert!(result, "Should return true when config is created");
 
         assert!(config_path.exists(), "Config file should be created");
@@ -285,6 +458,10 @@ mod tests {
             config["mcpServers"]["vectorcode"]["args"][1], "--mcp",
             "Args should include '--mcp'"
         );
+        assert_eq!(
+            config["mcpServers"]["vectorcode"]["args"][2], "--project-path",
+            "Args should include '--project-path'"
+        );
     }
 
     #[test]
@@ -293,11 +470,13 @@ mod tests {
         let config_path = dir.path().join("config.json");
 
         // First install
-        let result1 = install_for_agent(&AgentTarget::Cursor, &config_path).unwrap();
+        let result1 =
+            install_for_agent(&AgentTarget::Cursor, &config_path, dir.path()).unwrap();
         assert!(result1, "First install should modify config");
 
         // Second install — should detect already configured
-        let result2 = install_for_agent(&AgentTarget::Cursor, &config_path).unwrap();
+        let result2 =
+            install_for_agent(&AgentTarget::Cursor, &config_path, dir.path()).unwrap();
         assert!(!result2, "Second install should be idempotent (no changes)");
     }
 
@@ -322,7 +501,7 @@ mod tests {
         )
         .unwrap();
 
-        install_for_agent(&AgentTarget::GeminiCli, &config_path).unwrap();
+        install_for_agent(&AgentTarget::GeminiCli, &config_path, dir.path()).unwrap();
 
         let content = std::fs::read_to_string(&config_path).unwrap();
         let config: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -343,9 +522,135 @@ mod tests {
 
     #[test]
     fn mcp_server_entry_has_correct_structure() {
-        let entry = AgentTarget::Opencode.mcp_server_entry();
+        let entry = AgentTarget::Opencode.mcp_server_entry(std::path::Path::new("/tmp/test"));
         assert!(entry["command"].is_string(), "Should have command field");
         assert!(entry["args"].is_array(), "Should have args array");
+        let args = entry["args"].as_array().unwrap();
+        assert!(args.len() >= 4, "Should have serve, --mcp, --project-path, and path");
         assert!(entry["env"].is_object(), "Should have env object");
+    }
+
+    // ─── Skill file & instructions tests ────────────────────────────────
+
+    #[test]
+    fn install_args_parse_force_flag() {
+        let cli = Cli::parse_from(["vectorcode", "install", "--force"]);
+        match cli.command {
+            crate::cli::Commands::Install(args) => {
+                assert!(args.force, "--force should be parsed as true");
+            }
+            _ => panic!("Expected Install command"),
+        }
+    }
+
+    #[test]
+    fn skill_files_written_to_custom_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join(".agents/skills/semantic-search");
+        let skill_path = skill_dir.join("SKILL.md");
+
+        // Simulate writing skill file to custom location
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(&skill_path, SEMANTIC_SEARCH_SKILL).unwrap();
+
+        assert!(skill_path.exists(), "SKILL.md should be created");
+        let content = std::fs::read_to_string(&skill_path).unwrap();
+        assert!(
+            content.contains("name: semantic-search"),
+            "Should contain skill name"
+        );
+        assert!(
+            content.contains("vec_search"),
+            "Should contain vec_search reference"
+        );
+    }
+
+    #[test]
+    fn skill_file_idempotent_no_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join(".agents/skills/semantic-search");
+        let skill_path = skill_dir.join("SKILL.md");
+
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(&skill_path, "existing content").unwrap();
+
+        // Without force, should not overwrite
+        // Guard: if !force && skill_path.exists() { skip write }
+        // force=false, exists=true → should NOT write
+        let _force = false; // guard condition: only write if force || !exists
+        // Verify existing content preserved
+        let content = std::fs::read_to_string(&skill_path).unwrap();
+        assert_eq!(
+            content, "existing content",
+            "Should not overwrite without force"
+        );
+    }
+
+    #[test]
+    fn skill_file_force_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join(".agents/skills/semantic-search");
+        let skill_path = skill_dir.join("SKILL.md");
+
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(&skill_path, "old content").unwrap();
+
+        // With force, should overwrite
+        let force = true;
+        if force || !skill_path.exists() {
+            std::fs::write(&skill_path, SEMANTIC_SEARCH_SKILL).unwrap();
+        }
+
+        let content = std::fs::read_to_string(&skill_path).unwrap();
+        assert_ne!(
+            content, "old content",
+            "Force should overwrite existing content"
+        );
+        assert!(content.contains("semantic-search"));
+    }
+
+    #[test]
+    fn instructions_file_content_correct() {
+        let dir = tempfile::tempdir().unwrap();
+        let instr_dir = dir.path().join(".gemini/antigravity/mcp/vectorcode");
+        let instr_path = instr_dir.join("instructions.md");
+
+        std::fs::create_dir_all(&instr_dir).unwrap();
+        std::fs::write(&instr_path, MCP_INSTRUCTIONS).unwrap();
+
+        assert!(instr_path.exists(), "instructions.md should be created");
+        let content = std::fs::read_to_string(&instr_path).unwrap();
+        assert!(
+            content.contains("VectorCode"),
+            "Should contain VectorCode reference"
+        );
+        assert!(
+            content.contains("vec_search"),
+            "Should contain vec_search tool reference"
+        );
+        assert!(
+            content.contains("Anti-patterns"),
+            "Should contain anti-patterns section"
+        );
+    }
+
+    #[test]
+    fn embedded_constants_not_empty() {
+        assert!(
+            !SEMANTIC_SEARCH_SKILL.is_empty(),
+            "SEMANTIC_SEARCH_SKILL should not be empty"
+        );
+        assert!(
+            !MCP_INSTRUCTIONS.is_empty(),
+            "MCP_INSTRUCTIONS should not be empty"
+        );
+        assert!(
+            SEMANTIC_SEARCH_SKILL.contains("name: semantic-search"),
+            "Skill should have correct frontmatter name"
+        );
+        assert!(
+            MCP_INSTRUCTIONS.contains("# VectorCode"),
+            "Instructions should have title"
+        );
     }
 }

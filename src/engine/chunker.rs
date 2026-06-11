@@ -59,6 +59,32 @@ fn chunkable_node_types(language: SupportedLanguage) -> &'static [&'static str] 
             "interface_declaration",
             "enum_declaration",
         ],
+        SupportedLanguage::CSharp => &[
+            "method_declaration",
+            "class_declaration",
+            "interface_declaration",
+            "enum_declaration",
+            "namespace_declaration",
+        ],
+        SupportedLanguage::C => &["function_definition", "struct_specifier"],
+        SupportedLanguage::Cpp => &[
+            "function_definition",
+            "class_specifier",
+            "struct_specifier",
+            "namespace_definition",
+        ],
+        SupportedLanguage::Ruby => &["method", "class", "module", "singleton_method"],
+        SupportedLanguage::Swift => &[
+            "function_declaration",
+            "class_declaration",
+            "protocol_declaration",
+            "enum_declaration",
+        ],
+        SupportedLanguage::Kotlin => &[
+            "function_declaration",
+            "class_declaration",
+            "object_declaration",
+        ],
         SupportedLanguage::Unknown => &[],
     }
 }
@@ -547,5 +573,226 @@ export function multiply(a: number, b: number): number {
             "Should produce at least 3 chunks for 3 functions, got {}",
             chunks.len()
         );
+    }
+
+    // --- Phase 8: Multi-language chunker tests (RED) ---
+
+    #[test]
+    fn chunk_csharp_class_and_methods() {
+        let source = r#"
+using System;
+
+namespace Calculator.App
+{
+    public class Calculator
+    {
+        private int _value;
+
+        public Calculator(int initial)
+        {
+            _value = initial;
+        }
+
+        public int Add(int n)
+        {
+            _value += n;
+            return _value;
+        }
+
+        public int GetValue()
+        {
+            return _value;
+        }
+    }
+}
+"#;
+        let chunks = chunk_file(source, "Calculator.cs", SupportedLanguage::CSharp);
+        assert!(!chunks.is_empty(), "Should produce chunks from C# source");
+        assert_eq!(chunks[0].language, "csharp");
+        assert!(
+            chunks.iter().any(|c| c.content.contains("Calculator")),
+            "Should contain the Calculator class"
+        );
+    }
+
+    #[test]
+    fn chunk_c_function_and_struct() {
+        let source = r#"
+#include <stdio.h>
+
+struct Point {
+    int x;
+    int y;
+    double distance_from_origin;
+};
+
+int calculate_distance(struct Point* a, struct Point* b) {
+    int dx = a->x - b->x;
+    int dy = a->y - b->y;
+    return dx * dx + dy * dy;
+}
+
+void print_point(struct Point* p) {
+    printf("Point(%d, %d)\n", p->x, p->y);
+}
+"#;
+        let chunks = chunk_file(source, "geometry.c", SupportedLanguage::C);
+        assert!(!chunks.is_empty(), "Should produce chunks from C source");
+        assert_eq!(chunks[0].language, "c");
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.kind == "function_definition" || c.kind == "struct_specifier"),
+            "Should have function_definition or struct_specifier"
+        );
+    }
+
+    #[test]
+    fn chunk_cpp_class_and_functions() {
+        let source = r#"
+#include <string>
+#include <vector>
+
+namespace data {
+
+class DataProcessor {
+public:
+    DataProcessor(const std::string& name) : name_(name) {}
+
+    void process(const std::vector<int>& data) {
+        for (int item : data) {
+            results_.push_back(item * 2);
+        }
+    }
+
+    const std::vector<int>& results() const { return results_; }
+
+private:
+    std::string name_;
+    std::vector<int> results_;
+};
+
+} // namespace data
+"#;
+        let chunks = chunk_file(source, "processor.cpp", SupportedLanguage::Cpp);
+        assert!(!chunks.is_empty(), "Should produce chunks from C++ source");
+        assert_eq!(chunks[0].language, "cpp");
+    }
+
+    #[test]
+    fn chunk_ruby_class_and_methods() {
+        let source = r#"
+module Calculator
+  class Engine
+    attr_reader :value
+
+    def initialize(initial = 0)
+      @value = initial
+    end
+
+    def add(n)
+      @value += n
+      self
+    end
+
+    def result
+      @value
+    end
+  end
+
+  class AdvancedEngine < Engine
+    def multiply(n)
+      @value *= n
+      self
+    end
+  end
+end
+"#;
+        let chunks = chunk_file(source, "calculator.rb", SupportedLanguage::Ruby);
+        assert!(!chunks.is_empty(), "Should produce chunks from Ruby source");
+        assert_eq!(chunks[0].language, "ruby");
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.content.contains("Calculator") || c.content.contains("Engine")),
+            "Should contain module or class"
+        );
+    }
+
+    #[test]
+    fn chunk_swift_class_and_functions() {
+        let source = r#"
+import Foundation
+
+protocol Calculatable {
+    func add(_ n: Int) -> Int
+    func result() -> Int
+}
+
+class Calculator: Calculatable {
+    private var value: Int
+
+    init(initial: Int = 0) {
+        self.value = initial
+    }
+
+    func add(_ n: Int) -> Int {
+        value += n
+        return value
+    }
+
+    func result() -> Int {
+        return value
+    }
+}
+
+enum Operation: String {
+    case add = "Addition"
+    case subtract = "Subtraction"
+    case multiply = "Multiplication"
+}
+"#;
+        let chunks = chunk_file(source, "Calculator.swift", SupportedLanguage::Swift);
+        assert!(
+            !chunks.is_empty(),
+            "Should produce chunks from Swift source"
+        );
+        assert_eq!(chunks[0].language, "swift");
+    }
+
+    #[test]
+    fn chunk_kotlin_class_and_functions() {
+        let source = r#"
+package com.example.calculator
+
+interface Calculatable {
+    fun add(n: Int): Int
+    fun result(): Int
+}
+
+class Calculator(initial: Int = 0) : Calculatable {
+    private var value: Int = initial
+
+    override fun add(n: Int): Int {
+        value += n
+        return value
+    }
+
+    override fun result(): Int {
+        return value
+    }
+}
+
+object CalculatorFactory {
+    fun create(): Calculator = Calculator(0)
+    fun createWithInitial(value: Int): Calculator = Calculator(value)
+}
+"#;
+        let chunks = chunk_file(source, "Calculator.kt", SupportedLanguage::Kotlin);
+        assert!(
+            !chunks.is_empty(),
+            "Should produce chunks from Kotlin source"
+        );
+        assert_eq!(chunks[0].language, "kotlin");
     }
 }

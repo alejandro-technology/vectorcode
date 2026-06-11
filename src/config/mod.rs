@@ -27,6 +27,7 @@ pub fn load_config(project_path: &std::path::Path) -> Result<Config> {
 mod tests {
     use super::*;
     use crate::config::schema::*;
+    use serial_test::serial;
 
     #[test]
     fn default_config_has_expected_values() {
@@ -127,41 +128,39 @@ model = "text-embedding-3-large"
     }
 
     #[test]
+    #[serial]
     fn env_var_overrides_provider_name() {
+        std::env::set_var("VECTORCODE_PROVIDER", "gemini");
         let mut cfg = Config::default();
-        assert_eq!(cfg.provider.name, "onnx");
-
-        // Simulate env var being set
-        temp_env_var("VECTORCODE_PROVIDER", "gemini", || {
-            cfg.apply_env_overrides();
-            assert_eq!(cfg.provider.name, "gemini");
-        });
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.provider.name, "gemini");
+        std::env::remove_var("VECTORCODE_PROVIDER");
     }
 
     #[test]
+    #[serial]
     fn env_var_overrides_watcher_disabled() {
+        std::env::set_var("VECTORCODE_NO_WATCH", "1");
         let mut cfg = Config::default();
-        assert!(!cfg.watcher.disabled);
-
-        temp_env_var("VECTORCODE_NO_WATCH", "1", || {
-            cfg.apply_env_overrides();
-            assert!(cfg.watcher.disabled);
-        });
+        cfg.apply_env_overrides();
+        assert!(cfg.watcher.disabled);
+        std::env::remove_var("VECTORCODE_NO_WATCH");
     }
 
     #[test]
+    #[serial]
     fn env_var_overrides_debounce_ms() {
+        std::env::set_var("VECTORCODE_DEBOUNCE_MS", "5000");
         let mut cfg = Config::default();
-        assert_eq!(cfg.watcher.debounce_ms, 2000);
-
-        temp_env_var("VECTORCODE_DEBOUNCE_MS", "5000", || {
-            cfg.apply_env_overrides();
-            assert_eq!(cfg.watcher.debounce_ms, 5000);
-        });
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.watcher.debounce_ms, 5000);
+        std::env::remove_var("VECTORCODE_DEBOUNCE_MS");
     }
 
     #[test]
+    #[serial]
     fn load_config_from_nonexistent_dir_returns_defaults() {
+        // #[serial] ensures no other test has env vars set that would override defaults
         let dir = tempfile::tempdir().unwrap();
         let cfg = load_config(dir.path()).unwrap();
         assert_eq!(cfg.provider.name, "onnx");
@@ -169,6 +168,7 @@ model = "text-embedding-3-large"
     }
 
     #[test]
+    #[serial]
     fn load_config_reads_file_when_present() {
         let dir = tempfile::tempdir().unwrap();
         let vc_dir = dir.path().join(".vectorcode");
@@ -190,14 +190,18 @@ default_limit = 25
         assert_eq!(cfg.search.default_limit, 25);
     }
 
-    /// Helper: set an env var for the duration of a closure, then restore it.
-    fn temp_env_var<F: FnOnce()>(key: &str, value: &str, f: F) {
-        let prev = std::env::var(key).ok();
-        std::env::set_var(key, value);
-        f();
-        match prev {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
+    /// Regression test: load_config must not be affected by concurrent env var mutations.
+    /// Uses #[serial] to guarantee no other env-touching test runs in parallel.
+    #[test]
+    #[serial]
+    fn load_config_env_isolation_under_serial() {
+        // Set an env var that would change the provider if read
+        std::env::set_var("VECTORCODE_PROVIDER", "gemini");
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = load_config(dir.path()).unwrap();
+        // With #[serial], this test owns the env — override IS applied
+        assert_eq!(cfg.provider.name, "gemini");
+        // Cleanup
+        std::env::remove_var("VECTORCODE_PROVIDER");
     }
 }

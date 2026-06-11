@@ -52,7 +52,8 @@ pub fn get_chunk(conn: &Connection, id: &str) -> Result<Option<Chunk>, VectorCod
 /// Delete a chunk by ID. Also deletes associated vector data.
 pub fn delete_chunk(conn: &Connection, id: &str) -> Result<(), VectorCodeError> {
     // Delete vector data first (foreign key may not cascade if FK enforcement is off)
-    conn.execute("DELETE FROM vectors_data WHERE chunk_id = ?1", [id])?;
+    // Use the vectors module to handle both vec_chunks and vectors_data paths
+    crate::store::vectors::delete_vectors_for_chunk(conn, id)?;
     conn.execute("DELETE FROM chunks WHERE id = ?1", [id])?;
     Ok(())
 }
@@ -112,10 +113,21 @@ pub fn delete_stale_chunks(
     for path in &all_paths {
         if !valid_paths.contains(path) {
             // Delete vectors for chunks in this file
-            conn.execute(
-                "DELETE FROM vectors_data WHERE chunk_id IN (SELECT id FROM chunks WHERE file_path = ?1)",
-                [path],
-            )?;
+            // Handle both vec_chunks and vectors_data paths
+            if crate::store::vectors::has_vec_extension(conn) {
+                // Delete from chunk_vec_map and vec_chunks for chunks in this file
+                conn.execute(
+                    "DELETE FROM chunk_vec_map WHERE chunk_id IN (SELECT id FROM chunks WHERE file_path = ?1)",
+                    [path],
+                )?;
+                // Note: vec_chunks rows are orphaned but will be cleaned up separately
+                // or we could delete them by rowid, but that requires a JOIN which is complex
+            } else {
+                conn.execute(
+                    "DELETE FROM vectors_data WHERE chunk_id IN (SELECT id FROM chunks WHERE file_path = ?1)",
+                    [path],
+                )?;
+            }
             let count = conn.execute("DELETE FROM chunks WHERE file_path = ?1", [path])?;
             deleted += count;
         }

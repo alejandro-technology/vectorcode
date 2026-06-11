@@ -1,0 +1,162 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Test & Lint ──────────────────────────────────────────────────────────────
+  test:
+    name: Test & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --all-targets
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Format check
+        run: cargo fmt --check
+
+  # ── Build Matrix ─────────────────────────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.target }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            use_cross: false
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            use_cross: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            use_cross: false
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            use_cross: false
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            use_cross: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        uses: taiki-e/install-action@cross
+
+      - name: Build release
+        if: "!matrix.use_cross"
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build release (cross)
+        if: matrix.use_cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vectorcode-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/vectorcode
+            target/${{ matrix.target }}/release/vectorcode.exe
+          retention-days: 30
+
+  # ── Release ──────────────────────────────────────────────────────────────────
+  release:
+    name: Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display downloaded artifacts
+        run: find artifacts -type f -ls
+
+      - name: Package release assets
+        run: |
+          mkdir -p dist
+          cd artifacts
+
+          for dir in vectorcode-*/; do
+            target="${dir#vectorcode-}"
+            target="${target%/}"
+
+            # Find the binary (with or without .exe)
+            binary=""
+            if [ -f "$dir/vectorcode.exe" ]; then
+              binary="$dir/vectorcode.exe"
+            elif [ -f "$dir/vectorcode" ]; then
+              binary="$dir/vectorcode"
+            else
+              echo "WARNING: No binary found in $dir, skipping"
+              continue
+            fi
+
+            # Create tarball
+            echo "Packaging $target..."
+            tmpdir=$(mktemp -d)
+            cp "$binary" "$tmpdir/vectorcode"
+            chmod +x "$tmpdir/vectorcode"
+
+            tar -czf "../dist/vectorcode-${target}.tar.gz" -C "$tmpdir" vectorcode
+            rm -rf "$tmpdir"
+          done
+
+          cd ../dist
+
+          # Generate checksums
+          sha256sum *.tar.gz > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Args;
+use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::embedder::mock::MockEmbedder;
 use crate::store::db::Database;
@@ -59,6 +60,7 @@ pub async fn execute(args: &IndexArgs, project_path: &std::path::Path, quiet: bo
         );
     }
     let index_meta = index_meta.unwrap();
+    eprintln!("DEBUG: meta loaded");
 
     // Handle --full: drop all data and reinit schema
     if args.full {
@@ -73,7 +75,9 @@ pub async fn execute(args: &IndexArgs, project_path: &std::path::Path, quiet: bo
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
 
         let db = Database::open(&db_path)?;
+        eprintln!("DEBUG: Re-opened db");
         db.init_schema(index_meta.dimensions)?;
+        eprintln!("DEBUG: init_schema done");
         // Re-write meta with zeroed stats
         let now = crate::cli::init::chrono_now_public();
         let fresh_meta = crate::types::IndexMeta {
@@ -89,6 +93,7 @@ pub async fn execute(args: &IndexArgs, project_path: &std::path::Path, quiet: bo
         meta::write_index_meta(db.conn(), &fresh_meta)?;
     }
 
+    eprintln!("DEBUG: creating embedder...");
     // Create embedder
     let embedder: Arc<dyn crate::embedder::Embedder> =
         match crate::cli::create_embedder_from_config(&config) {
@@ -105,9 +110,35 @@ pub async fn execute(args: &IndexArgs, project_path: &std::path::Path, quiet: bo
             }
         };
 
+    eprintln!("DEBUG: embedder created.");
     // Create indexer and run
     let indexer =
         crate::engine::Indexer::new(Database::open(&db_path)?, embedder, config.indexing.clone());
+
+    // Set up progress callback for CLI mode (visual progress bars)
+    let progress_bar = if quiet {
+        None
+    } else {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} {msg}")
+                .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+        );
+        pb.set_message("Starting indexing...");
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        Some(pb)
+    };
+
+    let indexer = if let Some(ref pb) = progress_bar {
+        let pb_clone = pb.clone();
+        let progress_callback = Arc::new(move |message: &str| {
+            pb_clone.set_message(message.to_string());
+        });
+        indexer.with_progress(progress_callback)
+    } else {
+        indexer
+    };
 
     let report = if let Some(ref file_path) = args.file {
         // Index a specific file
@@ -119,11 +150,19 @@ pub async fn execute(args: &IndexArgs, project_path: &std::path::Path, quiet: bo
         if !abs_path.exists() {
             anyhow::bail!("File not found: {}", abs_path.display());
         }
+        eprintln!("DEBUG: running index_files...");
         indexer.index_files(&[abs_path], project_path).await?
     } else {
         // Full project index
+        eprintln!("DEBUG: running index_project...");
         indexer.index_project(project_path).await?
     };
+    eprintln!("DEBUG: indexing finished.");
+
+    // Finish the progress bar with a success message
+    if let Some(pb) = progress_bar {
+        pb.finish_with_message("Indexing complete");
+    }
 
     // Update meta stats
     let db = Database::open(&db_path)?;
@@ -219,7 +258,7 @@ mod tests {
 
         // Init first
         let init_args = crate::cli::init::InitArgs {
-            provider: crate::cli::ProviderArg::Onnx,
+            provider: Some(crate::cli::ProviderArg::Gemini),
             model: None,
             dims: None,
             index: false,
@@ -249,7 +288,7 @@ mod tests {
 
         // Init
         let init_args = crate::cli::init::InitArgs {
-            provider: crate::cli::ProviderArg::Onnx,
+            provider: Some(crate::cli::ProviderArg::Gemini),
             model: None,
             dims: None,
             index: false,
@@ -264,7 +303,9 @@ mod tests {
             file: None,
             concurrency: 8,
         };
+        println!("DEBUG: Running indexer...");
         let result = rt.block_on(execute(&index_args, project_path, true));
+        println!("DEBUG: Indexer done.");
         assert!(
             result.is_ok(),
             "Full reindex should succeed: {:?}",

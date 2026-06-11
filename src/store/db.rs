@@ -1,10 +1,49 @@
 use anyhow::Result;
 use rusqlite::Connection;
+use std::sync::OnceLock;
 
 use crate::VectorCodeError;
 
 /// Current schema version — bump when migrating.
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
+
+/// Normalize a vector to the target dimension by padding with zeros or truncating.
+///
+/// Used during v1→v2 migration when stored embeddings may not match the
+/// configured dimensions.
+fn normalize_dimensions(vec: &[f32], target_dims: usize) -> Vec<f32> {
+    if vec.len() == target_dims {
+        return vec.to_vec();
+    }
+    let mut result = vec![0.0f32; target_dims];
+    let copy_len = vec.len().min(target_dims);
+    result[..copy_len].copy_from_slice(&vec[..copy_len]);
+    result
+}
+
+/// Register the sqlite-vec extension exactly once per process.
+///
+/// Uses `OnceLock` to ensure `sqlite3_auto_extension` is called before any
+/// connection is opened, and only once. After this, every new SQLite connection
+/// will automatically have sqlite-vec functions (vec_version, vec0, etc.).
+fn register_sqlite_vec() {
+    static REGISTERED: OnceLock<()> = OnceLock::new();
+    REGISTERED.get_or_init(|| {
+        // sqlite3_vec_init is an opaque C entry point; transmute to the
+        // sqlite3_auto_extension callback signature expected by SQLite.
+        type AutoExtFn = unsafe extern "C" fn(
+            *mut rusqlite::ffi::sqlite3,
+            *mut *mut std::os::raw::c_char,
+            *const rusqlite::ffi::sqlite3_api_routines,
+        ) -> std::os::raw::c_int;
+        unsafe {
+            let init_fn: AutoExtFn = std::mem::transmute::<unsafe extern "C" fn(), AutoExtFn>(
+                sqlite_vec::sqlite3_vec_init,
+            );
+            rusqlite::ffi::sqlite3_auto_extension(Some(init_fn));
+        }
+    });
+}
 
 /// SQLite database wrapper with WAL mode and schema management.
 ///
@@ -16,6 +55,7 @@ pub struct Database {
 impl Database {
     /// Open (or create) a database at the given path with WAL mode.
     pub fn open(path: &std::path::Path) -> Result<Self, VectorCodeError> {
+        register_sqlite_vec();
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -24,15 +64,19 @@ impl Database {
 
     /// Open an in-memory database (for testing).
     pub fn open_in_memory() -> Result<Self, VectorCodeError> {
+        register_sqlite_vec();
         let conn = Connection::open_in_memory()?;
         Ok(Self { conn })
     }
 
     /// Initialize the full schema per spec §6.
     ///
-    /// Creates `meta`, `chunks`, `files`, and `vectors_data` tables.
-    /// The `vec_chunks` virtual table (sqlite-vec) is attempted; if the
-    /// extension is not loaded, we fall back to `vectors_data` (ST-5 fallback).
+    /// Creates `meta`, `chunks`, `files`, `vectors_data`, and `chunk_vec_map` tables.
+    /// The `vec_chunks` virtual table (sqlite-vec) is created when the extension is
+    /// available; if not, we fall back to `vectors_data` (ST-5 fallback).
+    ///
+    /// Handles v1→v2 migration: migrates `vectors_data` JSON embeddings into
+    /// `vec_chunks` binary format when upgrading from schema version 1.
     ///
     /// Uses `user_version` PRAGMA for migration tracking.
     pub fn init_schema(&self, dims: u32) -> Result<(), VectorCodeError> {
@@ -85,25 +129,43 @@ impl Database {
 
             -- Vector fallback storage (used when sqlite-vec extension is unavailable).
             -- Stores embedding as JSON array of floats.
-            -- TODO: Replace with sqlite-vec virtual table when extension is loaded.
             CREATE TABLE IF NOT EXISTS vectors_data (
                 chunk_id  TEXT PRIMARY KEY,
                 embedding TEXT NOT NULL,
                 FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
             );
+
+            -- Mapping table: chunk_id → vec_chunks rowid.
+            -- Used when sqlite-vec extension is available to link text chunk IDs
+            -- to the implicit integer rowids of the vec0 virtual table.
+            CREATE TABLE IF NOT EXISTS chunk_vec_map (
+                chunk_id  TEXT PRIMARY KEY,
+                vec_rowid INTEGER NOT NULL,
+                FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+            );
             ",
         )?;
 
-        // Attempt to create the sqlite-vec virtual table.
+        // Attempt to create the sqlite-vec virtual table with cosine distance.
         // This will fail gracefully if the extension is not loaded.
         let vec_sql = format!(
             "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(\
-                chunk_id TEXT PRIMARY KEY,\
-                embedding float[{dims}]\
+                embedding float[{dims}] distance_metric=cosine\
             )"
         );
         let _vec_result = self.conn.execute_batch(&vec_sql);
         // We intentionally ignore errors here — the fallback table handles it.
+
+        // Store the embedding dimensions in meta table for later retrieval
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('embedding_dims', ?1)",
+            [dims.to_string().as_str()],
+        )?;
+
+        // v1 → v2 migration: migrate vectors_data JSON embeddings to vec_chunks binary.
+        if current_version == 1 && self.has_vec_extension() {
+            self.migrate_v1_to_v2(dims)?;
+        }
 
         // Set schema version
         self.conn
@@ -112,11 +174,69 @@ impl Database {
         Ok(())
     }
 
+    /// Migrate vector data from v1 (JSON in vectors_data) to v2 (binary in vec_chunks).
+    ///
+    /// Reads each row from `vectors_data`, deserializes the JSON embedding,
+    /// converts to a binary blob, and inserts into `vec_chunks` + `chunk_vec_map`.
+    fn migrate_v1_to_v2(&self, dims: u32) -> Result<(), VectorCodeError> {
+        // Check if there's anything to migrate
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM vectors_data", [], |row| row.get(0))?;
+        if count == 0 {
+            return Ok(());
+        }
+
+        let mut select_stmt = self
+            .conn
+            .prepare("SELECT chunk_id, embedding FROM vectors_data")?;
+        let rows = select_stmt.query_map([], |row| {
+            let chunk_id: String = row.get(0)?;
+            let embedding_json: String = row.get(1)?;
+            Ok((chunk_id, embedding_json))
+        })?;
+
+        for row in rows {
+            let (chunk_id, embedding_json) = row.map_err(|e| VectorCodeError::EmbedderError {
+                message: format!("Migration read error: {e}"),
+            })?;
+
+            let embedding: Vec<f32> = match serde_json::from_str(&embedding_json) {
+                Ok(v) => v,
+                Err(_) => continue, // Skip malformed rows
+            };
+
+            // Ensure the embedding matches expected dimensions (pad or truncate)
+            let embedding = normalize_dimensions(&embedding, dims as usize);
+
+            // Convert to binary blob (little-endian f32 bytes)
+            let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+
+            // Insert into vec_chunks (let SQLite assign rowid)
+            self.conn.execute(
+                "INSERT INTO vec_chunks(rowid, embedding) VALUES (NULL, ?1)",
+                rusqlite::params![blob],
+            )?;
+
+            // Get the assigned rowid
+            let vec_rowid: i64 = self.conn.last_insert_rowid();
+
+            // Store the mapping
+            self.conn.execute(
+                "INSERT OR REPLACE INTO chunk_vec_map (chunk_id, vec_rowid) VALUES (?1, ?2)",
+                (&chunk_id, vec_rowid),
+            )?;
+        }
+
+        Ok(())
+    }
+
     /// Check whether the sqlite-vec extension is available.
+    ///
+    /// Queries `vec_version()` which is provided by the extension itself,
+    /// independent of whether any virtual tables have been created.
     pub fn has_vec_extension(&self) -> bool {
-        self.conn
-            .prepare("SELECT 1 FROM vec_chunks LIMIT 0")
-            .is_ok()
+        self.conn.prepare("SELECT vec_version()").is_ok()
     }
 
     /// Get a reference to the underlying connection (for CRUD modules).
@@ -211,7 +331,7 @@ mod tests {
             .conn()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1, "Schema version must be 1 after init");
+        assert_eq!(version, 2, "Schema version must be 2 after init");
     }
 
     #[test]
@@ -225,7 +345,7 @@ mod tests {
             .conn()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
     }
 
     #[test]
@@ -312,5 +432,294 @@ mod tests {
     fn open_fails_for_invalid_path() {
         let result = Database::open(std::path::Path::new("/nonexistent/dir/db.sqlite"));
         assert!(result.is_err(), "Opening invalid path must fail");
+    }
+
+    #[test]
+    fn has_vec_extension_returns_true_after_open() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(
+            db.has_vec_extension(),
+            "sqlite-vec extension must be available after database open"
+        );
+    }
+
+    #[test]
+    fn vec_version_returns_valid_string() {
+        let db = Database::open_in_memory().unwrap();
+        let version: String = db
+            .conn()
+            .query_row("SELECT vec_version()", [], |row| row.get(0))
+            .expect("vec_version() must be available when sqlite-vec is registered");
+        assert!(
+            version.starts_with('v') || version.starts_with('0'),
+            "vec_version() must return a valid version string, got: {version}"
+        );
+    }
+
+    #[test]
+    fn vec0_virtual_table_can_be_created_and_queried() {
+        let db = Database::open_in_memory().unwrap();
+        // Create a vec0 virtual table with 4-dimensional float vectors
+        db.conn()
+            .execute_batch("CREATE VIRTUAL TABLE test_vec USING vec0(embedding float[4])")
+            .expect("vec0 virtual table creation must succeed with sqlite-vec loaded");
+
+        // Insert a vector using rowid and binary blob (f32 le bytes)
+        let vec_data: Vec<u8> = [1.0f32, 0.0, 0.0, 0.0]
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        db.conn()
+            .execute(
+                "INSERT INTO test_vec(rowid, embedding) VALUES (1, ?1)",
+                rusqlite::params![vec_data],
+            )
+            .expect("Insert into vec0 must succeed");
+
+        // Query with KNN match
+        let query_blob: Vec<u8> = [0.9f32, 0.1, 0.0, 0.0]
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        let rowid: i64 = db
+            .conn()
+            .prepare(
+                "SELECT rowid FROM test_vec WHERE embedding MATCH ?1 ORDER BY distance LIMIT 1",
+            )
+            .unwrap()
+            .query_row(rusqlite::params![query_blob], |row| row.get(0))
+            .expect("KNN query on vec0 must return results");
+        assert_eq!(rowid, 1, "Nearest neighbor must be the inserted row");
+    }
+
+    // ─── Phase 5: vec_chunks wiring tests ──────────────────────────────
+
+    #[test]
+    fn init_schema_creates_vec_chunks_virtual_table() {
+        let db = Database::open_in_memory().unwrap();
+        db.init_schema(4).unwrap();
+
+        // vec_chunks should exist as a virtual table in sqlite_master
+        let count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='vec_chunks'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "vec_chunks virtual table must be created when sqlite-vec extension is available"
+        );
+    }
+
+    #[test]
+    fn init_schema_creates_chunk_vec_map_table() {
+        let db = Database::open_in_memory().unwrap();
+        db.init_schema(4).unwrap();
+
+        let tables: Vec<String> = db
+            .conn()
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert!(
+            tables.contains(&"chunk_vec_map".to_string()),
+            "chunk_vec_map table missing: {tables:?}"
+        );
+    }
+
+    #[test]
+    fn init_schema_v2_sets_user_version_to_2() {
+        let db = Database::open_in_memory().unwrap();
+        db.init_schema(4).unwrap();
+
+        let version: u32 = db
+            .conn()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            version, 2,
+            "Schema version must be 2 after init with vec_chunks support"
+        );
+    }
+
+    #[test]
+    fn init_schema_migrates_v1_vectors_data_to_vec_chunks() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Manually create a v1 schema (without vec_chunks)
+        db.conn()
+            .execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS meta (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS chunks (
+                    id             TEXT PRIMARY KEY,
+                    file_path      TEXT NOT NULL,
+                    start_line     INTEGER NOT NULL,
+                    end_line       INTEGER NOT NULL,
+                    byte_start     INTEGER NOT NULL,
+                    byte_end       INTEGER NOT NULL,
+                    symbol         TEXT,
+                    kind           TEXT NOT NULL,
+                    content        TEXT NOT NULL,
+                    parent_context TEXT,
+                    language       TEXT NOT NULL,
+                    file_mtime     INTEGER NOT NULL,
+                    content_hash   TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS files (
+                    path       TEXT PRIMARY KEY,
+                    mtime      INTEGER NOT NULL,
+                    size       INTEGER NOT NULL,
+                    hash       TEXT NOT NULL,
+                    indexed_at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS vectors_data (
+                    chunk_id  TEXT PRIMARY KEY,
+                    embedding TEXT NOT NULL,
+                    FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+                );
+                ",
+            )
+            .unwrap();
+
+        // Set user_version to 1 (v1 schema)
+        db.conn().pragma_update(None, "user_version", 1).unwrap();
+
+        // Insert a test chunk and its vector (v1 format: JSON array)
+        db.conn()
+            .execute(
+                "INSERT INTO chunks (id, file_path, start_line, end_line, byte_start, byte_end, \
+                 kind, content, language, file_mtime, content_hash) \
+                 VALUES (?1, ?2, 1, 5, 0, 20, 'function', 'fn test() {}', 'rust', 0, 'hash1')",
+                ("chunk_migrate_1", "src/test.rs"),
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO vectors_data (chunk_id, embedding) VALUES (?1, ?2)",
+                ("chunk_migrate_1", "[1.0, 0.0, 0.0, 0.0]"),
+            )
+            .unwrap();
+
+        // Now run init_schema — should migrate v1 → v2
+        db.init_schema(4).unwrap();
+
+        // Verify user_version is now 2
+        let version: u32 = db
+            .conn()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2, "Schema version must be 2 after migration");
+
+        // Verify vec_chunks exists
+        let vec_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='vec_chunks'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(vec_count, 1, "vec_chunks must exist after migration");
+
+        // Verify the vector was migrated: search for it in vec_chunks
+        let query_blob: Vec<u8> = [1.0f32, 0.0, 0.0, 0.0]
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        let mapping_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM chunk_vec_map WHERE chunk_id = ?1",
+                ["chunk_migrate_1"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            mapping_count, 1,
+            "chunk_vec_map must have the migrated chunk_id"
+        );
+
+        // Verify we can find the migrated vector via KNN query
+        let rowid: i64 = db
+            .conn()
+            .prepare(
+                "SELECT m.vec_rowid FROM (\
+                    SELECT rowid FROM vec_chunks \
+                    WHERE embedding MATCH ?1 ORDER BY distance LIMIT 1\
+                ) v \
+                JOIN chunk_vec_map m ON v.rowid = m.vec_rowid",
+            )
+            .unwrap()
+            .query_row(rusqlite::params![query_blob], |row| row.get(0))
+            .expect("Migrated vector must be findable via KNN query");
+        assert!(rowid > 0, "Migrated vector must have a valid rowid");
+    }
+
+    #[test]
+    fn vec0_with_cosine_distance_metric_works() {
+        let db = Database::open_in_memory().unwrap();
+        db.conn()
+            .execute_batch(
+                "CREATE VIRTUAL TABLE test_cosine USING vec0(\
+                    embedding float[4] distance_metric=cosine\
+                )",
+            )
+            .expect("vec0 with distance_metric=cosine must succeed");
+
+        // Insert two vectors: one aligned with query, one orthogonal
+        let aligned: Vec<u8> = [1.0f32, 0.0, 0.0, 0.0]
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        let orthogonal: Vec<u8> = [0.0f32, 0.0, 0.0, 1.0]
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        db.conn()
+            .execute(
+                "INSERT INTO test_cosine(rowid, embedding) VALUES (1, ?1)",
+                rusqlite::params![aligned],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO test_cosine(rowid, embedding) VALUES (2, ?1)",
+                rusqlite::params![orthogonal],
+            )
+            .unwrap();
+
+        // Query with same direction as vector 1
+        let query: Vec<u8> = [1.0f32, 0.0, 0.0, 0.0]
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        let (rowid, distance): (i64, f32) = db
+            .conn()
+            .prepare(
+                "SELECT rowid, distance FROM test_cosine \
+                 WHERE embedding MATCH ?1 ORDER BY distance LIMIT 1",
+            )
+            .unwrap()
+            .query_row(rusqlite::params![query], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+
+        assert_eq!(rowid, 1, "Nearest neighbor must be the aligned vector");
+        assert!(
+            distance.abs() < 0.01,
+            "Cosine distance of identical vectors should be ~0.0, got {distance}"
+        );
     }
 }

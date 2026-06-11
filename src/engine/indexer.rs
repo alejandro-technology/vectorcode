@@ -35,11 +35,19 @@ pub struct IndexReport {
     pub duration: Duration,
 }
 
+/// Callback type for progress reporting during indexing.
+///
+/// Called with a human-readable phase message (e.g. "[1/3] Discovering files...").
+/// When set, the Indexer calls this INSTEAD of `tracing::info!` for phase messages,
+/// allowing CLI callers to show visual progress bars while MCP callers keep tracing.
+pub type ProgressCallback = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Orchestrates the full and incremental indexing pipeline (spec §9).
 pub struct Indexer {
     db: Database,
     embedder: Arc<dyn Embedder>,
     config: IndexingConfig,
+    progress: Option<ProgressCallback>,
 }
 
 impl Indexer {
@@ -49,6 +57,25 @@ impl Indexer {
             db,
             embedder,
             config,
+            progress: None,
+        }
+    }
+
+    /// Set a progress callback for visual progress reporting (e.g. indicatif).
+    ///
+    /// When set, phase messages are sent to the callback instead of `tracing::info!`.
+    /// This allows CLI callers to show progress bars while MCP callers keep tracing logs.
+    pub fn with_progress(mut self, callback: ProgressCallback) -> Self {
+        self.progress = Some(callback);
+        self
+    }
+
+    /// Report a phase message via the progress callback or tracing.
+    fn report_progress(&self, message: &str) {
+        if let Some(ref cb) = self.progress {
+            cb(message);
+        } else {
+            info!("{}", message);
         }
     }
 
@@ -60,10 +87,10 @@ impl Indexer {
         let start = Instant::now();
 
         // Step 1: Discover files
-        info!("[1/3] Discovering files...");
+        self.report_progress("[1/3] Discovering files...");
         let file_paths = discover_files(project_path, &self.config);
         let files_scanned = file_paths.len();
-        info!("[1/3] Found {} files", files_scanned);
+        self.report_progress(&format!("[1/3] Found {} files", files_scanned));
 
         // Build set of valid relative paths (for stale chunk cleanup)
         let valid_paths: HashSet<String> = file_paths
@@ -77,13 +104,13 @@ impl Indexer {
             self.process_file_entries(&file_paths, project_path)?;
 
         let chunks_new = new_chunks.len();
-        info!(
+        self.report_progress(&format!(
             "[2/3] Chunking... {} new, {} skipped",
             chunks_new, chunks_skipped
-        );
+        ));
 
         // Step 3: Embed and store
-        info!("[3/3] Embedding {} chunks...", chunks_new);
+        self.report_progress(&format!("[3/3] Embedding {} chunks...", chunks_new));
         if !new_chunks.is_empty() {
             let texts: Vec<String> = new_chunks.iter().map(enrich_chunk_content).collect();
             let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
@@ -105,12 +132,12 @@ impl Indexer {
                 .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
 
         let duration = start.elapsed();
-        info!(
+        self.report_progress(&format!(
             "Indexed {} files, {} chunks in {:.1}s",
             files_scanned,
             chunks_total,
             duration.as_secs_f64()
-        );
+        ));
 
         Ok(IndexReport {
             files_scanned,
@@ -465,8 +492,10 @@ def filter_active_users(users: list) -> list:
         create_ts_file(dir.path(), "small.ts", &sample_ts_content());
 
         // Create a file that exceeds max_file_size
-        let mut config = IndexingConfig::default();
-        config.max_file_size = 50; // Very small limit
+        let config = IndexingConfig {
+            max_file_size: 50, // Very small limit
+            ..Default::default()
+        };
 
         let files = discover_files(dir.path(), &config);
         assert!(
@@ -658,7 +687,7 @@ def filter_active_users(users: list) -> list:
     async fn index_project_cleans_stale_chunks() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("temp.ts");
-        create_ts_file(&dir.path(), "temp.ts", &sample_ts_content());
+        create_ts_file(dir.path(), "temp.ts", &sample_ts_content());
 
         let indexer = setup_indexer();
 

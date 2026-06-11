@@ -272,7 +272,7 @@ mod tests {
 
         // Init first
         let init_args = crate::cli::init::InitArgs {
-            provider: crate::cli::ProviderArg::Onnx,
+            provider: Some(crate::cli::ProviderArg::Gemini),
             model: None,
             dims: None,
             index: false,

@@ -157,7 +157,7 @@ mod tests {
 
         // Init first
         let init_args = crate::cli::init::InitArgs {
-            provider: crate::cli::ProviderArg::Ollama,
+            provider: Some(crate::cli::ProviderArg::Ollama),
             model: None,
             dims: None,
             index: false,

@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::Args;
 
 use crate::embedder::mock::MockEmbedder;
+use crate::embedder::model_manager::ModelManager;
 use crate::store::db::Database;
 use crate::store::meta;
 use crate::types::IndexMeta;
@@ -13,9 +14,9 @@ use super::ProviderArg;
 /// Arguments for `vectorcode init`.
 #[derive(Args, Debug)]
 pub struct InitArgs {
-    /// Embedding provider to use.
-    #[arg(long, value_enum, default_value = "onnx")]
-    pub provider: ProviderArg,
+    /// Embedding provider to use (omit for interactive selection).
+    #[arg(long, value_enum)]
+    pub provider: Option<ProviderArg>,
 
     /// Model name (provider-specific default if omitted).
     #[arg(long)]
@@ -51,11 +52,42 @@ pub async fn execute(args: &InitArgs, project_path: &std::path::Path, quiet: boo
         );
     }
 
+    // Resolve provider: use CLI arg if given, otherwise interactive prompt
+    let provider = match &args.provider {
+        Some(p) => p.clone(),
+        None => prompt_provider_interactive(),
+    };
+
+    // Prompt for API key if needed (gemini, openai)
+    let api_key = prompt_api_key_if_needed(&provider);
+
     // Step 1: Create .vectorcode/ directory
     std::fs::create_dir_all(&vc_dir)?;
 
     // Resolve provider defaults
-    let (model, dims) = resolve_provider_defaults(&args.provider, &args.model, &args.dims);
+    let (model, dims) = resolve_provider_defaults(&provider, &args.model, &args.dims);
+
+    // If ONNX selected, ensure model is downloaded
+    if matches!(provider, ProviderArg::Onnx) {
+        let manager = ModelManager::new();
+        if !manager.is_downloaded() {
+            #[cfg(not(test))]
+            {
+                if !quiet {
+                    eprintln!("ONNX model not found. Downloading from HuggingFace...");
+                }
+                manager.download_model().await?;
+                if !quiet {
+                    eprintln!("ONNX model downloaded to ~/.vectorcode/models/");
+                }
+            }
+            #[cfg(test)]
+            {
+                // In tests, skip actual download — model_manager tests cover this
+                let _ = manager; // suppress unused warning
+            }
+        }
+    }
 
     // Step 2: Create index.db with schema
     let db_path = vc_dir.join("index.db");
@@ -65,7 +97,7 @@ pub async fn execute(args: &InitArgs, project_path: &std::path::Path, quiet: boo
     // Step 3: Write meta table
     let now = chrono_now();
     let index_meta = IndexMeta {
-        provider: args.provider.as_str().to_string(),
+        provider: provider.as_str().to_string(),
         model: model.clone(),
         dimensions: dims,
         created_at: now.clone(),
@@ -81,13 +113,13 @@ pub async fn execute(args: &InitArgs, project_path: &std::path::Path, quiet: boo
     std::fs::write(&gitignore_path, "index.db\nindex.db-wal\nindex.db-shm\n")?;
 
     // Step 5: Create config.toml
-    let config_content = generate_config_toml(&args.provider, &model, dims);
+    let config_content = generate_config_toml(&provider, &model, dims, &api_key);
     let config_path = vc_dir.join("config.toml");
     std::fs::write(&config_path, &config_content)?;
 
     if !quiet {
         eprintln!("VectorCode initialized in {}", vc_dir.display());
-        eprintln!("  Provider: {}", args.provider.as_str());
+        eprintln!("  Provider: {}", provider.as_str());
         eprintln!("  Model:    {model}");
         eprintln!("  Dims:     {dims}");
     }
@@ -154,8 +186,89 @@ fn resolve_provider_defaults(
     }
 }
 
+/// Return the interactive provider selection prompt text.
+fn provider_prompt_text() -> &'static str {
+    "Select embedding provider:\n\
+     [1] onnx    — Local, offline, no API key needed (~23MB download)\n\
+     [2] gemini  — Google API, requires GEMINI_API_KEY\n\
+     [3] ollama  — Local Ollama server, requires ollama serve\n\
+     [4] openai  — OpenAI API, requires OPENAI_API_KEY\n\
+     Enter number (1-4): "
+}
+
+/// Parse a user's numbered input into a `ProviderArg`.
+///
+/// Accepts "1"–"4" with optional surrounding whitespace.
+/// Returns `None` for invalid input.
+fn parse_provider_choice(input: &str) -> Option<ProviderArg> {
+    match input.trim() {
+        "1" => Some(ProviderArg::Onnx),
+        "2" => Some(ProviderArg::Gemini),
+        "3" => Some(ProviderArg::Ollama),
+        "4" => Some(ProviderArg::Openai),
+        _ => None,
+    }
+}
+
+/// Return the environment variable name for a provider's API key.
+///
+/// Returns empty string for providers that don't use API keys (onnx, ollama).
+fn api_key_env_var(provider: &ProviderArg) -> &'static str {
+    match provider {
+        ProviderArg::Gemini => "GEMINI_API_KEY",
+        ProviderArg::Openai => "OPENAI_API_KEY",
+        ProviderArg::Onnx | ProviderArg::Ollama => "",
+    }
+}
+
+/// Whether a provider requires an API key.
+fn provider_requires_api_key(provider: &ProviderArg) -> bool {
+    !api_key_env_var(provider).is_empty()
+}
+
+/// Prompt the user to select a provider interactively via stdin.
+///
+/// Loops until a valid choice (1–4) is entered.
+fn prompt_provider_interactive() -> ProviderArg {
+    loop {
+        eprint!("{}", provider_prompt_text());
+        let mut input = String::new();
+        if std::io::stdin().read_line(&mut input).is_err() {
+            input.clear();
+        }
+        match parse_provider_choice(&input) {
+            Some(provider) => return provider,
+            None => eprintln!("Invalid choice. Please enter 1, 2, 3, or 4."),
+        }
+    }
+}
+
+/// Prompt for an API key if the provider requires one.
+///
+/// Returns the API key string (may be empty if user skips).
+#[cfg(not(test))]
+fn prompt_api_key_if_needed(provider: &ProviderArg) -> String {
+    if !provider_requires_api_key(provider) {
+        return String::new();
+    }
+
+    let env_var = api_key_env_var(provider);
+    eprint!("Enter {env_var} (or press Enter to skip): ");
+    let mut key = String::new();
+    if std::io::stdin().read_line(&mut key).is_err() {
+        key.clear();
+    }
+    key.trim().to_string()
+}
+
+#[cfg(test)]
+fn prompt_api_key_if_needed(_provider: &ProviderArg) -> String {
+    // In tests, skip API key prompt
+    String::new()
+}
+
 /// Generate the config.toml content for the chosen provider.
-fn generate_config_toml(provider: &ProviderArg, model: &str, dims: u32) -> String {
+fn generate_config_toml(provider: &ProviderArg, model: &str, dims: u32, api_key: &str) -> String {
     let provider_section = match provider {
         ProviderArg::Onnx => format!(
             r#"[provider]
@@ -170,7 +283,7 @@ model = "{model}"
 name = "gemini"
 
 [provider.gemini]
-api_key = ""
+api_key = "{api_key}"
 model = "{model}"
 dimensions = {dims}
 "#
@@ -189,7 +302,7 @@ model = "{model}"
 name = "openai"
 
 [provider.openai]
-api_key = ""
+api_key = "{api_key}"
 model = "{model}"
 "#
         ),
@@ -276,7 +389,7 @@ mod tests {
 
     #[test]
     fn generate_config_toml_onnx_contains_provider() {
-        let toml = generate_config_toml(&ProviderArg::Onnx, "all-MiniLM-L6-v2", 384);
+        let toml = generate_config_toml(&ProviderArg::Onnx, "all-MiniLM-L6-v2", 384, "");
         assert!(toml.contains("name = \"onnx\""));
         assert!(toml.contains("model = \"all-MiniLM-L6-v2\""));
         assert!(toml.contains("[indexing]"));
@@ -285,7 +398,7 @@ mod tests {
 
     #[test]
     fn generate_config_toml_gemini_contains_api_key() {
-        let toml = generate_config_toml(&ProviderArg::Gemini, "gemini-embedding-001", 768);
+        let toml = generate_config_toml(&ProviderArg::Gemini, "gemini-embedding-001", 768, "");
         assert!(toml.contains("name = \"gemini\""));
         assert!(toml.contains("api_key = \"\""));
         assert!(toml.contains("dimensions = 768"));
@@ -293,14 +406,14 @@ mod tests {
 
     #[test]
     fn generate_config_toml_ollama_contains_url() {
-        let toml = generate_config_toml(&ProviderArg::Ollama, "nomic-embed-text", 768);
+        let toml = generate_config_toml(&ProviderArg::Ollama, "nomic-embed-text", 768, "");
         assert!(toml.contains("name = \"ollama\""));
         assert!(toml.contains("url = \"http://localhost:11434\""));
     }
 
     #[test]
     fn generate_config_toml_openai_contains_api_key() {
-        let toml = generate_config_toml(&ProviderArg::Openai, "text-embedding-3-small", 1536);
+        let toml = generate_config_toml(&ProviderArg::Openai, "text-embedding-3-small", 1536, "");
         assert!(toml.contains("name = \"openai\""));
         assert!(toml.contains("api_key = \"\""));
     }
@@ -313,7 +426,7 @@ mod tests {
             ProviderArg::Ollama,
             ProviderArg::Openai,
         ] {
-            let toml = generate_config_toml(&provider, "test-model", 128);
+            let toml = generate_config_toml(&provider, "test-model", 128, "");
             assert!(
                 toml.contains("[indexing]"),
                 "Missing [indexing] for {:?}",
@@ -338,7 +451,7 @@ mod tests {
         let project_path = dir.path();
 
         let args = InitArgs {
-            provider: ProviderArg::Onnx,
+            provider: Some(ProviderArg::Onnx),
             model: None,
             dims: None,
             index: false,
@@ -363,7 +476,7 @@ mod tests {
         let project_path = dir.path();
 
         let args = InitArgs {
-            provider: ProviderArg::Ollama,
+            provider: Some(ProviderArg::Ollama),
             model: Some("custom-model".to_string()),
             dims: Some(512),
             index: false,
@@ -389,7 +502,7 @@ mod tests {
         let project_path = dir.path();
 
         let args = InitArgs {
-            provider: ProviderArg::Onnx,
+            provider: Some(ProviderArg::Onnx),
             model: None,
             dims: None,
             index: false,
@@ -414,7 +527,7 @@ mod tests {
         let project_path = dir.path();
 
         let args = InitArgs {
-            provider: ProviderArg::Onnx,
+            provider: Some(ProviderArg::Onnx),
             model: None,
             dims: None,
             index: false,
@@ -437,7 +550,7 @@ mod tests {
         let project_path = dir.path();
 
         let args = InitArgs {
-            provider: ProviderArg::Gemini,
+            provider: Some(ProviderArg::Gemini),
             model: None,
             dims: Some(256),
             index: false,
@@ -457,5 +570,69 @@ mod tests {
         );
         let config = parsed.unwrap();
         assert_eq!(config.provider.name, "gemini");
+    }
+
+    // ── Interactive provider selection (pure functions) ──────────────
+
+    #[test]
+    fn parse_provider_choice_accepts_valid_numbers() {
+        assert!(matches!(
+            parse_provider_choice("1"),
+            Some(ProviderArg::Onnx)
+        ));
+        assert!(matches!(
+            parse_provider_choice("2"),
+            Some(ProviderArg::Gemini)
+        ));
+        assert!(matches!(
+            parse_provider_choice("3"),
+            Some(ProviderArg::Ollama)
+        ));
+        assert!(matches!(
+            parse_provider_choice("4"),
+            Some(ProviderArg::Openai)
+        ));
+    }
+
+    #[test]
+    fn parse_provider_choice_trims_whitespace() {
+        assert!(matches!(
+            parse_provider_choice("  2  \n"),
+            Some(ProviderArg::Gemini)
+        ));
+    }
+
+    #[test]
+    fn parse_provider_choice_rejects_invalid_input() {
+        assert!(parse_provider_choice("0").is_none());
+        assert!(parse_provider_choice("5").is_none());
+        assert!(parse_provider_choice("abc").is_none());
+        assert!(parse_provider_choice("").is_none());
+    }
+
+    #[test]
+    fn provider_prompt_text_lists_all_providers() {
+        let text = provider_prompt_text();
+        assert!(text.contains("onnx"), "Must list onnx: {text}");
+        assert!(text.contains("gemini"), "Must list gemini: {text}");
+        assert!(text.contains("ollama"), "Must list ollama: {text}");
+        assert!(text.contains("openai"), "Must list openai: {text}");
+        assert!(text.contains("1"), "Must show option numbers: {text}");
+    }
+
+    #[test]
+    fn api_key_env_var_returns_correct_var_for_provider() {
+        assert_eq!(api_key_env_var(&ProviderArg::Gemini), "GEMINI_API_KEY");
+        assert_eq!(api_key_env_var(&ProviderArg::Openai), "OPENAI_API_KEY");
+        assert_eq!(api_key_env_var(&ProviderArg::Onnx), "");
+        assert_eq!(api_key_env_var(&ProviderArg::Ollama), "");
+    }
+
+    #[test]
+    fn provider_requires_api_key_true_for_api_providers() {
+        assert!(!provider_requires_api_key(&ProviderArg::Onnx));
+        assert!(provider_requires_api_key(&ProviderArg::Gemini));
+        assert!(!provider_requires_api_key(&ProviderArg::Ollama));
+        assert!(provider_requires_api_key(&ProviderArg::Openai));
     }
 }

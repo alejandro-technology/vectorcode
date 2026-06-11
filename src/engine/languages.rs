@@ -12,6 +12,12 @@ pub enum SupportedLanguage {
     Rust,
     Go,
     Java,
+    CSharp,
+    C,
+    Cpp,
+    Ruby,
+    Swift,
+    Kotlin,
     Unknown,
 }
 
@@ -28,6 +34,12 @@ impl SupportedLanguage {
             "rs" => SupportedLanguage::Rust,
             "go" => SupportedLanguage::Go,
             "java" => SupportedLanguage::Java,
+            "cs" => SupportedLanguage::CSharp,
+            "c" | "h" => SupportedLanguage::C,
+            "cpp" | "hpp" | "cc" | "cxx" => SupportedLanguage::Cpp,
+            "rb" => SupportedLanguage::Ruby,
+            "swift" => SupportedLanguage::Swift,
+            "kt" | "kts" => SupportedLanguage::Kotlin,
             _ => SupportedLanguage::Unknown,
         }
     }
@@ -42,6 +54,12 @@ impl SupportedLanguage {
             SupportedLanguage::Rust => get_rust_language(),
             SupportedLanguage::Go => get_go_language(),
             SupportedLanguage::Java => get_java_language(),
+            SupportedLanguage::CSharp => get_csharp_language(),
+            SupportedLanguage::C => get_c_language(),
+            SupportedLanguage::Cpp => get_cpp_language(),
+            SupportedLanguage::Ruby => get_ruby_language(),
+            SupportedLanguage::Swift => get_swift_language(),
+            SupportedLanguage::Kotlin => get_kotlin_language(),
             SupportedLanguage::Unknown => None,
         }
     }
@@ -57,6 +75,12 @@ impl SupportedLanguage {
             SupportedLanguage::Rust => "rust",
             SupportedLanguage::Go => "go",
             SupportedLanguage::Java => "java",
+            SupportedLanguage::CSharp => "csharp",
+            SupportedLanguage::C => "c",
+            SupportedLanguage::Cpp => "cpp",
+            SupportedLanguage::Ruby => "ruby",
+            SupportedLanguage::Swift => "swift",
+            SupportedLanguage::Kotlin => "kotlin",
             SupportedLanguage::Unknown => "unknown",
         }
     }
@@ -70,6 +94,12 @@ static PYTHON_LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
 static RUST_LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
 static GO_LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
 static JAVA_LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
+static CSHARP_LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
+static C_LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
+static CPP_LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
+static RUBY_LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
+static SWIFT_LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
+static KOTLIN_LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
 
 fn get_typescript_language() -> Option<tree_sitter::Language> {
     Some(
@@ -142,6 +172,72 @@ fn get_java_language() -> Option<tree_sitter::Language> {
         JAVA_LANGUAGE
             .get_or_init(|| {
                 let lang_fn = tree_sitter_java::LANGUAGE;
+                lang_fn.into()
+            })
+            .clone(),
+    )
+}
+
+fn get_csharp_language() -> Option<tree_sitter::Language> {
+    Some(
+        CSHARP_LANGUAGE
+            .get_or_init(|| {
+                let lang_fn = tree_sitter_c_sharp::LANGUAGE;
+                lang_fn.into()
+            })
+            .clone(),
+    )
+}
+
+fn get_c_language() -> Option<tree_sitter::Language> {
+    Some(
+        C_LANGUAGE
+            .get_or_init(|| {
+                let lang_fn = tree_sitter_c::LANGUAGE;
+                lang_fn.into()
+            })
+            .clone(),
+    )
+}
+
+fn get_cpp_language() -> Option<tree_sitter::Language> {
+    Some(
+        CPP_LANGUAGE
+            .get_or_init(|| {
+                let lang_fn = tree_sitter_cpp::LANGUAGE;
+                lang_fn.into()
+            })
+            .clone(),
+    )
+}
+
+fn get_ruby_language() -> Option<tree_sitter::Language> {
+    Some(
+        RUBY_LANGUAGE
+            .get_or_init(|| {
+                let lang_fn = tree_sitter_ruby::LANGUAGE;
+                lang_fn.into()
+            })
+            .clone(),
+    )
+}
+
+fn get_swift_language() -> Option<tree_sitter::Language> {
+    Some(
+        SWIFT_LANGUAGE
+            .get_or_init(|| {
+                let lang_fn = tree_sitter_swift::LANGUAGE;
+                lang_fn.into()
+            })
+            .clone(),
+    )
+}
+
+fn get_kotlin_language() -> Option<tree_sitter::Language> {
+    Some(
+        KOTLIN_LANGUAGE
+            .get_or_init(|| {
+                let lang_fn = tree_sitter_kotlin_ng::LANGUAGE;
                 lang_fn.into()
             })
             .clone(),
@@ -282,5 +378,115 @@ mod tests {
     fn unknown_language_returns_none() {
         let lang = SupportedLanguage::Unknown.tree_sitter_language();
         assert!(lang.is_none(), "Unknown language should return None");
+    }
+
+    // --- Phase 8: Multi-language tests (RED) ---
+
+    #[test]
+    fn detect_csharp_from_extension() {
+        assert_eq!(
+            SupportedLanguage::from_extension("cs"),
+            SupportedLanguage::CSharp
+        );
+    }
+
+    #[test]
+    fn detect_c_from_extension() {
+        assert_eq!(SupportedLanguage::from_extension("c"), SupportedLanguage::C);
+        assert_eq!(SupportedLanguage::from_extension("h"), SupportedLanguage::C);
+    }
+
+    #[test]
+    fn detect_cpp_from_extension() {
+        assert_eq!(
+            SupportedLanguage::from_extension("cpp"),
+            SupportedLanguage::Cpp
+        );
+        assert_eq!(
+            SupportedLanguage::from_extension("hpp"),
+            SupportedLanguage::Cpp
+        );
+        assert_eq!(
+            SupportedLanguage::from_extension("cc"),
+            SupportedLanguage::Cpp
+        );
+        assert_eq!(
+            SupportedLanguage::from_extension("cxx"),
+            SupportedLanguage::Cpp
+        );
+    }
+
+    #[test]
+    fn detect_ruby_from_extension() {
+        assert_eq!(
+            SupportedLanguage::from_extension("rb"),
+            SupportedLanguage::Ruby
+        );
+    }
+
+    #[test]
+    fn detect_swift_from_extension() {
+        assert_eq!(
+            SupportedLanguage::from_extension("swift"),
+            SupportedLanguage::Swift
+        );
+    }
+
+    #[test]
+    fn detect_kotlin_from_extension() {
+        assert_eq!(
+            SupportedLanguage::from_extension("kt"),
+            SupportedLanguage::Kotlin
+        );
+        assert_eq!(
+            SupportedLanguage::from_extension("kts"),
+            SupportedLanguage::Kotlin
+        );
+    }
+
+    #[test]
+    fn new_language_as_str() {
+        assert_eq!(SupportedLanguage::CSharp.as_str(), "csharp");
+        assert_eq!(SupportedLanguage::C.as_str(), "c");
+        assert_eq!(SupportedLanguage::Cpp.as_str(), "cpp");
+        assert_eq!(SupportedLanguage::Ruby.as_str(), "ruby");
+        assert_eq!(SupportedLanguage::Swift.as_str(), "swift");
+        assert_eq!(SupportedLanguage::Kotlin.as_str(), "kotlin");
+    }
+
+    #[test]
+    fn csharp_tree_sitter_language_loads() {
+        let lang = SupportedLanguage::CSharp.tree_sitter_language();
+        assert!(lang.is_some(), "C# language should load");
+    }
+
+    #[test]
+    fn c_tree_sitter_language_loads() {
+        let lang = SupportedLanguage::C.tree_sitter_language();
+        assert!(lang.is_some(), "C language should load");
+    }
+
+    #[test]
+    fn cpp_tree_sitter_language_loads() {
+        let lang = SupportedLanguage::Cpp.tree_sitter_language();
+        assert!(lang.is_some(), "C++ language should load");
+    }
+
+    #[test]
+    fn ruby_tree_sitter_language_loads() {
+        let lang = SupportedLanguage::Ruby.tree_sitter_language();
+        assert!(lang.is_some(), "Ruby language should load");
+    }
+
+    #[test]
+    fn swift_tree_sitter_language_loads() {
+        let lang = SupportedLanguage::Swift.tree_sitter_language();
+        assert!(lang.is_some(), "Swift language should load");
+    }
+
+    #[test]
+    fn kotlin_tree_sitter_language_loads() {
+        let lang = SupportedLanguage::Kotlin.tree_sitter_language();
+        assert!(lang.is_some(), "Kotlin language should load");
     }
 }

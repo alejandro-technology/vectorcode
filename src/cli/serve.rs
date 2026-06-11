@@ -22,6 +22,10 @@ pub struct ServeArgs {
     pub mcp: bool,
 
     /// Disable file watcher for auto-sync.
+    ///
+    /// Note: File watching is ENABLED by default. Use `--no-watch` to disable.
+    /// Clap doesn't support a clean `--watch`/`--no-watch` pair with default=true,
+    /// so we use the inverted boolean pattern. This is a known clap limitation.
     #[arg(long)]
     pub no_watch: bool,
 
@@ -54,18 +58,13 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
     // Override debounce from CLI arg
     cfg.watcher.debounce_ms = args.debounce;
 
-    // Open database
+    // Create embedder first — we need its dimensions to ensure schema exists
+    let embedder = create_embedder_from_config(&cfg)?;
+
+    // Open database and ensure schema exists (idempotent via user_version check)
     let db_path = vc_dir.join("index.db");
     let db = Database::open(&db_path).map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    // Read dimensions from meta to init schema if needed
-    let meta = crate::store::meta::read_index_meta(db.conn())?;
-    if let Some(ref m) = meta {
-        db.init_schema(m.dimensions)?;
-    }
-
-    // Create embedder
-    let embedder = create_embedder_from_config(&cfg)?;
+    db.init_schema(embedder.dimensions())?;
 
     let watch = !args.no_watch && !cfg.watcher.disabled;
     info!("MCP server starting on stdio");
@@ -355,14 +354,13 @@ mod tests {
     }
 
     #[test]
-    fn serve_fails_with_onnx_provider_no_model() {
-        // ONNX provider requires bundled model files which aren't available yet
+    fn serve_fails_with_gemini_no_api_key() {
         let dir = tempfile::tempdir().unwrap();
         let project_path = dir.path();
 
-        // Init with onnx provider (default)
+        // Init with gemini provider
         let init_args = crate::cli::init::InitArgs {
-            provider: crate::cli::ProviderArg::Onnx,
+            provider: Some(crate::cli::ProviderArg::Gemini),
             model: None,
             dims: None,
             index: false,
@@ -371,15 +369,15 @@ mod tests {
         rt.block_on(crate::cli::init::execute(&init_args, project_path, true))
             .unwrap();
 
-        // Serve should fail because ONNX embedder can't be created
+        // Serve should fail because Gemini api_key is empty
         let serve_args = ServeArgs {
             mcp: true,
             no_watch: false,
             debounce: 2000,
         };
         let result = rt.block_on(execute(&serve_args, project_path));
-        assert!(result.is_err(), "Should fail with ONNX provider");
+        assert!(result.is_err(), "Should fail with Gemini provider missing key");
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("ONNX"), "Got: {err}");
+        assert!(err.contains("Gemini") || err.contains("api key"), "Got: {err}");
     }
 }

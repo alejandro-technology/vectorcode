@@ -219,7 +219,7 @@ mod tests {
         let config_path = dir.path().join("nonexistent.json");
 
         let result = uninstall_for_agent(&AgentTarget::Cursor, &config_path);
-        assert!(result.is_err() || result.unwrap() == false);
+        assert!(result.is_err() || !result.unwrap());
     }
 
     #[test]
@@ -239,7 +239,7 @@ mod tests {
 
         // Install
         let installed =
-            crate::cli::install::install_for_agent(&AgentTarget::Opencode, &config_path).unwrap();
+            crate::cli::install::install_for_agent(&AgentTarget::Opencode, &config_path, dir.path()).unwrap();
         assert!(installed);
 
         // Verify entry exists

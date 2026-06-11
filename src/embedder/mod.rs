@@ -6,6 +6,7 @@
 pub mod gemini;
 pub mod http;
 pub mod mock;
+pub mod model_manager;
 pub mod ollama;
 pub mod onnx;
 pub mod openai;

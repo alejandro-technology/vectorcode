@@ -3,11 +3,13 @@
 //! Uses the `ort` crate for ONNX Runtime and `tokenizers` for HuggingFace tokenization.
 //! Default model: all-MiniLM-L6-v2 (384 dimensions, 512 max tokens).
 
+use crate::embedder::model_manager::ModelManager;
 use crate::embedder::{Embedder, EmbedderResult};
 use crate::error::VectorCodeError;
 use async_trait::async_trait;
 use ort::session::Session;
 use ort::value::Tensor;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tokenizers::Tokenizer;
 
@@ -60,6 +62,29 @@ impl OnnxEmbedder {
             session: Mutex::new(session),
             tokenizer,
         })
+    }
+
+    /// Create an `OnnxEmbedder` from the cached model in `~/.vectorcode/models/`.
+    ///
+    /// Uses the default `ModelManager` to locate cached model files.
+    /// Returns an actionable error if the model has not been downloaded.
+    pub fn from_cache() -> EmbedderResult<Self> {
+        let manager = ModelManager::new();
+        Self::from_model_manager(&manager)
+    }
+
+    /// Create an `OnnxEmbedder` from a model cache at a specific directory.
+    ///
+    /// Primarily used for testing with temporary directories.
+    pub fn from_model_dir(model_dir: PathBuf) -> EmbedderResult<Self> {
+        let manager = ModelManager::with_model_dir(model_dir);
+        Self::from_model_manager(&manager)
+    }
+
+    /// Internal: load model bytes from a `ModelManager` and construct the embedder.
+    fn from_model_manager(manager: &ModelManager) -> EmbedderResult<Self> {
+        let (model_bytes, tokenizer_bytes) = manager.load_model()?;
+        Self::new(&model_bytes, &tokenizer_bytes)
     }
 
     /// Tokenize input text and prepare model inputs.
@@ -238,6 +263,57 @@ mod tests {
         let invalid_tokenizer = b"{}"; // Valid JSON but not a tokenizer
         let result = OnnxEmbedder::new(b"model", invalid_tokenizer);
         assert!(result.is_err(), "Should fail with invalid tokenizer");
+    }
+
+    #[test]
+    fn from_cache_errors_when_model_not_downloaded() {
+        let empty_dir = tempfile::tempdir().unwrap();
+        let result = OnnxEmbedder::from_model_dir(empty_dir.path().to_path_buf());
+        assert!(
+            result.is_err(),
+            "from_cache should fail when model files are missing"
+        );
+        let err_msg = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => unreachable!(),
+        };
+        assert!(
+            err_msg.contains("vectorcode init"),
+            "Error should suggest running init, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn from_cache_errors_with_invalid_model_bytes_in_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        // Write fake model + invalid tokenizer to simulate corrupted cache
+        std::fs::write(dir.path().join("model.onnx"), b"fake-model").unwrap();
+        std::fs::write(dir.path().join("tokenizer.json"), b"not-json").unwrap();
+        let result = OnnxEmbedder::from_model_dir(dir.path().to_path_buf());
+        assert!(
+            result.is_err(),
+            "from_cache should fail with corrupted model files"
+        );
+    }
+
+    #[test]
+    fn from_model_dir_returns_error_when_only_model_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("model.onnx"), b"model").unwrap();
+        // tokenizer.json missing
+        let result = OnnxEmbedder::from_model_dir(dir.path().to_path_buf());
+        assert!(
+            result.is_err(),
+            "Should fail when tokenizer.json is missing"
+        );
+        let err_msg = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => unreachable!(),
+        };
+        assert!(
+            err_msg.contains("vectorcode init"),
+            "Error should suggest running init, got: {err_msg}"
+        );
     }
 
     #[test]

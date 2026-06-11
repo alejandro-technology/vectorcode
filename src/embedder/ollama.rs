@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 /// Default batch size for Ollama requests.
-const OLLAMA_BATCH_SIZE: usize = 50;
+/// Limited to avoid large payloads that can overwhelm slower Ollama instances.
+/// Each chunk is typically 500-4000 chars; 10 chunks ≈ 8-20KB per request.
+const OLLAMA_BATCH_SIZE: usize = 10;
 
 /// Ollama embedding provider.
 ///
@@ -137,7 +139,27 @@ impl OllamaEmbedder {
                 }
                 Err(e) => {
                     let err_msg = e.to_string();
-                    if is_retryable_error(&err_msg)
+                    // Check source chain for retryable errors (reqwest often wraps
+                    // the actual transport error in a generic message).
+                    let mut source_msg = String::new();
+                    let mut source = std::error::Error::source(&e);
+                    while let Some(s) = source {
+                        let s_str = s.to_string();
+                        if !s_str.is_empty() {
+                            if !source_msg.is_empty() {
+                                source_msg.push_str(" | ");
+                            }
+                            source_msg.push_str(&s_str);
+                        }
+                        source = std::error::Error::source(s);
+                    }
+                    let full_err = if source_msg.is_empty() {
+                        err_msg.clone()
+                    } else {
+                        format!("{err_msg} (source: {source_msg})")
+                    };
+
+                    if is_retryable_error(&full_err)
                         && attempt < crate::embedder::http::MAX_RETRIES - 1
                     {
                         let backoff = crate::embedder::http::calculate_backoff(
@@ -150,9 +172,12 @@ impl OllamaEmbedder {
                         continue;
                     }
 
-                    // Final failure — include URL in error
+                    // Final failure — include URL and underlying error
                     return Err(VectorCodeError::EmbedderError {
-                        message: ollama_final_error_message(&url, attempt + 1),
+                        message: format!(
+                            "{} (cause: {full_err})",
+                            ollama_final_error_message(&url, attempt + 1)
+                        ),
                     });
                 }
             }
@@ -173,7 +198,17 @@ impl Default for OllamaEmbedder {
 /// Check if an error message indicates a retryable connection/timeout error.
 fn is_retryable_error(error_msg: &str) -> bool {
     let lower = error_msg.to_lowercase();
-    lower.contains("connection") || lower.contains("timeout") || lower.contains("timed out")
+    lower.contains("connection")
+        || lower.contains("connect")
+        || lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("refused")
+        || lower.contains("reset")
+        || lower.contains("broken pipe")
+        || lower.contains("eof")
+        || lower.contains("unreachable")
+        || lower.contains("dns")
+        || lower.contains("tcp connect")
 }
 
 /// Build the final error message for Ollama batch failures, including the URL.
@@ -395,19 +430,19 @@ mod tests {
     }
 
     #[test]
-    fn ollama_chunk_size_is_50() {
-        assert_eq!(OLLAMA_BATCH_SIZE, 50, "Chunk size should be 50 per spec");
+    fn ollama_chunk_size_is_10() {
+        assert_eq!(OLLAMA_BATCH_SIZE, 10, "Chunk size should be 10 to avoid large payloads");
     }
 
     #[test]
-    fn ollama_chunk_count_for_120_texts() {
-        // 120 texts with chunk size 50 → 3 chunks (50 + 50 + 20)
-        let texts: Vec<&str> = (0..120).map(|_| "test").collect();
+    fn ollama_chunk_count_for_25_texts() {
+        // 25 texts with chunk size 10 → 3 chunks (10 + 10 + 5)
+        let texts: Vec<&str> = (0..25).map(|_| "test").collect();
         let chunks: Vec<&[&str]> = texts.chunks(OLLAMA_BATCH_SIZE).collect();
-        assert_eq!(chunks.len(), 3, "120 texts should split into 3 chunks");
-        assert_eq!(chunks[0].len(), 50);
-        assert_eq!(chunks[1].len(), 50);
-        assert_eq!(chunks[2].len(), 20);
+        assert_eq!(chunks.len(), 3, "25 texts should split into 3 chunks");
+        assert_eq!(chunks[0].len(), 10);
+        assert_eq!(chunks[1].len(), 10);
+        assert_eq!(chunks[2].len(), 5);
     }
 
     #[test]

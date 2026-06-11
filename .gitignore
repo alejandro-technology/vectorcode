@@ -1,0 +1,5 @@
+target/
+.vectorcode/index.db
+*.dylib
+*.so
+*.dll

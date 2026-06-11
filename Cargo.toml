@@ -89,6 +89,9 @@ dirs = "5"
 # SHA256 checksum verification
 sha2 = "0.10"
 
+# Force vendored OpenSSL to avoid system dependency (needed for cross-compilation)
+openssl = { version = "0.10", features = ["vendored"] }
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"

@@ -1,5 +1,6 @@
 pub mod config;
 pub mod embedder;
+pub mod engine;
 pub mod error;
 pub mod store;
 pub mod types;

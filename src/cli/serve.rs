@@ -152,9 +152,6 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
     let mut server = McpServer::new(state);
 
     // Spawn connect-time catch-up on a blocking thread (spec §14.3).
-    // Runs on the blocking pool so the MCP message loop enters immediately
-    // and the client's initialize request is answered without timeout.
-    // Uses spawn_blocking because Indexer (rusqlite internals) is !Send.
     if watch {
         let catchup_db_path = db_path.clone();
         let catchup_embedder = embedder.clone();
@@ -172,13 +169,6 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
             }
         });
     }
-
-    // Set up Ctrl+C handler
-    let _ctrl_c = tokio::spawn(async {
-        let _ = tokio::signal::ctrl_c().await;
-        info!("Received Ctrl+C, shutting down...");
-        // The server loop will exit when stdin closes
-    });
 
     // Run the MCP server main loop
     server.run().await?;

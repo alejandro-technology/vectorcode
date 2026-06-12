@@ -76,6 +76,11 @@ indicatif = "0.17"
 # Async trait
 async-trait = "0.1"
 
+# MCP SDK
+rmcp = { version = "0.8.1", features = ["server", "transport-io"] }
+rmcp-macros = "0.8"
+schemars = { version = "1.2", features = ["derive"] }
+
 # Self-update
 self-replace = "1"
 semver = "1"

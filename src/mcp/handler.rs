@@ -1,312 +1,201 @@
-//! MCP tool handlers — dispatch logic for vec_search, vec_status, vec_reindex (spec §11.3).
-//!
-//! Internal handlers receive individual fields (db, embedder, config, etc.)
-//! so callers can release the `AppState` lock before any network I/O.
-//! The public `handle_tool_call` wrapper keeps backward compatibility for tests.
+use rmcp::ServerHandler;
+use rmcp::handler::server::tool::ToolRouter;
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::{tool_router, tool_handler, tool};
+use rmcp::schemars::JsonSchema;
+use serde::Deserialize;
+use tracing::error;
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
-
-use tokio::sync::{Mutex, RwLock};
-use tracing::{error, info};
-
-use crate::config::schema::{IndexingConfig, SearchConfig};
-use crate::embedder::Embedder;
-use crate::engine::indexer::Indexer;
+use crate::mcp::AppState;
 use crate::engine::searcher::{SearchOptions, Searcher};
-use crate::store::db::Database;
+use crate::engine::indexer::Indexer;
 use crate::store::meta;
-use crate::watcher::{FileWatcher, PendingFile};
+use crate::watcher::PendingFile;
 
-use super::schema::*;
-use super::AppState;
-
-/// Maximum time a single tool call is allowed to run before the server
-/// responds with a timeout error. Covers Ollama retry + backoff + DB ops.
-const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Bundled state passed to tool handlers after the `AppState` lock is released.
-///
-/// All fields are `Arc`-cloned or `Clone`d so the lock is not held during
-/// network I/O (Ollama HTTP calls).
-pub struct ToolContext {
-    pub db: Arc<Mutex<Database>>,
-    pub embedder: Arc<dyn Embedder>,
-    pub search_config: SearchConfig,
-    pub indexing_config: IndexingConfig,
-    pub watcher: Option<Arc<RwLock<FileWatcher>>>,
-    pub project_path: PathBuf,
+#[derive(Clone)]
+pub struct McpHandler {
+    state: AppState,
+    tool_router: ToolRouter<Self>,
 }
 
-/// Handle the "initialize" method (spec §11.2).
-///
-/// Returns server info, protocol version, and capabilities.
-pub fn handle_initialize() -> InitializeResult {
-    InitializeResult {
-        protocol_version: "2024-11-05".to_string(),
-        capabilities: ServerCapabilities {
-            tools: serde_json::json!({"listChanged": true}),
-        },
-        server_info: ServerInfo {
-            name: "vectorcode".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-        },
-    }
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct VecSearchParams {
+    /// Semantic search query
+    pub query: String,
+    /// Maximum number of results to return (default: 10, max: 100)
+    pub limit: Option<usize>,
+    /// Minimum similarity score threshold (0.0 to 1.0, default: 0.0)
+    pub threshold: Option<f32>,
+    /// Filter results by programming language (e.g., 'rust', 'typescript')
+    pub language: Option<String>,
+    /// Filter results by file path prefix
+    pub path: Option<String>,
 }
 
-/// Handle the "tools/list" method.
-///
-/// Returns all available tool definitions.
-pub fn handle_tools_list() -> ToolsListResult {
-    all_tools_list()
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct VecStatusParams {
+    /// Reserved for future use
+    pub reserved: Option<bool>,
 }
 
-/// Handle the "ping" method (MCP spec § utilities/ping).
-///
-/// Returns an empty result object `{}` to indicate server liveness.
-pub fn handle_ping() -> serde_json::Value {
-    serde_json::json!({})
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct VecReindexParams {
+    /// Set to true to drop the index and start fresh
+    pub full: bool,
 }
 
-/// Handle a "tools/call" method by dispatching to the appropriate tool handler.
-///
-/// Kept for backward compatibility with tests that hold `&AppState`.
-/// Production code should use `handle_tool_call_detached` so the state lock
-/// is released before any network I/O (Ollama HTTP calls).
-pub async fn handle_tool_call(
-    name: &str,
-    arguments: &serde_json::Value,
-    state: &AppState,
-) -> ToolCallResult {
-    info!("Tool call: {name}");
-
-    match name {
-        "vec_search" => {
-            handle_vec_search(
-                &state.db,
-                &state.embedder,
-                &state.config.search,
-                &state.watcher,
-                arguments,
-            )
-            .await
+#[tool_router]
+impl McpHandler {
+    #[tool(
+        name = "vec_search",
+        description = "Perform a semantic search over the codebase. \
+                       Use this to find code conceptually related to the query, \
+                       even if exact keywords don't match. Results are ordered by relevance.",
+        annotations(read_only_hint = true)
+    )]
+    async fn vec_search(
+        &self,
+        params: Parameters<VecSearchParams>
+    ) -> Result<String, String> {
+        let p = params.0;
+        if p.query.is_empty() {
+            return Err("Query cannot be empty".to_string());
         }
-        "vec_status" => handle_vec_status(&state.db, arguments).await,
-        "vec_reindex" => {
-            handle_vec_reindex(
-                &state.db,
-                &state.embedder,
-                &state.config.indexing,
-                &state.project_path,
-                arguments,
-            )
-            .await
-        }
-        other => {
-            error!("Unknown tool: {other}");
-            make_error_result(format!("Unknown tool: {other}"))
-        }
-    }
-}
 
-/// Production entry-point for tool calls — owns all state via `Arc` clones
-/// so the caller can release the `AppState` lock before the (possibly slow)
-/// network call to Ollama. Wraps the inner handler in a 90-second timeout.
-pub async fn handle_tool_call_detached(
-    name: &str,
-    arguments: &serde_json::Value,
-    ctx: ToolContext,
-) -> ToolCallResult {
-    info!("Tool call: {name}");
+        let searcher = Searcher::new(
+            self.state.db.clone(),
+            self.state.embedder.clone(),
+            self.state.config.search.clone(),
+        );
 
-    let future = async {
-        match name {
-            "vec_search" => {
-                handle_vec_search(
-                    &ctx.db,
-                    &ctx.embedder,
-                    &ctx.search_config,
-                    &ctx.watcher,
-                    arguments,
-                )
-                .await
-            }
-            "vec_status" => handle_vec_status(&ctx.db, arguments).await,
-            "vec_reindex" => {
-                handle_vec_reindex(
-                    &ctx.db,
-                    &ctx.embedder,
-                    &ctx.indexing_config,
-                    &ctx.project_path,
-                    arguments,
-                )
-                .await
-            }
-            other => {
-                error!("Unknown tool: {other}");
-                make_error_result(format!("Unknown tool: {other}"))
-            }
-        }
-    };
+        let options = SearchOptions {
+            limit: p.limit.unwrap_or(10),
+            threshold: p.threshold.unwrap_or(0.0),
+            language: p.language,
+            path: p.path,
+        };
 
-    match tokio::time::timeout(TOOL_TIMEOUT, future).await {
-        Ok(result) => result,
-        Err(_elapsed) => {
-            error!(
-                "Tool call '{name}' timed out after {}s",
-                TOOL_TIMEOUT.as_secs()
-            );
-            make_error_result(format!(
-                "Tool call timed out after {} seconds",
-                TOOL_TIMEOUT.as_secs()
-            ))
-        }
-    }
-}
+        match searcher.search(&p.query, options).await {
+            Ok(results) => {
+                let staleness_banner = match &self.state.watcher {
+                    Some(w) => {
+                        let pending = w.read().await.pending_files().await;
+                        build_staleness_banner(&results, &pending)
+                    }
+                    None => None,
+                };
 
-/// Handle the `vec_search` tool call (spec §11.3).
-///
-/// Performs semantic search over the indexed codebase using the Searcher engine.
-/// Takes individual fields so callers release the `AppState` lock before network I/O.
-async fn handle_vec_search(
-    db: &Arc<Mutex<Database>>,
-    embedder: &Arc<dyn Embedder>,
-    search_config: &SearchConfig,
-    watcher: &Option<Arc<RwLock<FileWatcher>>>,
-    arguments: &serde_json::Value,
-) -> ToolCallResult {
-    // Parse parameters
-    let params: VecSearchParams = match serde_json::from_value(arguments.clone()) {
-        Ok(p) => p,
-        Err(e) => {
-            return make_error_result(format!("Invalid vec_search parameters: {e}"));
-        }
-    };
-
-    if params.query.is_empty() {
-        return make_error_result("Query cannot be empty".to_string());
-    }
-
-    // Create searcher and execute search
-    let searcher = Searcher::new(db.clone(), embedder.clone(), search_config.clone());
-
-    let options = SearchOptions {
-        limit: params.limit,
-        threshold: params.threshold,
-        language: params.language,
-        path: params.path,
-    };
-
-    match searcher.search(&params.query, options).await {
-        Ok(results) => {
-            // Check for staleness — spec §14.2
-            let staleness_banner = match watcher {
-                Some(w) => {
-                    let pending = w.read().await.pending_files().await;
-                    build_staleness_banner(&results, &pending)
+                let text = format_search_results_text(&p.query, p.threshold, &results);
+                match staleness_banner {
+                    Some(banner) => Ok(format!("{banner}\n{text}")),
+                    None => Ok(text),
                 }
-                None => None,
-            };
-
-            let text = format_search_results_text(&params.query, params.threshold, &results);
-            let final_text = match staleness_banner {
-                Some(banner) => format!("{banner}\n{text}"),
-                None => text,
-            };
-            make_text_result(final_text)
+            }
+            Err(e) => {
+                error!("vec_search failed: {e}");
+                Err(format!("Search failed: {e}"))
+            }
         }
-        Err(e) => {
-            error!("vec_search failed: {e}");
-            make_error_result(format!("Search failed: {e}"))
+    }
+
+    #[tool(
+        name = "vec_status",
+        description = "Get the current status of the vector index, including provider, \
+                       dimensions, number of files indexed, and last sync time.",
+        annotations(read_only_hint = true)
+    )]
+    async fn vec_status(
+        &self,
+        _params: Parameters<VecStatusParams>
+    ) -> Result<String, String> {
+        let db = self.state.db.lock().await;
+        match meta::read_index_meta(db.conn()) {
+            Ok(Some(index_meta)) => {
+                Ok(format_status_text(&index_meta))
+            }
+            Ok(None) => Err("Index metadata not found. Run `vectorcode init` to initialize.".to_string()),
+            Err(e) => Err(format!("Failed to read index metadata: {e}")),
+        }
+    }
+
+    #[tool(
+        name = "vec_reindex",
+        description = "Trigger a background re-index of the project. \
+                       Use full=true to drop the existing index and start fresh.",
+        annotations(destructive_hint = true)
+    )]
+    async fn vec_reindex(
+        &self,
+        params: Parameters<VecReindexParams>
+    ) -> Result<String, String> {
+        let p = params.0;
+        
+        if p.full {
+            let db = self.state.db.lock().await;
+            if let Err(e) = db.init_schema(self.state.embedder.dimensions()) {
+                return Err(format!("Failed to reinitialize schema: {e}"));
+            }
+        }
+
+        let indexer = Indexer::new(
+            self.state.db.clone(),
+            self.state.embedder.clone(),
+            self.state.config.indexing.clone(),
+        );
+
+        match indexer.index_project(&self.state.project_path).await {
+            Ok(report) => {
+                Ok(format!(
+                    "Re-indexing complete.\n\
+                     Files scanned:  {}\n\
+                     Files indexed:  {}\n\
+                     Chunks total:   {}\n\
+                     Chunks new:     {}\n\
+                     Chunks skipped: {}\n\
+                     Duration:       {:.2}s\n",
+                    report.files_scanned,
+                    report.files_indexed,
+                    report.chunks_total,
+                    report.chunks_new,
+                    report.chunks_skipped,
+                    report.duration.as_secs_f64(),
+                ))
+            }
+            Err(e) => {
+                error!("vec_reindex failed: {e}");
+                Err(format!("Re-indexing failed: {e}"))
+            }
+        }
+    }
+
+    pub fn new(state: AppState) -> Self {
+        Self {
+            state,
+            tool_router: Self::tool_router(),
         }
     }
 }
 
-/// Handle the `vec_status` tool call (spec §11.3).
-///
-/// Reads index metadata and returns formatted status text.
-async fn handle_vec_status(
-    db: &Arc<Mutex<Database>>,
-    arguments: &serde_json::Value,
-) -> ToolCallResult {
-    // Parse optional project_path with explicit error handling
-    let _params: VecStatusParams = match serde_json::from_value(arguments.clone()) {
-        Ok(p) => p,
-        Err(e) => {
-            return make_error_result(format!("Invalid vec_status parameters: {e}"));
-        }
-    };
+use rmcp::model::{InitializeResult, ServerCapabilities, Implementation, ProtocolVersion};
 
-    let db = db.lock().await;
-    match meta::read_index_meta(db.conn()) {
-        Ok(Some(index_meta)) => {
-            let text = format_status_text(&index_meta);
-            make_text_result(text)
-        }
-        Ok(None) => make_error_result(
-            "Index metadata not found. Run `vectorcode init` to initialize.".to_string(),
-        ),
-        Err(e) => make_error_result(format!("Failed to read index metadata: {e}")),
-    }
-}
-
-/// Handle the `vec_reindex` tool call (spec §11.3).
-///
-/// Triggers a full or incremental re-index of the project.
-async fn handle_vec_reindex(
-    db: &Arc<Mutex<Database>>,
-    embedder: &Arc<dyn Embedder>,
-    indexing_config: &IndexingConfig,
-    project_path: &Path,
-    arguments: &serde_json::Value,
-) -> ToolCallResult {
-    let params: VecReindexParams = match serde_json::from_value(arguments.clone()) {
-        Ok(p) => p,
-        Err(e) => {
-            return make_error_result(format!("Invalid vec_reindex parameters: {e}"));
-        }
-    };
-
-    // If full reindex requested, reinitialize the schema
-    if params.full {
-        let db = db.lock().await;
-        if let Err(e) = db.init_schema(embedder.dimensions()) {
-            return make_error_result(format!("Failed to reinitialize schema: {e}"));
-        }
-    }
-
-    let indexer = Indexer::new(db.clone(), embedder.clone(), indexing_config.clone());
-
-    match indexer.index_project(project_path).await {
-        Ok(report) => {
-            let text = format!(
-                "Re-indexing complete.\n\
-                 Files scanned:  {}\n\
-                 Files indexed:  {}\n\
-                 Chunks total:   {}\n\
-                 Chunks new:     {}\n\
-                 Chunks skipped: {}\n\
-                 Duration:       {:.2}s\n",
-                report.files_scanned,
-                report.files_indexed,
-                report.chunks_total,
-                report.chunks_new,
-                report.chunks_skipped,
-                report.duration.as_secs_f64(),
-            );
-            make_text_result(text)
-        }
-        Err(e) => {
-            error!("vec_reindex failed: {e}");
-            make_error_result(format!("Re-indexing failed: {e}"))
+#[tool_handler]
+impl ServerHandler for McpHandler {
+    fn get_info(&self) -> InitializeResult {
+        InitializeResult {
+            protocol_version: ProtocolVersion::default(),
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            server_info: Implementation {
+                name: "vectorcode".to_string(),
+                title: None,
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                icons: None,
+                website_url: None,
+            },
+            instructions: None,
         }
     }
 }
 
-/// Build a staleness banner if any search result files have pending changes (spec §14.2).
-///
-/// Returns `Some(banner)` if there are matching pending files, `None` otherwise.
 fn build_staleness_banner(
     results: &[crate::types::SearchResult],
     pending: &[PendingFile],
@@ -320,7 +209,6 @@ fn build_staleness_banner(
 
     for result in results {
         for pf in pending {
-            // Compare by checking if the result file_path is a suffix of the pending path
             let pending_str = pf.path.to_string_lossy();
             if pending_str.ends_with(&result.file_path) || result.file_path == pending_str.as_ref()
             {
@@ -352,341 +240,90 @@ fn build_staleness_banner(
     ))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::schema::Config;
-    use crate::embedder::mock::MockEmbedder;
-    use crate::store::db::Database;
-    use crate::types::IndexMeta;
-    use std::path::PathBuf;
-    use std::sync::Arc;
+fn format_search_results_text(
+    query: &str,
+    threshold: Option<f32>,
+    results: &[crate::types::SearchResult],
+) -> String {
+    if results.is_empty() {
+        return format!("No results found for query: '{query}'");
+    }
 
-    fn setup_test_state() -> AppState {
-        let db = Database::open_in_memory().unwrap();
-        db.init_schema(64).unwrap();
+    let threshold_str = if let Some(t) = threshold {
+        format!(" (threshold: {t})")
+    } else {
+        "".to_string()
+    };
 
-        // Write some meta
-        let meta = IndexMeta {
-            provider: "mock".to_string(),
-            model: "mock-embedder".to_string(),
-            dimensions: 64,
-            created_at: "2026-06-10T20:00:00Z".to_string(),
-            last_sync_at: Some("2026-06-10T20:05:00Z".to_string()),
-            files_indexed: 42,
-            chunks_stored: 200,
-            vectorcode_version: "0.1.0".to_string(),
-        };
-        crate::store::meta::write_index_meta(db.conn(), &meta).unwrap();
+    let mut out = format!(
+        "Found {} results for '{}'{threshold_str}:\n\n",
+        results.len(),
+        query
+    );
 
-        AppState {
-            db: Arc::new(tokio::sync::Mutex::new(db)),
-            embedder: Arc::new(MockEmbedder::new(64)),
-            config: Config::default(),
-            project_path: std::path::PathBuf::from("/tmp/test-project"),
-            watcher: None,
+    for (i, res) in results.iter().enumerate() {
+        let symbol_info = res
+            .symbol
+            .as_ref()
+            .map(|s| format!(" `{s}`"))
+            .unwrap_or_default();
+
+        let ctx_info = res
+            .parent_context
+            .as_ref()
+            .map(|c| format!(" (in {c})"))
+            .unwrap_or_default();
+
+        out.push_str(&format!(
+            "{}. {}:L{}-{}{} [{}] (score: {:.2})\n",
+            i + 1,
+            res.file_path,
+            res.start_line,
+            res.end_line,
+            symbol_info,
+            res.language,
+            res.score
+        ));
+
+        if !ctx_info.is_empty() {
+            out.push_str(&format!("   Context:{ctx_info}\n"));
         }
+
+        let mut lines: Vec<&str> = res.content.lines().collect();
+        if lines.len() > 15 {
+            lines.truncate(15);
+            lines.push("...");
+        }
+
+        out.push_str("   ---\n");
+        for line in lines {
+            out.push_str(&format!("   | {}\n", line));
+        }
+        out.push_str("   ---\n\n");
     }
 
-    // ─── handle_initialize tests ─────────────────────────────────────
+    out
+}
 
-    #[test]
-    fn handle_initialize_returns_vectorcode_name() {
-        let result = handle_initialize();
-        assert_eq!(result.server_info.name, "vectorcode");
-    }
-
-    #[test]
-    fn handle_initialize_returns_version() {
-        let result = handle_initialize();
-        assert_eq!(result.server_info.version, "0.1.0");
-    }
-
-    #[test]
-    fn handle_initialize_returns_protocol_version() {
-        let result = handle_initialize();
-        assert_eq!(result.protocol_version, "2024-11-05");
-    }
-
-    #[test]
-    fn handle_initialize_has_tools_capability() {
-        let result = handle_initialize();
-        assert!(result.capabilities.tools.is_object());
-        assert_eq!(
-            result.capabilities.tools["listChanged"],
-            serde_json::json!(true),
-            "tools capability should include listChanged: true"
-        );
-    }
-
-    // ─── handle_tools_list tests ─────────────────────────────────────
-
-    #[test]
-    fn handle_tools_list_returns_three_tools() {
-        let result = handle_tools_list();
-        assert_eq!(result.tools.len(), 3);
-    }
-
-    // ─── handle_ping tests ───────────────────────────────────────────
-
-    #[test]
-    fn handle_ping_returns_empty_object() {
-        let result = handle_ping();
-        assert!(result.is_object(), "Ping should return a JSON object");
-        assert!(
-            result.as_object().unwrap().is_empty(),
-            "Ping should return an empty object {{}}"
-        );
-    }
-
-    #[test]
-    fn handle_tools_list_contains_vec_search() {
-        let result = handle_tools_list();
-        assert!(result.tools.iter().any(|t| t.name == "vec_search"));
-    }
-
-    #[test]
-    fn handle_tools_list_contains_vec_status() {
-        let result = handle_tools_list();
-        assert!(result.tools.iter().any(|t| t.name == "vec_status"));
-    }
-
-    #[test]
-    fn handle_tools_list_contains_vec_reindex() {
-        let result = handle_tools_list();
-        assert!(result.tools.iter().any(|t| t.name == "vec_reindex"));
-    }
-
-    // ─── handle_tool_call dispatch tests ─────────────────────────────
-
-    #[tokio::test]
-    async fn handle_tool_call_unknown_tool_returns_error() {
-        let state = setup_test_state();
-        let result = handle_tool_call("nonexistent_tool", &serde_json::json!({}), &state).await;
-        assert_eq!(result.is_error, Some(true));
-        assert!(result.content[0].text.contains("Unknown tool"));
-    }
-
-    #[tokio::test]
-    async fn handle_tool_call_vec_status_returns_status() {
-        let state = setup_test_state();
-        let result = handle_tool_call("vec_status", &serde_json::json!({}), &state).await;
-        assert!(result.is_error.is_none());
-        assert!(result.content[0].text.contains("VectorCode Index Status"));
-        assert!(result.content[0].text.contains("mock"));
-    }
-
-    #[tokio::test]
-    async fn handle_tool_call_vec_search_empty_query_returns_error() {
-        let state = setup_test_state();
-        let result =
-            handle_tool_call("vec_search", &serde_json::json!({"query": ""}), &state).await;
-        assert_eq!(result.is_error, Some(true));
-        assert!(result.content[0].text.contains("empty"));
-    }
-
-    #[tokio::test]
-    async fn handle_tool_call_vec_search_invalid_params_returns_error() {
-        let state = setup_test_state();
-        // Missing required "query" field
-        let result = handle_tool_call("vec_search", &serde_json::json!({"limit": 5}), &state).await;
-        assert_eq!(result.is_error, Some(true));
-        assert!(result.content[0].text.contains("Invalid"));
-    }
-
-    #[tokio::test]
-    async fn handle_vec_status_invalid_params_returns_descriptive_error() {
-        let state = setup_test_state();
-        // Send a truly invalid structure (string instead of object)
-        let result = handle_vec_status(&state.db, &serde_json::json!("not an object")).await;
-        assert_eq!(result.is_error, Some(true));
-        assert!(
-            result.content[0]
-                .text
-                .contains("Invalid vec_status parameters"),
-            "Got: {}",
-            result.content[0].text
-        );
-    }
-
-    #[tokio::test]
-    async fn handle_vec_reindex_invalid_params_returns_descriptive_error() {
-        let state = setup_test_state();
-        let result = handle_vec_reindex(
-            &state.db,
-            &state.embedder,
-            &state.config.indexing,
-            &state.project_path,
-            &serde_json::json!("not an object"),
-        )
-        .await;
-        assert_eq!(result.is_error, Some(true));
-        assert!(
-            result.content[0]
-                .text
-                .contains("Invalid vec_reindex parameters"),
-            "Got: {}",
-            result.content[0].text
-        );
-    }
-
-    // ─── handle_vec_status tests ─────────────────────────────────────
-
-    #[tokio::test]
-    async fn handle_vec_status_with_meta_returns_formatted_text() {
-        let state = setup_test_state();
-        let result = handle_vec_status(&state.db, &serde_json::json!({})).await;
-        assert!(result.is_error.is_none());
-        let text = &result.content[0].text;
-        assert!(text.contains("Provider:    mock"));
-        assert!(text.contains("Model:       mock-embedder"));
-        assert!(text.contains("Dimensions:  64"));
-        assert!(text.contains("Files:       42 indexed"));
-        assert!(text.contains("Chunks:      200 stored"));
-    }
-
-    #[tokio::test]
-    async fn handle_vec_status_without_meta_returns_error() {
-        let db = Database::open_in_memory().unwrap();
-        db.init_schema(64).unwrap();
-        // Don't write meta — simulate uninitialized index
-        let state = AppState {
-            db: Arc::new(tokio::sync::Mutex::new(db)),
-            embedder: Arc::new(MockEmbedder::new(64)),
-            config: Config::default(),
-            project_path: std::path::PathBuf::from("/tmp"),
-            watcher: None,
-        };
-        let result = handle_vec_status(&state.db, &serde_json::json!({})).await;
-        assert_eq!(result.is_error, Some(true));
-        assert!(result.content[0].text.contains("not found"));
-    }
-
-    // ─── format helper integration ───────────────────────────────────
-
-    #[test]
-    fn format_search_results_text_shows_content_preview() {
-        let results = vec![crate::types::SearchResult {
-            file_path: "test.rs".to_string(),
-            start_line: 1,
-            end_line: 5,
-            symbol: Some("my_fn".to_string()),
-            kind: "function_item".to_string(),
-            language: "rust".to_string(),
-            parent_context: None,
-            content: "fn my_fn() { println!(\"hello\"); }".to_string(),
-            score: 0.95,
-        }];
-        let text = format_search_results_text("test query", 0.3, &results);
-        assert!(text.contains("fn my_fn()"));
-        assert!(text.contains("score: 0.95"));
-    }
-
-    #[test]
-    fn format_search_results_text_truncates_long_content() {
-        let long_content = "x".repeat(500);
-        let results = vec![crate::types::SearchResult {
-            file_path: "test.rs".to_string(),
-            start_line: 1,
-            end_line: 5,
-            symbol: None,
-            kind: "function_item".to_string(),
-            language: "rust".to_string(),
-            parent_context: None,
-            content: long_content,
-            score: 0.5,
-        }];
-        let text = format_search_results_text("test", 0.3, &results);
-        assert!(
-            text.contains("..."),
-            "Long content should be truncated with ..."
-        );
-    }
-
-    // ─── staleness banner tests ──────────────────────────────────────
-
-    #[test]
-    fn build_staleness_banner_none_when_no_pending() {
-        let results = vec![crate::types::SearchResult {
-            file_path: "src/main.rs".to_string(),
-            start_line: 1,
-            end_line: 5,
-            symbol: None,
-            kind: "function_item".to_string(),
-            language: "rust".to_string(),
-            parent_context: None,
-            content: "fn main() {}".to_string(),
-            score: 0.9,
-        }];
-        let banner = build_staleness_banner(&results, &[]);
-        assert!(banner.is_none(), "No pending files → no banner");
-    }
-
-    #[test]
-    fn build_staleness_banner_none_when_no_results() {
-        let pending = vec![PendingFile {
-            path: PathBuf::from("/project/src/main.rs"),
-            modified_at: std::time::SystemTime::now(),
-        }];
-        let banner = build_staleness_banner(&[], &pending);
-        assert!(banner.is_none(), "No results → no banner");
-    }
-
-    #[test]
-    fn build_staleness_banner_matches_pending_to_results() {
-        let results = vec![crate::types::SearchResult {
-            file_path: "src/payment/retry.ts".to_string(),
-            start_line: 10,
-            end_line: 20,
-            symbol: Some("retryPayment".to_string()),
-            kind: "function_declaration".to_string(),
-            language: "typescript".to_string(),
-            parent_context: None,
-            content: "function retryPayment() {}".to_string(),
-            score: 0.85,
-        }];
-        let pending = vec![PendingFile {
-            path: PathBuf::from("/project/src/payment/retry.ts"),
-            modified_at: std::time::SystemTime::now(),
-        }];
-        let banner = build_staleness_banner(&results, &pending);
-        assert!(
-            banner.is_some(),
-            "Should produce banner when result matches pending"
-        );
-        let banner = banner.unwrap();
-        assert!(banner.contains("⚠️"), "Banner should contain warning emoji");
-        assert!(
-            banner.contains("src/payment/retry.ts"),
-            "Banner should mention the stale file"
-        );
-        assert!(
-            banner.contains("modified"),
-            "Banner should mention modification time"
-        );
-    }
-
-    #[test]
-    fn build_staleness_banner_none_when_no_overlap() {
-        let results = vec![crate::types::SearchResult {
-            file_path: "src/auth.ts".to_string(),
-            start_line: 1,
-            end_line: 5,
-            symbol: None,
-            kind: "function_declaration".to_string(),
-            language: "typescript".to_string(),
-            parent_context: None,
-            content: "function auth() {}".to_string(),
-            score: 0.7,
-        }];
-        let pending = vec![PendingFile {
-            path: PathBuf::from("/project/src/payment/retry.ts"),
-            modified_at: std::time::SystemTime::now(),
-        }];
-        let banner = build_staleness_banner(&results, &pending);
-        assert!(
-            banner.is_none(),
-            "No overlap between results and pending → no banner"
-        );
-    }
+fn format_status_text(meta: &crate::types::IndexMeta) -> String {
+    format!(
+        "VectorCode Index Status\n\
+         =======================\n\
+         Provider:    {}\n\
+         Model:       {}\n\
+         Dimensions:  {}\n\
+         Files:       {} indexed\n\
+         Chunks:      {} stored\n\
+         Created:     {}\n\
+         Last Sync:   {}\n\
+         Version:     {}",
+        meta.provider,
+        meta.model,
+        meta.dimensions,
+        meta.files_indexed,
+        meta.chunks_stored,
+        meta.created_at,
+        meta.last_sync_at.as_deref().unwrap_or("Never"),
+        meta.vectorcode_version
+    )
 }

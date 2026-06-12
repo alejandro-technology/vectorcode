@@ -156,7 +156,7 @@ name = "onnx"  # onnx | gemini | ollama | openai
 
 [provider.gemini]
 api_key = "your-api-key"
-model = "gemini-embedding-001"
+model = "gemini-embedding-2"
 dimensions = 768
 
 [provider.ollama]
@@ -268,3 +268,5 @@ Parameters:
 ## License
 
 MIT
+
+ps aux | grep -i vectorcode | grep -v grep

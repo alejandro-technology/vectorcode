@@ -250,23 +250,25 @@ This section tracks the ongoing validation and ROI metrics of VectorCode across 
 
 **Dataset:** 50 pares query→ruta esperada, 13 áreas del codebase, 84% queries en lenguaje natural vago.
 
-| Métrica | ONNX | Ollama | Target |
-| ------- | ---- | ------ | ------ |
-| Cold Index (median) | 3.62s | 23.24s | — |
-| Cold Index (P95) | 3.68s | 24.30s | — |
-| Search Latency (median) | 87.50 ms ✅ | 117.57 ms | <100 ms |
-| Search Latency (P95) | 92.80 ms | 136.71 ms | — |
-| **Precision@1** | 48.00% | **74.00%** | — |
-| **Precision@3** | 70.00% | **86.00%** | — |
-| **Precision@5** | 74.00% | **92.00%** | — |
-| Peak RSS | 17.2 MB | 16.7 MB | — |
+| Métrica | ONNX | Ollama (nomic) | Ollama (gemma) | Target |
+| ------- | ---- | -------------- | -------------- | ------ |
+| Cold Index (median) | 3.62s | 16.50s | 23.24s | — |
+| Cold Index (P95) | 3.68s | 26.40s | 24.30s | — |
+| Search Latency (median) | 87.50 ms | **37.49 ms** ✅ | 117.57 ms | <100 ms |
+| Search Latency (P95) | 92.80 ms | **42.08 ms** | 136.71 ms | — |
+| **Precision@1** | 48.00% | 68.00% | **74.00%** | — |
+| **Precision@3** | 70.00% | 84.00% | **86.00%** | — |
+| **Precision@5** | 74.00% | 86.00% | **92.00%** | — |
+| Peak RSS | 17.2 MB | 16.1 MB | 16.7 MB | — |
 
-| Provider | Modelo | Dims | Ventaja |
-| -------- | ------ | ---- | ------- |
-| **ONNX** | MiniLM-L6-v2 (~80MB) | 384 | ⚡ 6.4× más rápido indexando, latencia bajo 100ms |
-| **Ollama** | embeddinggemma:latest (621MB) | 768 | 🎯 +18pp P@1, +18pp P@5 — modelo más grande = mejores embeddings |
+| Provider | Modelo | Dims | Perfil |
+| -------- | ------ | ---- | ------ |
+| **ONNX** | MiniLM-L6-v2 (~80MB) | 384 | ⚡ Indexado más rápido (3.6s), precisión básica |
+| **Ollama + nomic** | nomic-embed-text (~274MB) | 768 | 🚀 Mejor latencia (37ms), buena precisión — balance óptimo |
+| **Ollama + gemma** | embeddinggemma:latest (621MB) | 768 | 🎯 Máxima precisión (P@5=92%), indexado más lento |
 
-> 3 iteraciones × 50 queries cada una. Resultados: mediana a través de iteraciones. Reporte completo en `benchmarks/results/phase1_report.json`.
+> 3 iteraciones × 50 queries cada una. Resultados: mediana a través de iteraciones.
+> `VECTORCODE_MODEL=nomic-embed-text` para cambiar modelo en benchmarks. Reporte en `benchmarks/results/phase1_report.json`.
 
 ## Architecture
 

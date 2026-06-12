@@ -176,11 +176,14 @@ def run_init(cmd_prefix: list[str], project_path: Path) -> float:
         RuntimeError: If init exits with non-zero code.
     """
     provider = os.environ.get("VECTORCODE_PROVIDER", "onnx")
+    model = os.environ.get("VECTORCODE_MODEL")
 
     # Clean up before init — init errors if .vectorcode/ already exists
     _clean_vectorcode_dir(project_path)
 
     cmd = [*cmd_prefix, "--quiet", "init", "--provider", provider]
+    if model:
+        cmd.extend(["--model", model])
 
     start = time.perf_counter()
     result = _run_subprocess(cmd, project_path, timeout=600.0)

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::schemars::JsonSchema;
@@ -8,7 +10,7 @@ use tracing::error;
 
 use crate::engine::indexer::Indexer;
 use crate::engine::searcher::{SearchOptions, Searcher};
-use crate::mcp::AppState;
+use crate::mcp::{AppInnerState, AppState};
 use crate::store::meta;
 use crate::watcher::PendingFile;
 
@@ -16,6 +18,32 @@ use crate::watcher::PendingFile;
 pub struct McpHandler {
     state: AppState,
     tool_router: ToolRouter<Self>,
+}
+
+impl McpHandler {
+    async fn get_inner_state(&self) -> Result<AppInnerState, String> {
+        {
+            let inner = self.state.inner.read().await;
+            if let Some(state) = &*inner {
+                return Ok(state.clone());
+            }
+        }
+
+        let known_root = self.state.known_root.read().await.clone();
+        if let Some(root) = known_root {
+            if root.join(".vectorcode").exists() {
+                match crate::cli::serve::try_init_workspace(&root, self.state.watch, self.state.debounce).await {
+                    Ok(inner_state) => {
+                        *self.state.inner.write().await = Some(inner_state.clone());
+                        return Ok(inner_state);
+                    }
+                    Err(e) => return Err(format!("Failed to lazily initialize workspace: {e}")),
+                }
+            }
+        }
+
+        Err("VectorCode is not initialized in this workspace. Run `vectorcode init` in your project directory to set it up.".to_string())
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -69,10 +97,12 @@ impl McpHandler {
             return Err("Query cannot be empty".to_string());
         }
 
+        let inner_state = self.get_inner_state().await?;
+
         let searcher = Searcher::new(
-            self.state.db.clone(),
-            self.state.embedder.clone(),
-            self.state.config.search.clone(),
+            inner_state.db.clone(),
+            inner_state.embedder.clone(),
+            inner_state.config.search.clone(),
         );
 
         let options = SearchOptions {
@@ -84,7 +114,7 @@ impl McpHandler {
 
         match searcher.search(&p.query, options).await {
             Ok(results) => {
-                let staleness_banner = match &self.state.watcher {
+                let staleness_banner = match &inner_state.watcher {
                     Some(w) => {
                         let pending = w.read().await.pending_files().await;
                         build_staleness_banner(&results, &pending)
@@ -112,7 +142,8 @@ impl McpHandler {
         annotations(read_only_hint = true)
     )]
     async fn vec_status(&self, _params: Parameters<VecStatusParams>) -> Result<String, String> {
-        let db = self.state.db.lock().await;
+        let inner_state = self.get_inner_state().await?;
+        let db = inner_state.db.lock().await;
         match meta::read_index_meta(db.conn()) {
             Ok(Some(index_meta)) => Ok(format_status_text(&index_meta)),
             Ok(None) => {
@@ -130,21 +161,22 @@ impl McpHandler {
     )]
     async fn vec_reindex(&self, params: Parameters<VecReindexParams>) -> Result<String, String> {
         let p = params.0;
+        let inner_state = self.get_inner_state().await?;
 
         if p.full {
-            let db = self.state.db.lock().await;
-            if let Err(e) = db.init_schema(self.state.embedder.dimensions()) {
+            let db = inner_state.db.lock().await;
+            if let Err(e) = db.init_schema(inner_state.embedder.dimensions()) {
                 return Err(format!("Failed to reinitialize schema: {e}"));
             }
         }
 
         let indexer = Indexer::new(
-            self.state.db.clone(),
-            self.state.embedder.clone(),
-            self.state.config.indexing.clone(),
+            inner_state.db.clone(),
+            inner_state.embedder.clone(),
+            inner_state.config.indexing.clone(),
         );
 
-        match indexer.index_project(&self.state.project_path).await {
+        match indexer.index_project(&inner_state.project_path).await {
             Ok(report) => Ok(format!(
                 "Re-indexing complete.\n\
                      Files scanned:  {}\n\
@@ -179,7 +211,8 @@ impl McpHandler {
         params: Parameters<VecReadLinesParams>,
     ) -> Result<String, String> {
         let p = params.0;
-        let requested_path = self.state.project_path.join(&p.file_path);
+        let inner_state = self.get_inner_state().await?;
+        let requested_path = inner_state.project_path.join(&p.file_path);
 
         // Canonicalize to resolve any ../ and follow symlinks
         let canonical =
@@ -189,8 +222,8 @@ impl McpHandler {
                 _ => return Err(format!("File not found or invalid: {}", p.file_path)),
             };
 
-        let canonical_project = std::fs::canonicalize(&self.state.project_path)
-            .unwrap_or_else(|_| self.state.project_path.clone());
+        let canonical_project = std::fs::canonicalize(&inner_state.project_path)
+            .unwrap_or_else(|_| inner_state.project_path.clone());
 
         if !canonical.starts_with(&canonical_project) {
             return Err("Access denied: Path is outside of project bounds.".to_string());
@@ -228,6 +261,9 @@ impl McpHandler {
 }
 
 use rmcp::model::{Implementation, InitializeResult, ProtocolVersion, ServerCapabilities};
+use rmcp::service::NotificationContext;
+use rmcp::service::RoleServer;
+use std::future::Future;
 
 #[tool_handler]
 impl ServerHandler for McpHandler {
@@ -247,6 +283,63 @@ impl ServerHandler for McpHandler {
                                 discovered via vec_search. Rely on the snippets returned. \
                                 If you need more surrounding context, use the `vec_read_lines` tool \
                                 to fetch only the specific lines you need.".to_string()),
+        }
+    }
+
+    fn on_initialized(
+        &self,
+        context: NotificationContext<RoleServer>,
+    ) -> impl Future<Output = ()> + Send + '_ {
+        let state = self.state.clone();
+        async move {
+            tracing::info!("client initialized, fetching roots...");
+            
+            // We must spawn a background task to fetch roots. Otherwise, waiting for the
+            // client's response blocks the MCP message loop and causes a deadlock.
+            tokio::spawn(async move {
+                // Ask the client for its active workspace roots
+                if let Ok(roots_result) = context.peer.list_roots().await {
+                    // Find the first root that has a .vectorcode directory
+                    let mut chosen_root = None;
+                    for root in &roots_result.roots {
+                        let path_str = root.uri.trim_start_matches("file://");
+                        let path = PathBuf::from(path_str);
+                        if path.join(".vectorcode").exists() {
+                            chosen_root = Some(path);
+                            break;
+                        }
+                    }
+
+                    // If none have .vectorcode, fallback to the first root
+                    if chosen_root.is_none() {
+                        if let Some(first_root) = roots_result.roots.first() {
+                            let path_str = first_root.uri.trim_start_matches("file://");
+                            chosen_root = Some(PathBuf::from(path_str));
+                        }
+                    }
+
+                    if let Some(project_path) = chosen_root {
+                        *state.known_root.write().await = Some(project_path.clone());
+                        if project_path.join(".vectorcode").exists() {
+                            tracing::info!("Found initialized vectorcode workspace at {}", project_path.display());
+                            match crate::cli::serve::try_init_workspace(&project_path, state.watch, state.debounce).await {
+                                Ok(inner) => {
+                                    *state.inner.write().await = Some(inner);
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to initialize workspace from root {}: {}", project_path.display(), e);
+                                }
+                            }
+                        } else {
+                            tracing::info!("Found root {} but it is not initialized. Awaiting user to run `vectorcode init`.", project_path.display());
+                        }
+                    } else {
+                        tracing::info!("No roots provided by client.");
+                    }
+                } else {
+                    tracing::warn!("Failed to fetch roots from client.");
+                }
+            });
         }
     }
 }

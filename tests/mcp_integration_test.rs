@@ -42,11 +42,28 @@ fn send_notification(child: &mut std::process::Child, message: &str) {
 }
 
 /// Helper: perform proper initialization.
-fn initialize_mcp(child: &mut std::process::Child) {
-    let req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}"#;
+fn initialize_mcp(child: &mut std::process::Child, dir: &std::path::Path) {
+    let req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{"roots":{"listChanged":true}},"clientInfo":{"name":"test","version":"1.0"}}}"#;
     let _resp = send_and_receive(child, req);
     let notif = r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#;
     send_notification(child, notif);
+
+    // The server now requests roots/list on initialization. Let's read it and reply!
+    use std::io::{BufRead, BufReader};
+    let stdout = child.stdout.as_mut().unwrap();
+    let mut reader = BufReader::new(stdout);
+    let mut request_str = String::new();
+    reader.read_line(&mut request_str).unwrap(); eprintln!("READ: {}", request_str);
+    
+    // Parse the request to get the ID
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&request_str) {
+        if parsed["method"] == "roots/list" {
+            let id = parsed["id"].as_i64().unwrap();
+            let uri = format!("file://{}", dir.display());
+            let reply = format!(r#"{{"jsonrpc":"2.0","id":{},"result":{{"roots":[{{"uri":"{}"}}]}}}}"#, id, uri);
+            send_notification(child, &reply);
+        }
+    }
 }
 
 /// Helper: initialize a vectorcode project in the given directory with mock provider.
@@ -99,7 +116,7 @@ fn mcp_tools_list_returns_four_tools() {
     let dir = tempfile::tempdir().unwrap();
     init_project(dir.path());
     let mut child = spawn_mcp_server(dir.path());
-    initialize_mcp(&mut child);
+    initialize_mcp(&mut child, dir.path());
 
     let request = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#;
     let response = send_and_receive(&mut child, request);
@@ -126,7 +143,7 @@ fn mcp_vec_status_returns_index_info() {
     let dir = tempfile::tempdir().unwrap();
     init_project(dir.path());
     let mut child = spawn_mcp_server(dir.path());
-    initialize_mcp(&mut child);
+    initialize_mcp(&mut child, dir.path());
 
     let request = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"vec_status","arguments":{}}}"#;
     let response = send_and_receive(&mut child, request);

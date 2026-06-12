@@ -11,7 +11,7 @@ use tracing::info;
 use crate::cli::create_embedder_from_config;
 use crate::config;
 use crate::engine::indexer::Indexer;
-use crate::mcp::{AppState, McpServer};
+use crate::mcp::{AppInnerState, AppState, McpServer};
 use crate::store::db::Database;
 use crate::store::files;
 use crate::watcher::FileWatcher;
@@ -39,15 +39,12 @@ pub struct ServeArgs {
     pub debounce: u64,
 }
 
-/// Execute the `serve` command.
-///
-/// Creates the MCP server with shared application state and runs the
-/// JSON-RPC message loop over stdio.
-pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result<()> {
-    if !args.mcp {
-        anyhow::bail!("Only --mcp mode is supported. Use: vectorcode serve --mcp");
-    }
-
+/// Try to initialize the workspace at the given project path.
+pub async fn try_init_workspace(
+    project_path: &std::path::Path,
+    watch_arg: bool,
+    debounce_arg: u64,
+) -> Result<AppInnerState> {
     let vc_dir = project_path.join(".vectorcode");
     if !vc_dir.exists() {
         anyhow::bail!(
@@ -61,7 +58,7 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
     cfg.apply_env_overrides();
 
     // Override debounce from CLI arg
-    cfg.watcher.debounce_ms = args.debounce;
+    cfg.watcher.debounce_ms = debounce_arg;
 
     // Create embedder first — we need its dimensions to ensure schema exists.
     // Wrap in timeout to handle ONNX CoreML hangs (spec §P5).
@@ -93,11 +90,11 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
         }
     }
 
-    let watch = !args.no_watch && !cfg.watcher.disabled;
-    info!("MCP server starting on stdio");
+    let watch = watch_arg && !cfg.watcher.disabled;
+    info!("MCP server workspace initialized");
     info!("  Project: {}", project_path.display());
     info!("  Watch:   {watch}");
-    info!("  Debounce: {}ms", args.debounce);
+    info!("  Debounce: {}ms", debounce_arg);
 
     // Create file watcher if enabled
     let mut watcher_rx = None;
@@ -122,8 +119,7 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
         None
     };
 
-    // Create AppState and McpServer
-    let state = AppState {
+    let inner_state = AppInnerState {
         db: Arc::new(tokio::sync::Mutex::new(db)),
         embedder: embedder.clone(),
         config: cfg.clone(),
@@ -152,8 +148,6 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
         });
     }
 
-    let mut server = McpServer::new(state);
-
     // Spawn connect-time catch-up on a blocking thread (spec §14.3).
     if watch {
         let catchup_db_path = db_path.clone();
@@ -172,6 +166,37 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
             }
         });
     }
+
+    Ok(inner_state)
+}
+
+/// Execute the `serve` command.
+///
+/// Creates the MCP server with shared application state and runs the
+/// JSON-RPC message loop over stdio.
+pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result<()> {
+    if !args.mcp {
+        anyhow::bail!("Only --mcp mode is supported. Use: vectorcode serve --mcp");
+    }
+
+    let watch_arg = !args.no_watch;
+    
+    // We start uninitialized. The MCP handler will attempt to discover the workspace
+    // root during `initialize` or when the first tool is called.
+    let state = AppState {
+        inner: Arc::new(tokio::sync::RwLock::new(None)),
+        known_root: Arc::new(tokio::sync::RwLock::new(Some(project_path.to_path_buf()))),
+        watch: watch_arg,
+        debounce: args.debounce,
+    };
+
+    // If `.vectorcode` exists in the provided project path, we can pre-initialize it
+    if project_path.join(".vectorcode").exists() {
+        let inner = try_init_workspace(project_path, watch_arg, args.debounce).await?;
+        *state.inner.write().await = Some(inner);
+    }
+
+    let mut server = McpServer::new(state);
 
     // Run the MCP server main loop
     server.run().await?;
@@ -442,20 +467,7 @@ mod tests {
         assert!(err.contains("--mcp"), "Got: {err}");
     }
 
-    #[test]
-    fn serve_fails_without_init() {
-        let dir = tempfile::tempdir().unwrap();
-        let args = ServeArgs {
-            mcp: true,
-            no_watch: false,
-            debounce: 2000,
-        };
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(execute(&args, dir.path()));
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("not initialized"), "Got: {err}");
-    }
+
 
     #[test]
     fn serve_fails_with_gemini_no_api_key() {

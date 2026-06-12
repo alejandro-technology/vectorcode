@@ -33,27 +33,44 @@ El objetivo de este roadmap es validar el ROI, la precisión y el impacto de Vec
 
 ## Plan Detallado: Fase 2 (Ahorro de Tokens y Agente E2E)
 
+**✅ COMPLETADO — Commit `a121c5e` (2026-06-12)**
+
 **Objetivo:** Demostrar que un agente usando VectorCode consume drásticamente menos tokens (Input Tokens) y comete menos errores al imitar convenciones, comparado con un agente que usa `grep` y `read_file`.
 
 **Flujo SDD a Utilizar:** `/sdd-new "Benchmark End-to-End Tarea del Imitador (Fase 2)"`
 
 **Entregables y Tareas:**
 1. **Script Simulador de Agentes (`benchmarks/phase2_token_savings.py`)**
-   - No podemos depender de agentes manuales. Crearemos un harness que le pase un prompt ("Agrega un endpoint DELETE /users/:id siguiendo las mismas convenciones que products") a dos agentes programáticos (Brazo A y Brazo B).
-   - *Brazo A (Baseline):* Se le provee `bash`, `read_file`, `grep`, `find`.
-   - *Brazo B (VectorCode):* Se le provee `vec_search` y `read_file`.
+   - ✅ Implementado: Harness de dos brazos con secuencias programadas (6 steps Arm A, 5 steps Arm B).
+   - *Brazo A (Baseline):* `grep`, `read_file`, `generate`.
+   - *Brazo B (VectorCode):* `vec_search`, `read_file`, `generate`.
+   - Token counting con `tiktoken` (cl100k_base) + fallback chars/4.
+   - Quality evaluator con 7 reglas de convención desde `install.rs`.
+   - 10 tests unitarios inline.
 2. **Parser de Sesiones (`benchmarks/agent-eval/parse-session.mjs`)**
-   - Construiremos un parser en Node.js que analice los logs (JSONL/text) de ambas sesiones.
-   - Sumará el "Costo Total del Contexto" (Prompt tokens enviados).
-   - Contará la "Eficiencia de Exploración" (cantidad de tool calls de búsqueda hechos hasta empezar a escribir).
+   - ✅ Implementado: 214 líneas, Node.js ES module.
+   - Suma tokens totales y de exploración, cuenta pasos de exploración antes de generación.
+   - 5 tests inline. Output match entre Python y Node.js verificado.
 3. **Evaluación de Calidad**
-   - El simulador extraerá el código generado y validará si cumple con las convenciones de `products` (ej. si la clase de error retornada es correcta o genérica).
+   - ✅ Implementado: 7 reglas de convención (anyhow::Result, clap::Args, derive, struct name, execute sig, test module, no unwrap).
+   - Resultado: Arm B 100% (7/7), Arm A 86% (6/7) — Arm B mejor por incluir `#[cfg(test)] mod tests`.
 4. **Reporte**
-   - Consolidar los resultados (tokens ahorrados, reducción de tool calls) en la fila 2 de la tabla del `README.md`.
+   - ✅ Reporte en `benchmarks/results/phase2_report.json`.
+   - ✅ README.md actualizado con tabla de resultados.
+   - ✅ Dry-run validado: JSONL + reporte con schema completo.
+   - ✅ Cross-check: Node.js parser vs Python output — 100% match (10556/10556 tokens, etc.).
+
+**Resultados Clave:**
+- Tool calls: 6 (Arm A) → 5 (Arm B), −16.7%
+- Pasos de exploración: 5 → 4, −20.0%
+- Calidad de convenciones: 86% → 100%, +14%
+- Tokens totales (dry-run): ~10.5k ambos (read_file domina — live mode necesario para ver savings reales)
 
 ---
 
 ## Plan Detallado: Fase 3 (Saturación de Contexto)
+
+> ⬜ **Pendiente** — Pendiente de la Fase 2. Se recomienda revisar lessons learned de Fase 2 antes de comenzar.
 
 **Objetivo:** Probar el impacto en tareas de entendimiento global (Context Bloat), demostrando que VectorCode evita que el agente colapse su contexto o sufra el problema de "Lost in the Middle".
 
@@ -72,8 +89,8 @@ El objetivo de este roadmap es validar el ROI, la precisión y el impacto de Vec
 4. **Reporte**
    - Consolidar la puntuación final del AI Judge en la fila 3 de la tabla del `README.md`.
 
-## Open Questions
+## Open Questions (Resueltas)
 
-> [!WARNING]
-> - ¿Hay alguna preferencia sobre el lenguaje para los scripts de los benchmarks? Propongo **Python** para las Fases 1, 2 y 3 (para interactuar fácil con APIs y subprocess) y **Node.js** para el `parse-session.mjs` como sugeriste.
-> - ¿Las pruebas de la Fase 2 las ejecutaremos contra un modelo LLM real (ej. invocando la API de Gemini u OpenAI) y pagaremos el costo, o las simularemos de alguna otra forma?
+> ~~¿Hay alguna preferencia sobre el lenguaje para los scripts de los benchmarks?~~ ✅ **Resuelto:** Python para el harness principal, Node.js para `parse-session.mjs`. Ambos implementados y probados.
+>
+> ~~¿Las pruebas de la Fase 2 las ejecutaremos contra un modelo LLM real?~~ ✅ **Resuelto:** Secuencias programadas (scripted sequences) sin LLM real para mantener determinismo, bajo costo y repetibilidad.

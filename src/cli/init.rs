@@ -317,7 +317,13 @@ fn prompt_ollama_url_if_needed(provider: &ProviderArg) -> String {
 }
 
 /// Generate the config.toml content for the chosen provider.
-fn generate_config_toml(provider: &ProviderArg, model: &str, dims: u32, api_key: &str, ollama_url: &str) -> String {
+fn generate_config_toml(
+    provider: &ProviderArg,
+    model: &str,
+    dims: u32,
+    api_key: &str,
+    ollama_url: &str,
+) -> String {
     let provider_section = match provider {
         ProviderArg::Onnx => format!(
             r#"[provider]
@@ -454,14 +460,21 @@ mod tests {
 
     #[test]
     fn generate_config_toml_ollama_contains_url() {
-        let toml = generate_config_toml(&ProviderArg::Ollama, "nomic-embed-text", 768, "", "http://localhost:11434");
+        let toml = generate_config_toml(
+            &ProviderArg::Ollama,
+            "nomic-embed-text",
+            768,
+            "",
+            "http://localhost:11434",
+        );
         assert!(toml.contains("name = \"ollama\""));
         assert!(toml.contains("url = \"http://localhost:11434\""));
     }
 
     #[test]
     fn generate_config_toml_openai_contains_api_key() {
-        let toml = generate_config_toml(&ProviderArg::Openai, "text-embedding-3-small", 1536, "", "");
+        let toml =
+            generate_config_toml(&ProviderArg::Openai, "text-embedding-3-small", 1536, "", "");
         assert!(toml.contains("name = \"openai\""));
         assert!(toml.contains("api_key = \"\""));
     }
@@ -474,7 +487,8 @@ mod tests {
             ProviderArg::Ollama,
             ProviderArg::Openai,
         ] {
-            let toml = generate_config_toml(&provider, "test-model", 128, "", "http://localhost:11434");
+            let toml =
+                generate_config_toml(&provider, "test-model", 128, "", "http://localhost:11434");
             assert!(
                 toml.contains("[indexing]"),
                 "Missing [indexing] for {:?}",

@@ -134,7 +134,7 @@ impl Default for OllamaConfig {
     fn default() -> Self {
         Self {
             url: "http://localhost:11434".to_string(),
-            model: "nomic-embed-text".to_string(),
+            model: "embeddinggemma:latest".to_string(),
         }
     }
 }

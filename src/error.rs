@@ -111,11 +111,11 @@ mod tests {
     #[test]
     fn ollama_model_not_found_shows_pull_command() {
         let err = VectorCodeError::OllamaModelNotFound {
-            model: "nomic-embed-text".to_string(),
+            model: "embeddinggemma:latest".to_string(),
         };
         let msg = err.to_string();
         assert!(
-            msg.contains("nomic-embed-text"),
+            msg.contains("embeddinggemma:latest"),
             "Missing model name: {msg}"
         );
         assert!(msg.contains("ollama pull"), "Missing pull hint: {msg}");

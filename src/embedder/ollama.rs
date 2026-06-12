@@ -1,7 +1,7 @@
 //! Ollama embedding provider.
 //!
 //! Uses a local Ollama instance for text embeddings.
-//! Default model: nomic-embed-text (768 dimensions, 8192 max tokens).
+//! Default model: embeddinggemma:latest (768 dimensions, 8192 max tokens).
 //! Spec §7.2: Ollama
 
 use crate::embedder::{Embedder, EmbedderResult};
@@ -26,7 +26,7 @@ pub struct OllamaEmbedder {
 
 impl OllamaEmbedder {
     /// Default model identifier.
-    pub const DEFAULT_MODEL: &'static str = "nomic-embed-text";
+    pub const DEFAULT_MODEL: &'static str = "embeddinggemma:latest";
     /// Default base URL for local Ollama.
     pub const DEFAULT_URL: &'static str = "http://localhost:11434";
     /// Output dimensions for the default model.
@@ -280,7 +280,7 @@ mod tests {
     fn ollama_new_with_default_config() {
         let embedder = OllamaEmbedder::new().unwrap();
         assert_eq!(embedder.base_url, "http://localhost:11434");
-        assert_eq!(embedder.model, "nomic-embed-text");
+        assert_eq!(embedder.model, "embeddinggemma:latest");
     }
 
     #[test]
@@ -326,7 +326,7 @@ mod tests {
     fn ollama_metadata_methods() {
         let embedder = OllamaEmbedder::new().unwrap();
         assert_eq!(embedder.provider_name(), "ollama");
-        assert_eq!(embedder.model_name(), "nomic-embed-text");
+        assert_eq!(embedder.model_name(), "embeddinggemma:latest");
         assert_eq!(embedder.dimensions(), 768);
         assert_eq!(embedder.max_tokens(), 8192);
     }
@@ -361,7 +361,7 @@ mod tests {
     fn ollama_request_body_format() {
         let embedder = OllamaEmbedder::new().unwrap();
         let body = embedder.build_request(&["hello world"]);
-        assert_eq!(body.model, "nomic-embed-text");
+        assert_eq!(body.model, "embeddinggemma:latest");
         assert_eq!(body.input, vec!["hello world"]);
     }
 
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn ollama_parse_response_success() {
         let json = r#"{
-            "model": "nomic-embed-text",
+            "model": "embeddinggemma:latest",
             "embeddings": [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
         }"#;
         let result = OllamaEmbedder::parse_response(json).unwrap();
@@ -398,7 +398,7 @@ mod tests {
 
     #[test]
     fn ollama_constants() {
-        assert_eq!(OllamaEmbedder::DEFAULT_MODEL, "nomic-embed-text");
+        assert_eq!(OllamaEmbedder::DEFAULT_MODEL, "embeddinggemma:latest");
         assert_eq!(OllamaEmbedder::DEFAULT_URL, "http://localhost:11434");
         assert_eq!(OllamaEmbedder::DEFAULT_DIMENSIONS, 768);
         assert_eq!(OllamaEmbedder::MAX_TOKENS, 8192);

@@ -194,7 +194,7 @@ fn resolve_provider_defaults(
         ProviderArg::Ollama => (
             model
                 .clone()
-                .unwrap_or_else(|| "nomic-embed-text".to_string()),
+                .unwrap_or_else(|| "embeddinggemma:latest".to_string()),
             dims.unwrap_or(768),
         ),
         ProviderArg::Openai => (
@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn resolve_provider_defaults_ollama() {
         let (model, dims) = resolve_provider_defaults(&ProviderArg::Ollama, &None, &None);
-        assert_eq!(model, "nomic-embed-text");
+        assert_eq!(model, "embeddinggemma:latest");
         assert_eq!(dims, 768);
     }
 
@@ -462,7 +462,7 @@ mod tests {
     fn generate_config_toml_ollama_contains_url() {
         let toml = generate_config_toml(
             &ProviderArg::Ollama,
-            "nomic-embed-text",
+            "embeddinggemma:latest",
             768,
             "",
             "http://localhost:11434",

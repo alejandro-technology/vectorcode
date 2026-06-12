@@ -96,10 +96,15 @@ pub fn resolve_project_path(cli_path: Option<&PathBuf>) -> PathBuf {
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    // Walk up the tree looking for .vectorcode
+    // Walk up the tree looking for .vectorcode with config.toml inside it.
+    // Must check for a real project marker to avoid false positives
+    // (e.g. ~/.vectorcode/models/ for ONNX cache).
     let mut current = cwd.as_path();
     loop {
-        if current.join(".vectorcode").exists() {
+        let vc_dir = current.join(".vectorcode");
+        if vc_dir.is_dir()
+            && (vc_dir.join("config.toml").exists() || vc_dir.join("index.db").exists())
+        {
             return current.to_path_buf();
         }
         match current.parent() {
@@ -298,8 +303,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let project_root = std::fs::canonicalize(temp.path()).unwrap();
 
-        // Create .vectorcode in root
-        std::fs::create_dir(project_root.join(".vectorcode")).unwrap();
+        // Create .vectorcode in root with a project marker
+        let vc_dir = project_root.join(".vectorcode");
+        std::fs::create_dir(&vc_dir).unwrap();
+        std::fs::write(vc_dir.join("config.toml"), "").unwrap();
 
         // Create a deep subdirectory
         let deep_dir = project_root.join("src").join("cli").join("nested");
@@ -419,7 +426,7 @@ mod tests {
         config.provider.name = "ollama".to_string();
         config.provider.ollama = Some(crate::config::schema::OllamaConfig {
             url: "http://localhost:11434".to_string(),
-            model: "nomic-embed-text".to_string(),
+            model: "embeddinggemma:latest".to_string(),
         });
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(create_embedder_from_config(&config));

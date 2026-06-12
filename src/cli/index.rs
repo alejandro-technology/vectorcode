@@ -133,8 +133,40 @@ pub async fn execute(args: &IndexArgs, project_path: &std::path::Path, quiet: bo
 
     let indexer = if let Some(ref pb) = progress_bar {
         let pb_clone = pb.clone();
-        let progress_callback = Arc::new(move |message: &str| {
-            pb_clone.set_message(message.to_string());
+        let progress_callback = Arc::new(move |event: crate::engine::indexer::ProgressEvent| {
+            match event {
+                crate::engine::indexer::ProgressEvent::Message(msg) => {
+                    pb_clone.set_message(msg);
+                }
+                crate::engine::indexer::ProgressEvent::DiscoveredFiles(total) => {
+                    pb_clone.set_length(total as u64);
+                    pb_clone.set_style(
+                        ProgressStyle::default_bar()
+                            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} files ({percent}%) - {msg}")
+                            .unwrap_or_else(|_| ProgressStyle::default_spinner())
+                            .progress_chars("#>-"),
+                    );
+                    pb_clone.set_message("Chunking files...");
+                    pb_clone.set_position(0);
+                }
+                crate::engine::indexer::ProgressEvent::ProcessedFile => {
+                    pb_clone.inc(1);
+                }
+                crate::engine::indexer::ProgressEvent::EmbeddingStart(total) => {
+                    pb_clone.set_length(total as u64);
+                    pb_clone.set_style(
+                        ProgressStyle::default_bar()
+                            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.magenta/blue}] {pos}/{len} chunks ({percent}%) - {msg}")
+                            .unwrap_or_else(|_| ProgressStyle::default_spinner())
+                            .progress_chars("#>-"),
+                    );
+                    pb_clone.set_message("Embedding chunks...");
+                    pb_clone.set_position(0);
+                }
+                crate::engine::indexer::ProgressEvent::EmbeddedBatch(size) => {
+                    pb_clone.inc(size as u64);
+                }
+            }
         });
         indexer.with_progress(progress_callback)
     } else {

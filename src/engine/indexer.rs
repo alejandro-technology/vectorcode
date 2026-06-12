@@ -35,12 +35,27 @@ pub struct IndexReport {
     pub duration: Duration,
 }
 
+/// Events for progress reporting during indexing.
+#[derive(Debug, Clone)]
+pub enum ProgressEvent {
+    /// A generic phase message.
+    Message(String),
+    /// Discovered a total number of files.
+    DiscoveredFiles(usize),
+    /// Processed a single file (chunking, skipping, etc.).
+    ProcessedFile,
+    /// Started embedding a total number of chunks.
+    EmbeddingStart(usize),
+    /// Embedded a batch of chunks.
+    EmbeddedBatch(usize),
+}
+
 /// Callback type for progress reporting during indexing.
 ///
-/// Called with a human-readable phase message (e.g. "[1/3] Discovering files...").
+/// Called with a `ProgressEvent`.
 /// When set, the Indexer calls this INSTEAD of `tracing::info!` for phase messages,
 /// allowing CLI callers to show visual progress bars while MCP callers keep tracing.
-pub type ProgressCallback = Arc<dyn Fn(&str) + Send + Sync>;
+pub type ProgressCallback = Arc<dyn Fn(ProgressEvent) + Send + Sync>;
 
 /// Orchestrates the full and incremental indexing pipeline (spec §9).
 pub struct Indexer {
@@ -75,11 +90,18 @@ impl Indexer {
     }
 
     /// Report a phase message via the progress callback or tracing.
-    fn report_progress(&self, message: &str) {
+    fn report_progress(&self, event: ProgressEvent) {
         if let Some(ref cb) = self.progress {
-            cb(message);
+            cb(event);
         } else {
-            info!("{}", message);
+            // Fallback for tracing when no progress bar is used
+            match event {
+                ProgressEvent::Message(msg) => info!("{}", msg),
+                ProgressEvent::DiscoveredFiles(count) => info!("Found {} files", count),
+                ProgressEvent::EmbeddingStart(count) => info!("Embedding {} chunks...", count),
+                // Avoid logging every single file or batch to prevent log spam
+                _ => {}
+            }
         }
     }
 
@@ -91,10 +113,10 @@ impl Indexer {
         let start = Instant::now();
 
         // Step 1: Discover files
-        self.report_progress("[1/3] Discovering files...");
+        self.report_progress(ProgressEvent::Message("[1/3] Discovering files...".to_string()));
         let file_paths = discover_files(project_path, &self.config);
         let files_scanned = file_paths.len();
-        self.report_progress(&format!("[1/3] Found {} files", files_scanned));
+        self.report_progress(ProgressEvent::DiscoveredFiles(files_scanned));
 
         // Build set of valid relative paths (for stale chunk cleanup)
         let valid_paths: HashSet<String> = file_paths
@@ -108,17 +130,24 @@ impl Indexer {
             self.process_file_entries(&file_paths, project_path).await?;
 
         let chunks_new = new_chunks.len();
-        self.report_progress(&format!(
+        self.report_progress(ProgressEvent::Message(format!(
             "[2/3] Chunking... {} new, {} skipped",
             chunks_new, chunks_skipped
-        ));
+        )));
 
         // Step 3: Embed and store
-        self.report_progress(&format!("[3/3] Embedding {} chunks...", chunks_new));
+        self.report_progress(ProgressEvent::EmbeddingStart(chunks_new));
         if !new_chunks.is_empty() {
             let texts: Vec<String> = new_chunks.iter().map(enrich_chunk_content).collect();
-            let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-            let embeddings = self.embedder.embed_batch(&text_refs).await?;
+            let mut embeddings = Vec::with_capacity(new_chunks.len());
+            
+            let batch_size = 100;
+            for batch in texts.chunks(batch_size) {
+                let text_refs: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
+                let batch_embeddings = self.embedder.embed_batch(&text_refs).await?;
+                embeddings.extend(batch_embeddings);
+                self.report_progress(ProgressEvent::EmbeddedBatch(batch.len()));
+            }
 
             if new_chunks.len() != embeddings.len() {
                 return Err(crate::VectorCodeError::EmbedderError {
@@ -151,12 +180,12 @@ impl Indexer {
         };
 
         let duration = start.elapsed();
-        self.report_progress(&format!(
+        self.report_progress(ProgressEvent::Message(format!(
             "Indexed {} files, {} chunks in {:.1}s",
             files_scanned,
             chunks_total,
             duration.as_secs_f64()
-        ));
+        )));
 
         Ok(IndexReport {
             files_scanned,
@@ -186,9 +215,17 @@ impl Indexer {
         let chunks_new = new_chunks.len();
 
         if !new_chunks.is_empty() {
+            self.report_progress(ProgressEvent::EmbeddingStart(chunks_new));
             let texts: Vec<String> = new_chunks.iter().map(enrich_chunk_content).collect();
-            let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-            let embeddings = self.embedder.embed_batch(&text_refs).await?;
+            let mut embeddings = Vec::with_capacity(new_chunks.len());
+            
+            let batch_size = 100;
+            for batch in texts.chunks(batch_size) {
+                let text_refs: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
+                let batch_embeddings = self.embedder.embed_batch(&text_refs).await?;
+                embeddings.extend(batch_embeddings);
+                self.report_progress(ProgressEvent::EmbeddedBatch(batch.len()));
+            }
 
             if new_chunks.len() != embeddings.len() {
                 return Err(crate::VectorCodeError::EmbedderError {
@@ -336,6 +373,8 @@ impl Indexer {
                 .unwrap_or_default()
                 .as_secs() as i64;
             files::upsert_file(db_conn, &relative_path, mtime, size, &content_hash, now)?;
+            
+            self.report_progress(ProgressEvent::ProcessedFile);
         }
 
         {

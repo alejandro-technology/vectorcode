@@ -246,22 +246,27 @@ This section tracks the ongoing validation and ROI metrics of VectorCode across 
 | 2 | Ahorro de Tokens (Agente E2E) | Reducción de Input Tokens vs Baseline | Pendiente |
 | 3 | Saturación de Contexto (Context Bloat) | Puntuación del AI Judge | Pendiente |
 
-### Fase 1: Precisión IR (embeddinggemma via Ollama)
+### Fase 1: Precisión IR
 
 **Dataset:** 50 pares query→ruta esperada, 13 áreas del codebase, 84% queries en lenguaje natural vago.
 
-| Métrica | Valor | Target | Estado |
-| ------- | ----- | ------ | ------ |
-| Cold Index Time (median) | 23.24s | — | — |
-| Cold Index Time (P95) | 24.30s | — | — |
-| Search Latency (median) | 117.57 ms | <100 ms | ⚠️ Leve por encima |
-| Search Latency (P95) | 136.71 ms | — | — |
-| **Precision@1** | **74.00%** | — | — |
-| **Precision@3** | **86.00%** | — | — |
-| **Precision@5** | **92.00%** | — | — |
-| Peak RSS | 16.7 MB | — | — |
+| Métrica | ONNX | Ollama | Target |
+| ------- | ---- | ------ | ------ |
+| Cold Index (median) | 3.62s | 23.24s | — |
+| Cold Index (P95) | 3.68s | 24.30s | — |
+| Search Latency (median) | 87.50 ms ✅ | 117.57 ms | <100 ms |
+| Search Latency (P95) | 92.80 ms | 136.71 ms | — |
+| **Precision@1** | 48.00% | **74.00%** | — |
+| **Precision@3** | 70.00% | **86.00%** | — |
+| **Precision@5** | 74.00% | **92.00%** | — |
+| Peak RSS | 17.2 MB | 16.7 MB | — |
 
-> **Provider:** Ollama (`embeddinggemma:latest`, 768 dims). 3 iteraciones × 50 queries cada una. Resultados: mediana a través de las 3 iteraciones. Reporte completo en `benchmarks/results/phase1_report.json`.
+| Provider | Modelo | Dims | Ventaja |
+| -------- | ------ | ---- | ------- |
+| **ONNX** | MiniLM-L6-v2 (~80MB) | 384 | ⚡ 6.4× más rápido indexando, latencia bajo 100ms |
+| **Ollama** | embeddinggemma:latest (621MB) | 768 | 🎯 +18pp P@1, +18pp P@5 — modelo más grande = mejores embeddings |
+
+> 3 iteraciones × 50 queries cada una. Resultados: mediana a través de iteraciones. Reporte completo en `benchmarks/results/phase1_report.json`.
 
 ## Architecture
 

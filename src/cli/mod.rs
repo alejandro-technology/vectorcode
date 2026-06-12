@@ -136,6 +136,7 @@ pub async fn create_embedder_from_config(config: &Config) -> Result<Arc<dyn Embe
             })?;
             let embedder = crate::embedder::gemini::GeminiEmbedder::new(
                 gemini_cfg.api_key.clone(),
+                gemini_cfg.model.clone(),
                 gemini_cfg.dimensions,
             )?;
             Ok(Arc::new(embedder))

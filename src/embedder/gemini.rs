@@ -46,13 +46,14 @@ impl GeminiEmbedder {
     /// # Errors
     /// - `ApiKeyMissing` if `api_key` is empty
     /// - `EmbedderError` if `dimensions` is not a valid Matryoshka size
-    pub fn new(api_key: String, dimensions: u32) -> EmbedderResult<Self> {
-        Self::with_client(api_key, dimensions, reqwest::Client::new())
+    pub fn new(api_key: String, model: String, dimensions: u32) -> EmbedderResult<Self> {
+        Self::with_client(api_key, model, dimensions, reqwest::Client::new())
     }
 
     /// Create with a custom reqwest::Client (useful for testing).
     pub fn with_client(
         api_key: String,
+        model: String,
         dimensions: u32,
         client: reqwest::Client,
     ) -> EmbedderResult<Self> {
@@ -70,7 +71,7 @@ impl GeminiEmbedder {
             });
         }
         Ok(Self {
-            model: Self::DEFAULT_MODEL.to_string(),
+            model,
             dimensions,
             api_key,
             client,
@@ -102,11 +103,16 @@ impl GeminiEmbedder {
     }
 
     /// Build request body for a batch embed request.
+    ///
+    /// Each request must include its own `model` field (with `models/` prefix)
+    /// per the Gemini batchEmbedContents API contract.
     fn build_batch_request(&self, texts: &[&str]) -> serde_json::Value {
+        let model = format!("models/{}", self.model);
         let requests: Vec<serde_json::Value> = texts
             .iter()
             .map(|text| {
                 serde_json::json!({
+                    "model": model,
                     "content": { "parts": [{ "text": text }] },
                     "outputDimensionality": self.dimensions
                 })
@@ -319,7 +325,7 @@ mod tests {
 
     #[test]
     fn gemini_new_fails_without_api_key() {
-        let result = GeminiEmbedder::new(String::new(), 768);
+        let result = GeminiEmbedder::new(String::new(), "gemini-embedding-001".to_string(), 768);
         assert!(result.is_err(), "Empty API key should fail");
         let err = result.unwrap_err();
         let msg = err.to_string();
@@ -331,7 +337,11 @@ mod tests {
 
     #[test]
     fn gemini_new_fails_with_invalid_dimensions() {
-        let result = GeminiEmbedder::new("test-key".to_string(), 999);
+        let result = GeminiEmbedder::new(
+            "test-key".to_string(),
+            "gemini-embedding-001".to_string(),
+            999,
+        );
         assert!(result.is_err(), "Invalid dimensions should fail");
         let err = result.unwrap_err();
         let msg = err.to_string();
@@ -347,14 +357,19 @@ mod tests {
 
     #[test]
     fn gemini_new_succeeds_with_valid_config() {
-        let embedder = GeminiEmbedder::new("test-key".to_string(), 768);
+        let embedder = GeminiEmbedder::new(
+            "test-key".to_string(),
+            "gemini-embedding-001".to_string(),
+            768,
+        );
         assert!(embedder.is_ok(), "Valid config should succeed");
     }
 
     #[test]
     fn gemini_all_matryoshka_dimensions_accepted() {
         for &dims in &[256u32, 512, 768, 1024, 3072] {
-            let result = GeminiEmbedder::new("key".to_string(), dims);
+            let result =
+                GeminiEmbedder::new("key".to_string(), "gemini-embedding-001".to_string(), dims);
             assert!(result.is_ok(), "Dimension {dims} should be valid");
             assert_eq!(result.unwrap().dimensions(), dims);
         }
@@ -362,7 +377,9 @@ mod tests {
 
     #[test]
     fn gemini_metadata_methods() {
-        let embedder = GeminiEmbedder::new("key".to_string(), 768).unwrap();
+        let embedder =
+            GeminiEmbedder::new("key".to_string(), "gemini-embedding-001".to_string(), 768)
+                .unwrap();
         assert_eq!(embedder.provider_name(), "gemini");
         assert_eq!(embedder.model_name(), "gemini-embedding-001");
         assert_eq!(embedder.dimensions(), 768);
@@ -371,7 +388,12 @@ mod tests {
 
     #[test]
     fn gemini_embed_url_contains_model_and_key() {
-        let embedder = GeminiEmbedder::new("my-api-key".to_string(), 768).unwrap();
+        let embedder = GeminiEmbedder::new(
+            "my-api-key".to_string(),
+            "gemini-embedding-001".to_string(),
+            768,
+        )
+        .unwrap();
         let url = embedder.embed_url();
         assert!(
             url.contains("gemini-embedding-001"),
@@ -393,7 +415,9 @@ mod tests {
 
     #[test]
     fn gemini_batch_url_contains_batch_endpoint() {
-        let embedder = GeminiEmbedder::new("key".to_string(), 768).unwrap();
+        let embedder =
+            GeminiEmbedder::new("key".to_string(), "gemini-embedding-001".to_string(), 768)
+                .unwrap();
         let url = embedder.batch_url();
         assert!(
             url.contains("batchEmbedContents"),
@@ -407,7 +431,9 @@ mod tests {
 
     #[test]
     fn gemini_embed_request_body_format() {
-        let embedder = GeminiEmbedder::new("key".to_string(), 768).unwrap();
+        let embedder =
+            GeminiEmbedder::new("key".to_string(), "gemini-embedding-001".to_string(), 768)
+                .unwrap();
         let body = embedder.build_embed_request("hello world");
 
         assert_eq!(body["content"]["parts"][0]["text"], "hello world");
@@ -416,7 +442,9 @@ mod tests {
 
     #[test]
     fn gemini_batch_request_body_format() {
-        let embedder = GeminiEmbedder::new("key".to_string(), 512).unwrap();
+        let embedder =
+            GeminiEmbedder::new("key".to_string(), "gemini-embedding-001".to_string(), 512)
+                .unwrap();
         let texts = vec!["chunk one", "chunk two", "chunk three"];
         let body = embedder.build_batch_request(&texts);
 
@@ -428,6 +456,14 @@ mod tests {
         assert_eq!(
             requests[0]["outputDimensionality"], 512,
             "Each request should include dimensionality"
+        );
+        assert_eq!(
+            requests[0]["model"], "models/gemini-embedding-001",
+            "Each batch request must include model with models/ prefix"
+        );
+        assert_eq!(
+            requests[1]["model"], "models/gemini-embedding-001",
+            "All requests must carry the same model"
         );
     }
 

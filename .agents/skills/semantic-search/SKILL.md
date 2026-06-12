@@ -10,10 +10,18 @@ description: >
 
 ## Semantic Code Search Protocol
 
-### Tool: `vec_search`
+VectorCode exposes semantic search through two equivalent surfaces:
 
-Performs cosine-similarity search over embedded code chunks. Returns ranked
-results with file paths, line numbers, symbols, and source code.
+- **MCP tool**: `vec_search` (used by the agent/LLM client)
+- **CLI**: `vectorcode search "<query>"` (used from a terminal or scripts)
+
+Both call the same underlying engine: cosine-similarity search over embedded
+code chunks, returning ranked results with file paths, line numbers, symbols,
+and source code.
+
+---
+
+## MCP Tool: `vec_search`
 
 ### When to use `vec_search`
 
@@ -28,11 +36,66 @@ results with file paths, line numbers, symbols, and source code.
 - You know an exact string in the code → use `grep`
 - You're looking for past decisions or history → use `mem_search` (Engram)
 
-### Recommended flow: Semantic → Structural → Historical
+### MCP tool parameters
+
+| Parameter   | Type     | Description |
+|-------------|----------|-------------|
+| `query`     | string   | Natural-language description of the concept to find |
+| `limit`     | integer  | Max number of results (default 10) |
+| `path`      | string   | Restrict search to a file/directory prefix |
+| `language`  | string   | Filter by programming language (e.g. `rust`, `typescript`) |
+| `threshold` | float    | Minimum similarity score 0.0–1.0 (default 0.3) |
+
+---
+
+## CLI: `vectorcode search`
+
+The CLI mirrors the MCP tool and is useful for shell loops, CI checks, and
+manual exploration without an MCP client.
+
+### Synopsis
+
+```bash
+vectorcode search [OPTIONS] <QUERY>
+```
+
+### Flags
+
+| Flag           | Short | Description |
+|----------------|-------|-------------|
+| `<QUERY>`      |       | Positional argument: the search query (required) |
+| `--limit <N>`  | `-n`  | Number of results to return |
+| `--path <PATH>`| `-p`  | Scope search to a specific file or directory |
+| `--language <LANG>` |   | Filter by programming language |
+| `--threshold <FLOAT>` | | Minimum similarity score (0.0–1.0) |
+
+### CLI examples
+
+```bash
+# Basic semantic search
+vectorcode search "middleware that validates JWT tokens and extracts user info"
+
+# Top 5 matches scoped to the auth module
+vectorcode search --limit 5 --path src/auth "session expiration handling"
+
+# Only Rust files, high-confidence matches
+vectorcode search --language rust --threshold 0.6 "retry with exponential backoff"
+```
+
+### CLI vs MCP — when to use which
+
+- **CLI** → humans, shell scripts, CI, `git grep`-style workflows, piping to
+  `rg`/`fzf`, or when the MCP server is not available.
+- **MCP (`vec_search`)** → agent/LLM clients that consume tool calls, where the
+  model needs structured results to continue reasoning.
+
+---
+
+## Recommended flow: Semantic → Structural → Historical
 
 For comprehensive code discovery, combine all three tools:
 
-1. **`vec_search("payment error handling")`**
+1. **`vec_search("payment error handling")`** *(or `vectorcode search ...` in the shell)*
    → Finds code chunks semantically related to payment errors
    → Returns file paths, line ranges, and ranked source snippets
 
@@ -44,16 +107,26 @@ For comprehensive code discovery, combine all three tools:
    → Checks Engram for prior team decisions about this topic
    → Returns architectural context and history
 
-### Query tips
+---
+
+## Query tips
 
 - Be specific: "retry with exponential backoff" > "retry"
 - Include domain terms: "payment validation" > "validation"
 - Describe behavior: "function that sends email notifications" > "email"
-- Use `--language` filter when you know the target language
-- Use `--path` filter to scope to a specific module
+- Use `--language` / `--path` filters when you know the target language or module
+- Lower `--threshold` to broaden recall; raise it to sharpen precision
 
-### Example
+---
+
+## Example (MCP)
 
 ```
 vec_search("middleware that validates JWT tokens and extracts user info")
+```
+
+## Example (CLI)
+
+```bash
+vectorcode search "middleware that validates JWT tokens and extracts user info"
 ```

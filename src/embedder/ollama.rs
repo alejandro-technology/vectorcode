@@ -232,35 +232,10 @@ struct OllamaResponse {
 #[async_trait]
 impl Embedder for OllamaEmbedder {
     async fn embed(&self, text: &str) -> EmbedderResult<Vec<f32>> {
-        let url = self.embed_url();
-        let body = self.build_request(&[text]);
-
-        let response = self
-            .client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| VectorCodeError::EmbedderError {
-                message: format!("Ollama HTTP request failed: {e}"),
-            })?;
-
-        let status = response.status().as_u16();
-        if !response.status().is_success() {
-            let response_body = response.text().await.unwrap_or_default();
-            return Err(VectorCodeError::EmbedderError {
-                message: format!("Ollama API error (HTTP {status}): {response_body}"),
-            });
-        }
-
-        let response_body = response
-            .text()
-            .await
-            .map_err(|e| VectorCodeError::EmbedderError {
-                message: format!("Failed to read Ollama response body: {e}"),
-            })?;
-
-        let vectors = Self::parse_response(&response_body)?;
+        // Delegate to the retry-capable batch path so single embeddings
+        // benefit from the same exponential backoff and connection-error
+        // recovery that embed_batch() already provides.
+        let vectors = self.embed_chunk_with_retry(&[text]).await?;
         vectors
             .into_iter()
             .next()
@@ -431,7 +406,10 @@ mod tests {
 
     #[test]
     fn ollama_chunk_size_is_10() {
-        assert_eq!(OLLAMA_BATCH_SIZE, 10, "Chunk size should be 10 to avoid large payloads");
+        assert_eq!(
+            OLLAMA_BATCH_SIZE, 10,
+            "Chunk size should be 10 to avoid large payloads"
+        );
     }
 
     #[test]

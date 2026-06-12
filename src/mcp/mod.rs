@@ -153,8 +153,23 @@ impl McpServer {
                     ))
                     .unwrap_or_default()
                 } else {
-                    let state = self.state.lock().await;
-                    let result = handler::handle_tool_call(tool_name, arguments, &state).await;
+                    // Clone shared state under the lock, then release it before
+                    // the handler makes any network calls (e.g. Ollama HTTP).
+                    // The detached handler also wraps the call in a 90s timeout.
+                    let ctx = {
+                        let state = self.state.lock().await;
+                        handler::ToolContext {
+                            db: state.db.clone(),
+                            embedder: state.embedder.clone(),
+                            search_config: state.config.search.clone(),
+                            indexing_config: state.config.indexing.clone(),
+                            watcher: state.watcher.clone(),
+                            project_path: state.project_path.clone(),
+                        }
+                    };
+
+                    let result =
+                        handler::handle_tool_call_detached(tool_name, arguments, ctx).await;
 
                     match serde_json::to_value(result) {
                         Ok(val) => serde_json::to_value(make_response(id, val)).unwrap_or_default(),

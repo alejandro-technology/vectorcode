@@ -113,7 +113,9 @@ impl Indexer {
         let start = Instant::now();
 
         // Step 1: Discover files
-        self.report_progress(ProgressEvent::Message("[1/3] Discovering files...".to_string()));
+        self.report_progress(ProgressEvent::Message(
+            "[1/3] Discovering files...".to_string(),
+        ));
         let file_paths = discover_files(project_path, &self.config);
         let files_scanned = file_paths.len();
         self.report_progress(ProgressEvent::DiscoveredFiles(files_scanned));
@@ -140,7 +142,7 @@ impl Indexer {
         if !new_chunks.is_empty() {
             let texts: Vec<String> = new_chunks.iter().map(enrich_chunk_content).collect();
             let mut embeddings = Vec::with_capacity(new_chunks.len());
-            
+
             let batch_size = 100;
             for batch in texts.chunks(batch_size) {
                 let text_refs: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
@@ -218,7 +220,7 @@ impl Indexer {
             self.report_progress(ProgressEvent::EmbeddingStart(chunks_new));
             let texts: Vec<String> = new_chunks.iter().map(enrich_chunk_content).collect();
             let mut embeddings = Vec::with_capacity(new_chunks.len());
-            
+
             let batch_size = 100;
             for batch in texts.chunks(batch_size) {
                 let text_refs: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
@@ -373,7 +375,7 @@ impl Indexer {
                 .unwrap_or_default()
                 .as_secs() as i64;
             files::upsert_file(db_conn, &relative_path, mtime, size, &content_hash, now)?;
-            
+
             self.report_progress(ProgressEvent::ProcessedFile);
         }
 

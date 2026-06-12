@@ -1,17 +1,43 @@
 //! MCP tool handlers — dispatch logic for vec_search, vec_status, vec_reindex (spec §11.3).
 //!
-//! Each handler takes `&AppState` and returns MCP-compatible result types.
-//! No global state — everything comes through the shared AppState.
+//! Internal handlers receive individual fields (db, embedder, config, etc.)
+//! so callers can release the `AppState` lock before any network I/O.
+//! The public `handle_tool_call` wrapper keeps backward compatibility for tests.
 
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info};
 
+use crate::config::schema::{IndexingConfig, SearchConfig};
+use crate::embedder::Embedder;
 use crate::engine::indexer::Indexer;
 use crate::engine::searcher::{SearchOptions, Searcher};
+use crate::store::db::Database;
 use crate::store::meta;
-use crate::watcher::PendingFile;
+use crate::watcher::{FileWatcher, PendingFile};
 
 use super::schema::*;
 use super::AppState;
+
+/// Maximum time a single tool call is allowed to run before the server
+/// responds with a timeout error. Covers Ollama retry + backoff + DB ops.
+const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bundled state passed to tool handlers after the `AppState` lock is released.
+///
+/// All fields are `Arc`-cloned or `Clone`d so the lock is not held during
+/// network I/O (Ollama HTTP calls).
+pub struct ToolContext {
+    pub db: Arc<Mutex<Database>>,
+    pub embedder: Arc<dyn Embedder>,
+    pub search_config: SearchConfig,
+    pub indexing_config: IndexingConfig,
+    pub watcher: Option<Arc<RwLock<FileWatcher>>>,
+    pub project_path: PathBuf,
+}
 
 /// Handle the "initialize" method (spec §11.2).
 ///
@@ -45,8 +71,9 @@ pub fn handle_ping() -> serde_json::Value {
 
 /// Handle a "tools/call" method by dispatching to the appropriate tool handler.
 ///
-/// Extracts the tool name and arguments from the JSON-RPC params, then
-/// delegates to the specific handler function.
+/// Kept for backward compatibility with tests that hold `&AppState`.
+/// Production code should use `handle_tool_call_detached` so the state lock
+/// is released before any network I/O (Ollama HTTP calls).
 pub async fn handle_tool_call(
     name: &str,
     arguments: &serde_json::Value,
@@ -55,9 +82,27 @@ pub async fn handle_tool_call(
     info!("Tool call: {name}");
 
     match name {
-        "vec_search" => handle_vec_search(state, arguments).await,
-        "vec_status" => handle_vec_status(state, arguments).await,
-        "vec_reindex" => handle_vec_reindex(state, arguments).await,
+        "vec_search" => {
+            handle_vec_search(
+                &state.db,
+                &state.embedder,
+                &state.config.search,
+                &state.watcher,
+                arguments,
+            )
+            .await
+        }
+        "vec_status" => handle_vec_status(&state.db, arguments).await,
+        "vec_reindex" => {
+            handle_vec_reindex(
+                &state.db,
+                &state.embedder,
+                &state.config.indexing,
+                &state.project_path,
+                arguments,
+            )
+            .await
+        }
         other => {
             error!("Unknown tool: {other}");
             make_error_result(format!("Unknown tool: {other}"))
@@ -65,10 +110,72 @@ pub async fn handle_tool_call(
     }
 }
 
+/// Production entry-point for tool calls — owns all state via `Arc` clones
+/// so the caller can release the `AppState` lock before the (possibly slow)
+/// network call to Ollama. Wraps the inner handler in a 90-second timeout.
+pub async fn handle_tool_call_detached(
+    name: &str,
+    arguments: &serde_json::Value,
+    ctx: ToolContext,
+) -> ToolCallResult {
+    info!("Tool call: {name}");
+
+    let future = async {
+        match name {
+            "vec_search" => {
+                handle_vec_search(
+                    &ctx.db,
+                    &ctx.embedder,
+                    &ctx.search_config,
+                    &ctx.watcher,
+                    arguments,
+                )
+                .await
+            }
+            "vec_status" => handle_vec_status(&ctx.db, arguments).await,
+            "vec_reindex" => {
+                handle_vec_reindex(
+                    &ctx.db,
+                    &ctx.embedder,
+                    &ctx.indexing_config,
+                    &ctx.project_path,
+                    arguments,
+                )
+                .await
+            }
+            other => {
+                error!("Unknown tool: {other}");
+                make_error_result(format!("Unknown tool: {other}"))
+            }
+        }
+    };
+
+    match tokio::time::timeout(TOOL_TIMEOUT, future).await {
+        Ok(result) => result,
+        Err(_elapsed) => {
+            error!(
+                "Tool call '{name}' timed out after {}s",
+                TOOL_TIMEOUT.as_secs()
+            );
+            make_error_result(format!(
+                "Tool call timed out after {} seconds",
+                TOOL_TIMEOUT.as_secs()
+            ))
+        }
+    }
+}
+
 /// Handle the `vec_search` tool call (spec §11.3).
 ///
 /// Performs semantic search over the indexed codebase using the Searcher engine.
-async fn handle_vec_search(state: &AppState, arguments: &serde_json::Value) -> ToolCallResult {
+/// Takes individual fields so callers release the `AppState` lock before network I/O.
+async fn handle_vec_search(
+    db: &Arc<Mutex<Database>>,
+    embedder: &Arc<dyn Embedder>,
+    search_config: &SearchConfig,
+    watcher: &Option<Arc<RwLock<FileWatcher>>>,
+    arguments: &serde_json::Value,
+) -> ToolCallResult {
     // Parse parameters
     let params: VecSearchParams = match serde_json::from_value(arguments.clone()) {
         Ok(p) => p,
@@ -82,11 +189,7 @@ async fn handle_vec_search(state: &AppState, arguments: &serde_json::Value) -> T
     }
 
     // Create searcher and execute search
-    let searcher = Searcher::new(
-        state.db.clone(),
-        state.embedder.clone(),
-        state.config.search.clone(),
-    );
+    let searcher = Searcher::new(db.clone(), embedder.clone(), search_config.clone());
 
     let options = SearchOptions {
         limit: params.limit,
@@ -98,9 +201,9 @@ async fn handle_vec_search(state: &AppState, arguments: &serde_json::Value) -> T
     match searcher.search(&params.query, options).await {
         Ok(results) => {
             // Check for staleness — spec §14.2
-            let staleness_banner = match &state.watcher {
-                Some(watcher) => {
-                    let pending = watcher.read().await.pending_files().await;
+            let staleness_banner = match watcher {
+                Some(w) => {
+                    let pending = w.read().await.pending_files().await;
                     build_staleness_banner(&results, &pending)
                 }
                 None => None,
@@ -123,7 +226,10 @@ async fn handle_vec_search(state: &AppState, arguments: &serde_json::Value) -> T
 /// Handle the `vec_status` tool call (spec §11.3).
 ///
 /// Reads index metadata and returns formatted status text.
-async fn handle_vec_status(state: &AppState, arguments: &serde_json::Value) -> ToolCallResult {
+async fn handle_vec_status(
+    db: &Arc<Mutex<Database>>,
+    arguments: &serde_json::Value,
+) -> ToolCallResult {
     // Parse optional project_path with explicit error handling
     let _params: VecStatusParams = match serde_json::from_value(arguments.clone()) {
         Ok(p) => p,
@@ -132,7 +238,7 @@ async fn handle_vec_status(state: &AppState, arguments: &serde_json::Value) -> T
         }
     };
 
-    let db = state.db.lock().await;
+    let db = db.lock().await;
     match meta::read_index_meta(db.conn()) {
         Ok(Some(index_meta)) => {
             let text = format_status_text(&index_meta);
@@ -148,7 +254,13 @@ async fn handle_vec_status(state: &AppState, arguments: &serde_json::Value) -> T
 /// Handle the `vec_reindex` tool call (spec §11.3).
 ///
 /// Triggers a full or incremental re-index of the project.
-async fn handle_vec_reindex(state: &AppState, arguments: &serde_json::Value) -> ToolCallResult {
+async fn handle_vec_reindex(
+    db: &Arc<Mutex<Database>>,
+    embedder: &Arc<dyn Embedder>,
+    indexing_config: &IndexingConfig,
+    project_path: &Path,
+    arguments: &serde_json::Value,
+) -> ToolCallResult {
     let params: VecReindexParams = match serde_json::from_value(arguments.clone()) {
         Ok(p) => p,
         Err(e) => {
@@ -158,19 +270,15 @@ async fn handle_vec_reindex(state: &AppState, arguments: &serde_json::Value) -> 
 
     // If full reindex requested, reinitialize the schema
     if params.full {
-        let db = state.db.lock().await;
-        if let Err(e) = db.init_schema(state.embedder.dimensions()) {
+        let db = db.lock().await;
+        if let Err(e) = db.init_schema(embedder.dimensions()) {
             return make_error_result(format!("Failed to reinitialize schema: {e}"));
         }
     }
 
-    let indexer = Indexer::new(
-        state.db.clone(),
-        state.embedder.clone(),
-        state.config.indexing.clone(),
-    );
+    let indexer = Indexer::new(db.clone(), embedder.clone(), indexing_config.clone());
 
-    match indexer.index_project(&state.project_path).await {
+    match indexer.index_project(project_path).await {
         Ok(report) => {
             let text = format!(
                 "Re-indexing complete.\n\
@@ -390,7 +498,7 @@ mod tests {
     async fn handle_vec_status_invalid_params_returns_descriptive_error() {
         let state = setup_test_state();
         // Send a truly invalid structure (string instead of object)
-        let result = handle_vec_status(&state, &serde_json::json!("not an object")).await;
+        let result = handle_vec_status(&state.db, &serde_json::json!("not an object")).await;
         assert_eq!(result.is_error, Some(true));
         assert!(
             result.content[0]
@@ -404,7 +512,14 @@ mod tests {
     #[tokio::test]
     async fn handle_vec_reindex_invalid_params_returns_descriptive_error() {
         let state = setup_test_state();
-        let result = handle_vec_reindex(&state, &serde_json::json!("not an object")).await;
+        let result = handle_vec_reindex(
+            &state.db,
+            &state.embedder,
+            &state.config.indexing,
+            &state.project_path,
+            &serde_json::json!("not an object"),
+        )
+        .await;
         assert_eq!(result.is_error, Some(true));
         assert!(
             result.content[0]
@@ -420,7 +535,7 @@ mod tests {
     #[tokio::test]
     async fn handle_vec_status_with_meta_returns_formatted_text() {
         let state = setup_test_state();
-        let result = handle_vec_status(&state, &serde_json::json!({})).await;
+        let result = handle_vec_status(&state.db, &serde_json::json!({})).await;
         assert!(result.is_error.is_none());
         let text = &result.content[0].text;
         assert!(text.contains("Provider:    mock"));
@@ -442,7 +557,7 @@ mod tests {
             project_path: std::path::PathBuf::from("/tmp"),
             watcher: None,
         };
-        let result = handle_vec_status(&state, &serde_json::json!({})).await;
+        let result = handle_vec_status(&state.db, &serde_json::json!({})).await;
         assert_eq!(result.is_error, Some(true));
         assert!(result.content[0].text.contains("not found"));
     }

@@ -418,7 +418,7 @@ POST /v1beta/models/gemini-embedding-001:batchEmbedContents
 | Field | Value |
 |---|---|
 | **Provider name** | `ollama` |
-| **Default model** | `nomic-embed-text` |
+| **Default model** | `embeddinggemma:latest` |
 | **Dimensions** | 768 |
 | **Max tokens** | 8192 |
 | **API endpoint** | `http://localhost:11434/api/embed` (configurable) |
@@ -430,7 +430,7 @@ POST /v1beta/models/gemini-embedding-001:batchEmbedContents
 ```json
 POST /api/embed
 {
-  "model": "nomic-embed-text",
+  "model": "embeddinggemma:latest",
   "input": ["chunk 1...", "chunk 2..."]
 }
 ```
@@ -438,14 +438,14 @@ POST /api/embed
 **Response:**
 ```json
 {
-  "model": "nomic-embed-text",
+  "model": "embeddinggemma:latest",
   "embeddings": [[0.123, -0.456, ...], [0.789, -0.012, ...]]
 }
 ```
 
 **Implementation notes:**
 - Verify Ollama is running and model is available before indexing starts
-- If Ollama is not reachable, emit a clear error with instructions: `ollama pull nomic-embed-text`
+- If Ollama is not reachable, emit a clear error with instructions: `ollama pull embeddinggemma:latest`
 
 #### OpenAI
 
@@ -994,7 +994,7 @@ dimensions = 768  # Matryoshka: 256, 512, 768, 1024, 3072
 
 [provider.ollama]
 url = "http://localhost:11434"
-model = "nomic-embed-text"
+model = "embeddinggemma:latest"
 
 [provider.openai]
 # API key: reads from this field OR from OPENAI_API_KEY env var

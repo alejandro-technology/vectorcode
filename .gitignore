@@ -4,3 +4,4 @@ target/
 *.dylib
 *.so
 *.dll
+benchmarks/results/

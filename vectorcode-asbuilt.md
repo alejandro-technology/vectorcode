@@ -408,7 +408,7 @@ pub trait Embedder: Send + Sync {
 | Field | Spec | As-Built |
 |---|---|---|
 | **Provider name** | `ollama` | `ollama` |
-| **Model** | `nomic-embed-text` | `nomic-embed-text` (configurable) |
+| **Model** | `embeddinggemma:latest` | `embeddinggemma:latest` (configurable) |
 | **Dimensions** | 768 | 768 |
 | **Max tokens** | 8192 | 8192 |
 | **URL** | `http://localhost:11434` | Configurable (default: `http://localhost:11434`) |
@@ -1001,7 +1001,7 @@ dimensions = 768  # Matryoshka: 256, 512, 768, 1024, 3072
 
 [provider.ollama]
 url = "http://localhost:11434"
-model = "nomic-embed-text"
+model = "embeddinggemma:latest"
 
 [provider.openai]
 api_key = ""

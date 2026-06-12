@@ -7,8 +7,11 @@
 <p><strong>Semantic code search MCP server using embeddings. Find code by meaning, not just by name.</strong></p>
 
 <p>
+<a href="https://github.com/alejandro-technology/vectorcode/actions/workflows/coverage.yml"><img src="https://github.com/alejandro-technology/vectorcode/actions/workflows/coverage.yml/badge.svg" alt="Coverage"></a>
+<a href="https://github.com/alejandro-technology/vectorcode/actions/workflows/ci.yml"><img src="https://github.com/alejandro-technology/vectorcode/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
 <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey" alt="Platform">
+
 
 </p>
 

@@ -75,6 +75,7 @@ pub async fn execute(args: &InitArgs, project_path: &std::path::Path, quiet: boo
 
     // Prompt for API key if needed (gemini, openai)
     let api_key = prompt_api_key_if_needed(&provider);
+    let ollama_url = prompt_ollama_url_if_needed(&provider);
 
     // Step 1: Create .vectorcode/ directory
     std::fs::create_dir_all(&vc_dir)?;
@@ -128,7 +129,7 @@ pub async fn execute(args: &InitArgs, project_path: &std::path::Path, quiet: boo
     std::fs::write(&gitignore_path, "index.db\nindex.db-wal\nindex.db-shm\n")?;
 
     // Step 5: Create config.toml
-    let config_content = generate_config_toml(&provider, &model, dims, &api_key);
+    let config_content = generate_config_toml(&provider, &model, dims, &api_key, &ollama_url);
     let config_path = vc_dir.join("config.toml");
     std::fs::write(&config_path, &config_content)?;
 
@@ -286,8 +287,37 @@ fn prompt_api_key_if_needed(_provider: &ProviderArg) -> String {
     String::new()
 }
 
+/// Prompt for Ollama URL if the provider is Ollama.
+#[cfg(not(test))]
+fn prompt_ollama_url_if_needed(provider: &ProviderArg) -> String {
+    if !matches!(provider, ProviderArg::Ollama) {
+        return String::new();
+    }
+
+    let default_url = "http://localhost:11434";
+    eprint!("Enter Ollama server URL (default: {default_url}): ");
+    let mut url = String::new();
+    if std::io::stdin().read_line(&mut url).is_err() {
+        url.clear();
+    }
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        default_url.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+fn prompt_ollama_url_if_needed(provider: &ProviderArg) -> String {
+    if !matches!(provider, ProviderArg::Ollama) {
+        return String::new();
+    }
+    "http://localhost:11434".to_string()
+}
+
 /// Generate the config.toml content for the chosen provider.
-fn generate_config_toml(provider: &ProviderArg, model: &str, dims: u32, api_key: &str) -> String {
+fn generate_config_toml(provider: &ProviderArg, model: &str, dims: u32, api_key: &str, ollama_url: &str) -> String {
     let provider_section = match provider {
         ProviderArg::Onnx => format!(
             r#"[provider]
@@ -312,7 +342,7 @@ dimensions = {dims}
 name = "ollama"
 
 [provider.ollama]
-url = "http://localhost:11434"
+url = "{ollama_url}"
 model = "{model}"
 "#
         ),
@@ -407,7 +437,7 @@ mod tests {
 
     #[test]
     fn generate_config_toml_onnx_contains_provider() {
-        let toml = generate_config_toml(&ProviderArg::Onnx, "all-MiniLM-L6-v2", 384, "");
+        let toml = generate_config_toml(&ProviderArg::Onnx, "all-MiniLM-L6-v2", 384, "", "");
         assert!(toml.contains("name = \"onnx\""));
         assert!(toml.contains("model = \"all-MiniLM-L6-v2\""));
         assert!(toml.contains("[indexing]"));
@@ -416,7 +446,7 @@ mod tests {
 
     #[test]
     fn generate_config_toml_gemini_contains_api_key() {
-        let toml = generate_config_toml(&ProviderArg::Gemini, "gemini-embedding-001", 768, "");
+        let toml = generate_config_toml(&ProviderArg::Gemini, "gemini-embedding-001", 768, "", "");
         assert!(toml.contains("name = \"gemini\""));
         assert!(toml.contains("api_key = \"\""));
         assert!(toml.contains("dimensions = 768"));
@@ -424,14 +454,14 @@ mod tests {
 
     #[test]
     fn generate_config_toml_ollama_contains_url() {
-        let toml = generate_config_toml(&ProviderArg::Ollama, "nomic-embed-text", 768, "");
+        let toml = generate_config_toml(&ProviderArg::Ollama, "nomic-embed-text", 768, "", "http://localhost:11434");
         assert!(toml.contains("name = \"ollama\""));
         assert!(toml.contains("url = \"http://localhost:11434\""));
     }
 
     #[test]
     fn generate_config_toml_openai_contains_api_key() {
-        let toml = generate_config_toml(&ProviderArg::Openai, "text-embedding-3-small", 1536, "");
+        let toml = generate_config_toml(&ProviderArg::Openai, "text-embedding-3-small", 1536, "", "");
         assert!(toml.contains("name = \"openai\""));
         assert!(toml.contains("api_key = \"\""));
     }
@@ -444,7 +474,7 @@ mod tests {
             ProviderArg::Ollama,
             ProviderArg::Openai,
         ] {
-            let toml = generate_config_toml(&provider, "test-model", 128, "");
+            let toml = generate_config_toml(&provider, "test-model", 128, "", "http://localhost:11434");
             assert!(
                 toml.contains("[indexing]"),
                 "Missing [indexing] for {:?}",

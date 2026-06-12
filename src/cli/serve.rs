@@ -100,14 +100,16 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
     info!("  Debounce: {}ms", args.debounce);
 
     // Create file watcher if enabled
+    let mut watcher_rx = None;
     let watcher = if watch {
         let watcher_config = &cfg.watcher;
         match FileWatcher::new(project_path, watcher_config) {
-            Ok(mut w) => {
+            Ok((mut w, rx)) => {
                 if let Err(e) = w.start() {
                     tracing::warn!("Failed to start file watcher: {e}");
                     None
                 } else {
+                    watcher_rx = Some(rx);
                     Some(Arc::new(tokio::sync::RwLock::new(w)))
                 }
             }
@@ -130,7 +132,7 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
     };
 
     // Start background watcher task if watcher is available
-    if let Some(watcher_arc) = &watcher {
+    if let (Some(watcher_arc), Some(rx)) = (&watcher, watcher_rx) {
         let watcher_for_task = watcher_arc.clone();
         let db_path_for_task = project_path.join(".vectorcode").join("index.db");
         let project_path_for_task = project_path.to_path_buf();
@@ -140,6 +142,7 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
         tokio::spawn(async move {
             run_watcher_background(
                 watcher_for_task,
+                rx,
                 db_path_for_task,
                 project_path_for_task,
                 embedder_for_task,
@@ -257,6 +260,7 @@ fn run_connect_time_catchup(
 /// incremental sync via the Indexer. Also handles file deletion events.
 async fn run_watcher_background(
     watcher: Arc<tokio::sync::RwLock<FileWatcher>>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<Vec<(PathBuf, bool)>>,
     db_path: std::path::PathBuf,
     project_path: std::path::PathBuf,
     embedder: Arc<dyn crate::embedder::Embedder>,
@@ -265,12 +269,7 @@ async fn run_watcher_background(
     info!("File watcher background task started");
 
     loop {
-        let batch = {
-            let mut w = watcher.write().await;
-            w.next_batch().await
-        };
-
-        let entries = match batch {
+        let entries = match rx.recv().await {
             Some(entries) => entries,
             None => {
                 info!("File watcher channel closed, background task exiting");

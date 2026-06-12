@@ -42,9 +42,6 @@ pub struct FileWatcher {
     /// The debouncer handle — kept alive for the watcher's lifetime.
     /// When dropped, the watcher thread is stopped.
     _debouncer: Debouncer<notify::RecommendedWatcher, RecommendedCache>,
-    /// Receiver for debounced batches of changed file paths.
-    /// Each batch is a Vec of (path, is_removal) tuples.
-    rx: mpsc::UnboundedReceiver<Vec<(PathBuf, bool)>>,
     /// Files that have been detected as changed but not yet re-indexed.
     pending: Arc<RwLock<Vec<PendingFile>>>,
     /// The project root being watched.
@@ -54,9 +51,12 @@ pub struct FileWatcher {
 impl FileWatcher {
     /// Create a new FileWatcher for the given project root.
     ///
-    /// The watcher starts monitoring immediately. Use `next_batch()` to
-    /// receive debounced batches of changed file paths.
-    pub fn new(project_root: &Path, config: &WatcherConfig) -> Result<Self> {
+    /// The watcher starts monitoring immediately. It returns the FileWatcher instance
+    /// along with an unbounded receiver for debounced batches of changed file paths.
+    pub fn new(
+        project_root: &Path,
+        config: &WatcherConfig,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<Vec<(PathBuf, bool)>>)> {
         let project_root = project_root.to_path_buf();
         let gitignore = Arc::new(GitignoreFilter::new(&project_root));
         let pending: Arc<RwLock<Vec<PendingFile>>> = Arc::new(RwLock::new(Vec::new()));
@@ -166,12 +166,13 @@ impl FileWatcher {
 
         info!("File watcher starting on {}", project_root.display());
 
-        Ok(Self {
+        let watcher = Self {
             _debouncer: debouncer,
-            rx,
             pending,
             project_root,
-        })
+        };
+
+        Ok((watcher, rx))
     }
 
     /// Start watching the project root directory recursively.
@@ -184,13 +185,7 @@ impl FileWatcher {
         Ok(())
     }
 
-    /// Wait for the next debounced batch of changed file paths.
-    ///
-    /// Returns `None` when the watcher is shut down (channel closed).
-    /// Each batch element is a `(path, is_removal)` tuple.
-    pub async fn next_batch(&mut self) -> Option<Vec<(PathBuf, bool)>> {
-        self.rx.recv().await
-    }
+
 
     /// Get the list of files that have been modified but not yet re-indexed.
     ///
@@ -260,11 +255,11 @@ mod tests {
     fn file_watcher_creates_successfully() {
         let dir = tempfile::tempdir().unwrap();
         let config = default_watcher_config();
-        let watcher = FileWatcher::new(dir.path(), &config);
+        let result = FileWatcher::new(dir.path(), &config);
         assert!(
-            watcher.is_ok(),
+            result.is_ok(),
             "FileWatcher should create: {:?}",
-            watcher.err()
+            result.err()
         );
     }
 
@@ -273,7 +268,7 @@ mod tests {
     fn file_watcher_project_root_is_correct() {
         let dir = tempfile::tempdir().unwrap();
         let config = default_watcher_config();
-        let watcher = FileWatcher::new(dir.path(), &config).unwrap();
+        let (watcher, _) = FileWatcher::new(dir.path(), &config).unwrap();
         assert_eq!(watcher.project_root(), dir.path());
     }
 
@@ -282,7 +277,7 @@ mod tests {
     fn file_watcher_starts_with_empty_pending() {
         let dir = tempfile::tempdir().unwrap();
         let config = default_watcher_config();
-        let watcher = FileWatcher::new(dir.path(), &config).unwrap();
+        let (watcher, _) = FileWatcher::new(dir.path(), &config).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let pending = rt.block_on(watcher.pending_files());
         assert!(pending.is_empty(), "Pending should be empty initially");
@@ -293,7 +288,7 @@ mod tests {
     fn file_watcher_start_watches_directory() {
         let dir = tempfile::tempdir().unwrap();
         let config = default_watcher_config();
-        let mut watcher = FileWatcher::new(dir.path(), &config).unwrap();
+        let (mut watcher, _) = FileWatcher::new(dir.path(), &config).unwrap();
         let result = watcher.start();
         assert!(result.is_ok(), "start() should succeed: {:?}", result.err());
     }
@@ -308,7 +303,7 @@ mod tests {
             debounce_ms: 100,
             disabled: false,
         };
-        let mut watcher = FileWatcher::new(dir.path(), &config).unwrap();
+        let (mut watcher, mut rx) = FileWatcher::new(dir.path(), &config).unwrap();
         watcher.start().unwrap();
 
         // Create a new .rs file
@@ -316,7 +311,7 @@ mod tests {
         fs::write(&new_file, "fn hello() {}").unwrap();
 
         // Wait for debounced event
-        let batch = tokio::time::timeout(Duration::from_secs(3), watcher.next_batch()).await;
+        let batch = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
 
         match batch {
             Ok(Some(entries)) => {
@@ -341,7 +336,7 @@ mod tests {
             debounce_ms: 100,
             disabled: false,
         };
-        let mut watcher = FileWatcher::new(dir.path(), &config).unwrap();
+        let (mut watcher, mut rx) = FileWatcher::new(dir.path(), &config).unwrap();
         watcher.start().unwrap();
 
         // Create a .txt file (unsupported)
@@ -349,7 +344,7 @@ mod tests {
         fs::write(&txt_file, "some notes").unwrap();
 
         // Wait briefly — should NOT get a batch for .txt files
-        let batch = tokio::time::timeout(Duration::from_millis(500), watcher.next_batch()).await;
+        let batch = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await;
 
         // Either timeout (no events) or empty batch — both are acceptable
         match batch {
@@ -371,7 +366,7 @@ mod tests {
     async fn clear_pending_empties_the_list() {
         let dir = tempfile::tempdir().unwrap();
         let config = default_watcher_config();
-        let watcher = FileWatcher::new(dir.path(), &config).unwrap();
+        let (watcher, _) = FileWatcher::new(dir.path(), &config).unwrap();
 
         // Manually add a pending file
         watcher.pending.write().await.push(PendingFile {
@@ -390,7 +385,7 @@ mod tests {
     async fn clear_pending_paths_removes_specific_paths() {
         let dir = tempfile::tempdir().unwrap();
         let config = default_watcher_config();
-        let watcher = FileWatcher::new(dir.path(), &config).unwrap();
+        let (watcher, _) = FileWatcher::new(dir.path(), &config).unwrap();
 
         let now = SystemTime::now();
         watcher.pending.write().await.push(PendingFile {

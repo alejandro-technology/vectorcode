@@ -2,8 +2,8 @@
 name = "ollama"
 
 [provider.ollama]
-url = "http://192.168.0.14:11434"
-model = "nomic-embed-text"
+url = "http://localhost:11434"
+model = "embeddinggemma"
 
 [indexing]
 max_file_size = 1_048_576

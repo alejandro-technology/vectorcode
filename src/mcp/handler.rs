@@ -44,6 +44,17 @@ pub struct VecReindexParams {
     pub full: bool,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct VecReadLinesParams {
+    /// The file path to read
+    pub file_path: String,
+    /// The starting line number (1-indexed, inclusive)
+    pub start_line: usize,
+    /// The ending line number (1-indexed, inclusive)
+    pub end_line: usize,
+}
+
+
 #[tool_router]
 impl McpHandler {
     #[tool(
@@ -157,6 +168,40 @@ impl McpHandler {
         }
     }
 
+    #[tool(
+        name = "vec_read_lines",
+        description = "Read a specific range of lines from a file. \
+                       Use this instead of generic file reading when you only need \
+                       to expand the context around a snippet found via vec_search.",
+        annotations(read_only_hint = true)
+    )]
+    async fn vec_read_lines(&self, params: Parameters<VecReadLinesParams>) -> Result<String, String> {
+        let p = params.0;
+        let mut path = std::path::PathBuf::from(&p.file_path);
+        if !path.is_absolute() {
+            path = self.state.project_path.join(path);
+        }
+        
+        let content = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| format!("Failed to read file: {e}"))?;
+            
+        let lines: Vec<&str> = content.lines().collect();
+        if p.start_line == 0 || p.start_line > lines.len() {
+            return Err("Invalid start_line".to_string());
+        }
+        
+        let start_idx = p.start_line - 1;
+        let end_idx = std::cmp::min(p.end_line, lines.len());
+        
+        if start_idx >= end_idx {
+            return Err("start_line must be <= end_line".to_string());
+        }
+        
+        let extracted = lines[start_idx..end_idx].join("\n");
+        Ok(format!("Lines {}-{} of {}:\n{}", p.start_line, end_idx, p.file_path, extracted))
+    }
+
     pub fn new(state: AppState) -> Self {
         Self {
             state,
@@ -180,7 +225,11 @@ impl ServerHandler for McpHandler {
                 icons: None,
                 website_url: None,
             },
-            instructions: None,
+            instructions: Some("VectorCode provides semantic search. \
+                                IMPORTANT: Do not use generic file reading tools to read entire files \
+                                discovered via vec_search. Rely on the snippets returned. \
+                                If you need more surrounding context, use the `vec_read_lines` tool \
+                                to fetch only the specific lines you need.".to_string()),
         }
     }
 }
@@ -278,11 +327,9 @@ fn format_search_results_text(
             out.push_str(&format!("   Context:{ctx_info}\n"));
         }
 
-        let mut lines: Vec<&str> = res.content.lines().collect();
-        if lines.len() > 15 {
-            lines.truncate(15);
-            lines.push("...");
-        }
+        let lines: Vec<&str> = res.content.lines().collect();
+        // Removed artificial truncation so LLMs see the entire AST chunk
+        // without feeling forced to use read_file for the remaining lines.
 
         out.push_str("   ---\n");
         for line in lines {

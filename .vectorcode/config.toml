@@ -3,7 +3,7 @@ name = "ollama"
 
 [provider.ollama]
 url = "http://localhost:11434"
-model = "embeddinggemma"
+model = "nomic-embed-text"
 
 [indexing]
 max_file_size = 1_048_576

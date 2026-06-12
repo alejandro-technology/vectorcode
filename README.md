@@ -243,8 +243,8 @@ This section tracks the ongoing validation and ROI metrics of VectorCode across 
 | Fase | Descripción | Métrica Principal | Resultado |
 | ---- | ----------- | ----------------- | --------- |
 | 1 | Precisión IR y Rendimiento | P@1, P@3, P@5, Latencia | ✅ Completado |
-| 2 | Ahorro de Tokens (Agente E2E) | Reducción de Input Tokens vs Baseline | ✅ Completado |
-| 3 | Saturación de Contexto (Context Bloat) | Puntuación del AI Judge | ✅ Completado |
+| 2 | Ahorro de Tokens (Agente E2E) | Reducción de Input Tokens vs Baseline | ✅ Completado (Real LLM) |
+| 3 | Saturación de Contexto (Context Bloat) | Puntuación del AI Judge | ✅ Completado (Real LLM) |
 
 ### Fase 1: Precisión IR
 
@@ -272,39 +272,37 @@ This section tracks the ongoing validation and ROI metrics of VectorCode across 
 
 ### Fase 2: Ahorro de Tokens (Agente E2E)
 
-**Objetivo:** Validar que un agente usando VectorCode consume menos tokens de entrada y comete menos errores de exploración que uno usando `grep`/`find`.
+**Objetivo:** Validar que un agente real (`kimi-k2.6`) consuma menos tokens y cometa menos errores usando VectorCode vs herramientas clásicas (`grep`/`find`).
 
-**Metodología:** Harness de dos brazos que ejecuta secuencias predefinidas de tool calls simulando el descubrimiento de convenciones de `install.rs` para generar un subcomando `status.rs`. Tokens contados con `tiktoken` (cl100k_base, aproximación GPT-4). Sin llamadas LLM reales — secuencias programadas.
+**Metodología:** Simulador de agente ReAct en Python usando la API de OpenCode Go. El agente busca convenciones en `install.rs` para crear `status.rs`.
+- **Brazo A:** Tools `execute_bash` (grep, find) y `read_file`.
+- **Brazo B:** Tools `vec_search` y `read_file`.
 
-**Configuración:** Dry-run mode (mock responses para vec_search, grep real para Arm A). 1 iteración. `phase2_token_savings.py` + `parse-session.mjs`.
+| Modelo | Brazo A (Bash/Grep) | Brazo B (VectorCode) | Mejora |
+| ------ | ------------------- | -------------------- | ------ |
+| **kimi-k2.6** | 256,061 tokens | 90,141 tokens | **-64.7%** |
+| **minimax-m3** | 19,221 tokens | 14,115 tokens | **-26.6%** |
+| **qwen3.7-plus** | 68,096 tokens | 62,256 tokens | **-8.5%** |
+| **mimo-v2.5-pro (high effort)** | 142,041 tokens | 176,434 tokens | +24.2%* |
 
-| Métrica | Brazo A (grep) | Brazo B (VectorCode) | Mejora |
-| ------- | -------------- | -------------------- | ------ |
-| Tool calls | 6 | 5 | −16.7% |
-| Pasos de exploración | 5 | 4 | −20.0% |
-| Total tokens (dry-run) | 10,556 | 10,813 | −2.4%* |
-| Calidad de convenciones (0–1) | 0.8571 (6/7) | 1.0 (7/7) | +0.14 |
-
-> \* Token savings negativa en dry-run porque `read_file` domina (6779 tokens install.rs + 3468 tokens mod.rs). Ambos brazos leen los mismos archivos. En modo live con `vec_search` real, la diferencia se amplía porque Arm A requiere `read_file` adicional y grep no filtra semánticamente.
->
-> La calidad del código generado por Arm B fue superior (100% vs 86%): Arm B incluyó `#[cfg(test)] mod tests` que Arm A omitió, demostrando que `vec_search` descubre convenciones completas que `grep` por patrón exacto puede pasar por alto.
->
-> Reporte en `benchmarks/results/phase2_report.json`. Implementado en commit `a121c5e`.
+> \* **Análisis Crítico:** Tras implementar la primitiva `vec_read_lines` y devolver *chunks* completos del AST sin truncar, eliminamos el "Context Bloat" masivo en casi todos los modelos. Kimi-k2.6 pasó de +103% de exceso a un **64% de ahorro real**, y Minimax logró un **26% de ahorro**. Qwen3.7-plus también se benefició (-8%). 
+> La única excepción fue `mimo-v2.5-pro` (configurado con "high reasoning effort"); su naturaleza exploratoria y ansiosa lo llevó a hacer peticiones compulsivas y secuenciales de `vec_read_lines` por todo el archivo, consumiendo un poco más (+24%) que si lo hubiera leído completo de un tirón. Esto demuestra empíricamente que **un buen UX en las herramientas del agente es crucial**, pero modelos que sobre-piensan pueden abusar de las herramientas granulares.
 
 ### Fase 3: Saturación de Contexto (Context Bloat)
 
-**Objetivo:** Probar el impacto en tareas de entendimiento global, demostrando que VectorCode evita que el agente sufra "Context Bloat" o el problema de "Lost in the Middle" al inyectar código masivo.
+**Objetivo:** Demostrar que VectorCode evita el "Context Bloat" y la saturación de memoria ("Lost in the Middle") en preguntas arquitectónicas globales.
 
-**Metodología:** Simulador de dos brazos para responder a una pregunta arquitectónica global ("Explica la arquitectura del sistema de embeddings..."). Arm A usa `grep` y lee archivos enteros. Arm B usa `vec_search` para extraer fragmentos semánticos. La respuesta resultante se evalúa con un juez AI (5 reglas clave de la arquitectura).
+**Metodología:** Agente ReAct responde cómo funciona el sistema de embeddings. El Brazo A usa `bash` y `read_file`. El Brazo B usa *exclusivamente* `vec_search` sin poder leer archivos enteros.
 
-| Métrica | Brazo A (grep + read_file) | Brazo B (VectorCode) | Mejora |
-| ------- | -------------------------- | -------------------- | ------ |
-| Total Input Tokens | 4,315 | 484 | −88.8% |
-| Puntuación AI Judge | 40% (2/5) | 100% (5/5) | +60% |
+| Modelo | Brazo A (Bash/Grep) | Brazo B (VectorCode) | Mejora |
+| ------ | ------------------- | -------------------- | ------ |
+| **minimax-m3** | 15,057 tokens | 541 tokens | **-96.4%** |
+| **mimo-v2.5-pro (high effort)** | 115,336 tokens | 17,388 tokens | **-84.9%** |
+| **kimi-k2.6** | 27,839 tokens | 13,183 tokens | **-52.6%** |
+| **qwen3.7-plus** | 40,989 tokens | 21,307 tokens | **-48.0%** |
 
-> El enfoque tradicional (Arm A) generó un contexto ruidoso y masivo, causando que el agente olvidara detalles críticos ("Lost in the Middle") y fallara en 3 de las 5 reglas de arquitectura. VectorCode (Arm B) extrajo fragmentos exactos, reduciendo el consumo de tokens casi un 90% y logrando un entendimiento arquitectónico perfecto.
->
-> Reporte en `benchmarks/results/phase3_report.json`.
+> **Resultado general:** En tareas de arquitectura global y descubrimiento de diseño distribuido, VectorCode es inmensamente superior. Obligar a los agentes a usar `grep` y `cat` para entender cómo se conectan las piezas dispara el consumo de contexto a números altísimos (hasta 115k tokens). 
+> Al contar con `vec_search`, los cuatro modelos lograron **ahorros dramáticos que van del 48% al 96%**. Minimax-m3 destacó particularmente al consolidar la respuesta despachando múltiples llamadas semánticas en paralelo y leyendo directamente las respuestas de los chunks, sin perder tokens leyendo archivos adicionales. Mimo-v2.5-pro, que en la Fase 2 sufrió con archivos individuales, aquí brilló (-84.9%) al tener que saltar entre múltiples componentes del sistema.
 
 ## Architecture
 

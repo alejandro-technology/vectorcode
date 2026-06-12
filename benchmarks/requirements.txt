@@ -1,2 +1,2 @@
 psutil>=5.9.0
-tiktoken>=0.7.0
+openai>=1.0.0

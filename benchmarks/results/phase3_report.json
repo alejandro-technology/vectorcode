@@ -1,46 +1,16 @@
 {
-  "metadata": {
-    "timestamp": "2026-06-12T13:06:23-0500",
-    "benchmark": "Phase 3 - Context Bloat",
-    "task": "Explica la arquitectura del sistema de embeddings: ¿qué trait principal se usa, cuáles son sus métodos, qué proveedores lo implementan y en qué parte del código se instancia el proveedor según la configuración?",
-    "dry_run": true
-  },
-  "metrics": {
-    "arm_a_total_tokens": 4315,
-    "arm_b_total_tokens": 484,
-    "token_savings_percent": 88.78,
-    "arm_a_quality_score": 0.4,
-    "arm_b_quality_score": 1.0
-  },
+  "model": "mimo-v2.5-pro",
   "arm_a": {
-    "total_tokens": 4315,
-    "generated_text": "La arquitectura del sistema de embeddings se basa en el trait `Embedder`, el cual está definido en `src/embedder/mod.rs`.\nEste trait tiene los métodos `embed` y `embed_batch`.\nLos proveedores que implementan este trait son `onnx` y `gemini`.\nLa instanciación del proveedor se realiza leyendo la configuración, pero el código de instanciación está distribuido en `src/cli/mod.rs`.\n",
-    "quality_checks": {
-      "passed": [
-        "mentions_embedder_trait",
-        "mentions_core_methods"
-      ],
-      "failed": [
-        "mentions_metadata_methods",
-        "mentions_all_providers",
-        "mentions_instantiation"
-      ],
-      "score": 0.4
-    }
+    "tokens": 55476,
+    "quality": 1.0
   },
   "arm_b": {
-    "total_tokens": 484,
-    "generated_text": "La arquitectura del sistema de embeddings está estructurada alrededor del trait principal `Embedder`, definido en `src/embedder/mod.rs`.\n\n### Métodos del Trait\nEl trait define los siguientes métodos:\n- `embed`: para procesar un solo texto.\n- `embed_batch`: para procesar múltiples textos de forma eficiente.\n- `dimensions`: devuelve el tamaño del vector.\n- `provider_name`: el nombre del proveedor.\n- `model_name`: el modelo utilizado.\n- `max_tokens`: el límite máximo de tokens de entrada.\n\n### Proveedores\nActualmente existen varias implementaciones de este trait para distintos proveedores:\n- `onnx` (local)\n- `gemini`\n- `ollama`\n- `openai`\nAdemás, existe un `mock` para testing.\n\n### Instanciación\nEl proveedor adecuado se instancia basándose en la configuración del usuario mediante la función `create_embedder_from_config`, la cual se encuentra en `src/cli/mod.rs`.\n",
-    "quality_checks": {
-      "passed": [
-        "mentions_embedder_trait",
-        "mentions_core_methods",
-        "mentions_metadata_methods",
-        "mentions_all_providers",
-        "mentions_instantiation"
-      ],
-      "failed": [],
-      "score": 1.0
-    }
+    "tokens": 85704,
+    "quality": 1.0
+  },
+  "metrics": {
+    "token_savings_percent": -54.49,
+    "arm_a_quality_score": 1.0,
+    "arm_b_quality_score": 1.0
   }
 }

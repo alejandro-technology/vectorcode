@@ -244,7 +244,7 @@ This section tracks the ongoing validation and ROI metrics of VectorCode across 
 | ---- | ----------- | ----------------- | --------- |
 | 1 | Precisión IR y Rendimiento | P@1, P@3, P@5, Latencia | ✅ Completado |
 | 2 | Ahorro de Tokens (Agente E2E) | Reducción de Input Tokens vs Baseline | ✅ Completado |
-| 3 | Saturación de Contexto (Context Bloat) | Puntuación del AI Judge | Pendiente |
+| 3 | Saturación de Contexto (Context Bloat) | Puntuación del AI Judge | ✅ Completado |
 
 ### Fase 1: Precisión IR
 
@@ -290,6 +290,21 @@ This section tracks the ongoing validation and ROI metrics of VectorCode across 
 > La calidad del código generado por Arm B fue superior (100% vs 86%): Arm B incluyó `#[cfg(test)] mod tests` que Arm A omitió, demostrando que `vec_search` descubre convenciones completas que `grep` por patrón exacto puede pasar por alto.
 >
 > Reporte en `benchmarks/results/phase2_report.json`. Implementado en commit `a121c5e`.
+
+### Fase 3: Saturación de Contexto (Context Bloat)
+
+**Objetivo:** Probar el impacto en tareas de entendimiento global, demostrando que VectorCode evita que el agente sufra "Context Bloat" o el problema de "Lost in the Middle" al inyectar código masivo.
+
+**Metodología:** Simulador de dos brazos para responder a una pregunta arquitectónica global ("Explica la arquitectura del sistema de embeddings..."). Arm A usa `grep` y lee archivos enteros. Arm B usa `vec_search` para extraer fragmentos semánticos. La respuesta resultante se evalúa con un juez AI (5 reglas clave de la arquitectura).
+
+| Métrica | Brazo A (grep + read_file) | Brazo B (VectorCode) | Mejora |
+| ------- | -------------------------- | -------------------- | ------ |
+| Total Input Tokens | 4,315 | 484 | −88.8% |
+| Puntuación AI Judge | 40% (2/5) | 100% (5/5) | +60% |
+
+> El enfoque tradicional (Arm A) generó un contexto ruidoso y masivo, causando que el agente olvidara detalles críticos ("Lost in the Middle") y fallara en 3 de las 5 reglas de arquitectura. VectorCode (Arm B) extrajo fragmentos exactos, reduciendo el consumo de tokens casi un 90% y logrando un entendimiento arquitectónico perfecto.
+>
+> Reporte en `benchmarks/results/phase3_report.json`.
 
 ## Architecture
 

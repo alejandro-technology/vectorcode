@@ -37,7 +37,7 @@ tree-sitter-swift = "0.7"
 tree-sitter-kotlin-ng = "1.1"
 
 # ONNX Runtime
-ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
+ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
 
 # Tokenizer (for ONNX provider)
 tokenizers = { version = "0.20", features = ["http"] }

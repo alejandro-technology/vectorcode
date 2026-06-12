@@ -230,13 +230,11 @@ impl OnnxEmbedder {
 pub fn onnx_timeout_error_message() -> String {
     "ONNX Runtime initialization timed out after 60s.\n\
      \n\
-     This usually means the ONNX Runtime shared library (libonnxruntime.dylib)\n\
-     is not installed or is hanging during initialization.\n\
+     This usually means the ONNX Runtime is hanging during initialization.\n\
      \n\
      Fix options:\n\
-       • Install ONNX Runtime:  brew install onnxruntime\n\
-       • Or switch to a different provider:  vectorcode init --provider ollama\n\
-       • Or set ORT_DISABLE_COREML=1 if CoreML EP is the culprit"
+       • Set ORT_DISABLE_COREML=1 before running (CoreML EP can sometimes hang on macOS)\n\
+       • Or switch to a different provider:  vectorcode init --provider ollama"
         .to_string()
 }
 

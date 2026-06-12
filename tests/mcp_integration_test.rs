@@ -95,7 +95,7 @@ fn mcp_initialize_returns_server_info() {
 }
 
 #[test]
-fn mcp_tools_list_returns_three_tools() {
+fn mcp_tools_list_returns_four_tools() {
     let dir = tempfile::tempdir().unwrap();
     init_project(dir.path());
     let mut child = spawn_mcp_server(dir.path());
@@ -109,12 +109,13 @@ fn mcp_tools_list_returns_three_tools() {
     assert_eq!(parsed["id"], 2);
 
     let tools = parsed["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 3);
+    assert_eq!(tools.len(), 4);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"vec_search"));
     assert!(names.contains(&"vec_status"));
     assert!(names.contains(&"vec_reindex"));
+    assert!(names.contains(&"vec_read_lines"));
 
     child.stdin.take().unwrap();
     let _ = child.wait();

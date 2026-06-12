@@ -10,6 +10,7 @@ use crate::embedder::http::{
 use crate::embedder::{Embedder, EmbedderResult};
 use crate::error::VectorCodeError;
 use async_trait::async_trait;
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -27,7 +28,7 @@ const VALID_DIMENSIONS: &[u32] = &[256, 512, 768, 1024, 3072];
 pub struct GeminiEmbedder {
     model: String,
     dimensions: u32,
-    api_key: String,
+    api_key: SecretString,
     client: reqwest::Client,
 }
 
@@ -47,7 +48,12 @@ impl GeminiEmbedder {
     /// - `ApiKeyMissing` if `api_key` is empty
     /// - `EmbedderError` if `dimensions` is not a valid Matryoshka size
     pub fn new(api_key: String, model: String, dimensions: u32) -> EmbedderResult<Self> {
-        Self::with_client(api_key, model, dimensions, reqwest::Client::new())
+        Self::with_client(
+            api_key,
+            model,
+            dimensions,
+            crate::embedder::http::build_http_client()?,
+        )
     }
 
     /// Create with a custom reqwest::Client (useful for testing).
@@ -73,7 +79,7 @@ impl GeminiEmbedder {
         Ok(Self {
             model,
             dimensions,
-            api_key,
+            api_key: SecretString::from(api_key),
             client,
         })
     }
@@ -178,7 +184,7 @@ impl Embedder for GeminiEmbedder {
             let response = self
                 .client
                 .post(&url)
-                .header("x-goog-api-key", &self.api_key)
+                .header("x-goog-api-key", self.api_key.expose_secret())
                 .json(&body)
                 .send()
                 .await
@@ -245,7 +251,7 @@ impl Embedder for GeminiEmbedder {
                 let response = self
                     .client
                     .post(&url)
-                    .header("x-goog-api-key", &self.api_key)
+                    .header("x-goog-api-key", self.api_key.expose_secret())
                     .json(&body)
                     .send()
                     .await

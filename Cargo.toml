@@ -96,6 +96,7 @@ sha2 = "0.10"
 
 # Force vendored OpenSSL to avoid system dependency (needed for cross-compilation)
 openssl = { version = "0.10", features = ["vendored"] }
+secrecy = "0.8"
 
 [dev-dependencies]
 assert_cmd = "2"

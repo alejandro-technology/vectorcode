@@ -11,13 +11,14 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// Default connect timeout.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Build a reqwest::Client with sensible defaults for embedding providers.
-pub fn build_http_client() -> reqwest::Client {
+pub fn build_http_client() -> Result<reqwest::Client, crate::error::VectorCodeError> {
     reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .connect_timeout(CONNECT_TIMEOUT)
         .build()
-        .expect("reqwest::Client::builder with valid config should not fail")
+        .map_err(|e| crate::error::VectorCodeError::EmbedderError {
+            message: format!("Failed to build HTTP client: {}", e),
+        })
 }
 
 /// Maximum number of retry attempts for transient failures.

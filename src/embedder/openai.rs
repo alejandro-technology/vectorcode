@@ -10,6 +10,7 @@ use crate::embedder::http::{
 use crate::embedder::{Embedder, EmbedderResult};
 use crate::error::VectorCodeError;
 use async_trait::async_trait;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -23,7 +24,7 @@ const OPENAI_BATCH_SIZE: usize = 2048;
 #[derive(Debug)]
 pub struct OpenAiEmbedder {
     model: String,
-    api_key: String,
+    api_key: SecretString,
     client: reqwest::Client,
 }
 
@@ -42,7 +43,7 @@ impl OpenAiEmbedder {
     /// # Errors
     /// Returns `ApiKeyMissing` if `api_key` is empty.
     pub fn new(api_key: String) -> EmbedderResult<Self> {
-        Self::with_client(api_key, crate::embedder::http::build_http_client())
+        Self::with_client(api_key, crate::embedder::http::build_http_client()?)
     }
 
     /// Create with a custom reqwest::Client (useful for testing).
@@ -54,7 +55,7 @@ impl OpenAiEmbedder {
         }
         Ok(Self {
             model: Self::DEFAULT_MODEL.to_string(),
-            api_key,
+            api_key: SecretString::from(api_key),
             client,
         })
     }
@@ -126,7 +127,7 @@ impl Embedder for OpenAiEmbedder {
             let response = self
                 .client
                 .post(url)
-                .bearer_auth(&self.api_key)
+                .bearer_auth(self.api_key.expose_secret())
                 .json(&body)
                 .send()
                 .await
@@ -198,7 +199,7 @@ impl Embedder for OpenAiEmbedder {
                 let response = self
                     .client
                     .post(url)
-                    .bearer_auth(&self.api_key)
+                    .bearer_auth(self.api_key.expose_secret())
                     .json(&body)
                     .send()
                     .await

@@ -280,11 +280,6 @@ impl Indexer {
         let mut files_indexed = 0;
         let mut chunks_skipped = 0;
 
-        {
-            let db = self.db.lock().await;
-            db.conn().execute("BEGIN", [])?;
-        }
-
         for file_path in file_paths {
             let relative_path = file_path
                 .strip_prefix(project_path)
@@ -320,43 +315,56 @@ impl Indexer {
             };
             let content_hash = compute_content_hash(&content);
 
-            let mut db_guard = self.db.lock().await;
-            let db_conn = db_guard.conn_mut();
-
-            // Get existing chunks for this file
-            let existing_chunks = chunks::list_chunks_by_file(db_conn, &relative_path)?;
-
-            // Check if file is unchanged (mtime + size + hash all match)
-            if let Some(file_record) = files::get_file(db_conn, &relative_path)? {
-                if file_record.mtime == mtime
-                    && file_record.size == size
-                    && file_record.hash == content_hash
-                {
-                    // File unchanged — count existing chunks as skipped
-                    chunks_skipped += existing_chunks.len();
-                    continue;
+            // Fast path: check if file is unchanged without long locks
+            {
+                let db_guard = self.db.lock().await;
+                if let Some(file_record) = files::get_file(db_guard.conn(), &relative_path)? {
+                    if file_record.mtime == mtime
+                        && file_record.size == size
+                        && file_record.hash == content_hash
+                    {
+                        // File unchanged — count existing chunks as skipped
+                        let existing_chunks =
+                            chunks::list_chunks_by_file(db_guard.conn(), &relative_path)?;
+                        chunks_skipped += existing_chunks.len();
+                        continue;
+                    }
                 }
             }
 
-            // File is new or changed — parse and chunk
+            // File is new or changed — parse and chunk off the tokio reactor thread
             let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
             let language = SupportedLanguage::from_extension(ext);
-            let file_chunks = chunk_file(&content, &relative_path, language);
+            let content_clone = content.clone();
+            let relative_path_clone = relative_path.clone();
+            let file_chunks = tokio::task::spawn_blocking(move || {
+                chunk_file(&content_clone, &relative_path_clone, language)
+            })
+            .await
+            .map_err(|e| crate::error::VectorCodeError::EmbedderError {
+                message: format!("Task panic: {}", e),
+            })?;
 
             // Collect new chunk IDs to detect removed chunks
             let new_chunk_ids: HashSet<String> = file_chunks.iter().map(|c| c.id.clone()).collect();
 
+            let mut db_guard = self.db.lock().await;
+            let tx = db_guard.conn_mut().transaction()?;
+
+            // Get existing chunks for this file
+            let existing_chunks = chunks::list_chunks_by_file(&tx, &relative_path)?;
+
             // Delete old chunks that are no longer present in the file
             for old_chunk in &existing_chunks {
                 if !new_chunk_ids.contains(&old_chunk.id) {
-                    chunks::delete_chunk(db_conn, &old_chunk.id)?;
+                    chunks::delete_chunk(&tx, &old_chunk.id)?;
                 }
             }
 
             // Filter out chunks that already exist with the same content hash
             let mut file_new_chunks = Vec::new();
             for mut chunk in file_chunks {
-                if chunks::chunk_exists_with_hash(db_conn, &chunk.id, &chunk.content_hash)? {
+                if chunks::chunk_exists_with_hash(&tx, &chunk.id, &chunk.content_hash)? {
                     chunks_skipped += 1;
                     continue;
                 }
@@ -374,14 +382,10 @@ impl Indexer {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64;
-            files::upsert_file(db_conn, &relative_path, mtime, size, &content_hash, now)?;
+            files::upsert_file(&tx, &relative_path, mtime, size, &content_hash, now)?;
+            tx.commit()?;
 
             self.report_progress(ProgressEvent::ProcessedFile);
-        }
-
-        {
-            let db = self.db.lock().await;
-            db.conn().execute("COMMIT", [])?;
         }
 
         Ok((new_chunks, files_indexed, chunks_skipped))

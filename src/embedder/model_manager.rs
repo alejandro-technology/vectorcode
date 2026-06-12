@@ -104,7 +104,9 @@ impl ModelManager {
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(300))
             .build()
-            .expect("reqwest::Client::builder with valid config should not fail");
+            .map_err(|e| VectorCodeError::EmbedderError {
+                message: format!("Failed to build client: {e}"),
+            })?;
 
         // Download model file
         let model_bytes = Self::fetch_with_progress(&client, model_url, MODEL_FILENAME).await?;

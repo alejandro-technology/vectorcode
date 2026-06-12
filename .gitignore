@@ -1,5 +1,6 @@
 target/
 .vectorcode/index.db
+.codegraph/
 *.dylib
 *.so
 *.dll

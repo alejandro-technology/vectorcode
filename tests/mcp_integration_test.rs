@@ -1,8 +1,8 @@
 //! Integration tests for the MCP server using rmcp SDK.
 
+use assert_cmd::prelude::*;
 use std::io::Write;
 use std::process::{Command, Stdio};
-use assert_cmd::prelude::*;
 
 /// Helper: spawn the vectorcode binary with `serve --mcp` and return the child process.
 fn spawn_mcp_server(project_path: &std::path::Path) -> std::process::Child {

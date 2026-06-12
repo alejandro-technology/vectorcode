@@ -1,14 +1,14 @@
-use rmcp::ServerHandler;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool_router, tool_handler, tool};
 use rmcp::schemars::JsonSchema;
+use rmcp::ServerHandler;
+use rmcp::{tool, tool_handler, tool_router};
 use serde::Deserialize;
 use tracing::error;
 
-use crate::mcp::AppState;
-use crate::engine::searcher::{SearchOptions, Searcher};
 use crate::engine::indexer::Indexer;
+use crate::engine::searcher::{SearchOptions, Searcher};
+use crate::mcp::AppState;
 use crate::store::meta;
 use crate::watcher::PendingFile;
 
@@ -53,10 +53,7 @@ impl McpHandler {
                        even if exact keywords don't match. Results are ordered by relevance.",
         annotations(read_only_hint = true)
     )]
-    async fn vec_search(
-        &self,
-        params: Parameters<VecSearchParams>
-    ) -> Result<String, String> {
+    async fn vec_search(&self, params: Parameters<VecSearchParams>) -> Result<String, String> {
         let p = params.0;
         if p.query.is_empty() {
             return Err("Query cannot be empty".to_string());
@@ -104,16 +101,13 @@ impl McpHandler {
                        dimensions, number of files indexed, and last sync time.",
         annotations(read_only_hint = true)
     )]
-    async fn vec_status(
-        &self,
-        _params: Parameters<VecStatusParams>
-    ) -> Result<String, String> {
+    async fn vec_status(&self, _params: Parameters<VecStatusParams>) -> Result<String, String> {
         let db = self.state.db.lock().await;
         match meta::read_index_meta(db.conn()) {
-            Ok(Some(index_meta)) => {
-                Ok(format_status_text(&index_meta))
+            Ok(Some(index_meta)) => Ok(format_status_text(&index_meta)),
+            Ok(None) => {
+                Err("Index metadata not found. Run `vectorcode init` to initialize.".to_string())
             }
-            Ok(None) => Err("Index metadata not found. Run `vectorcode init` to initialize.".to_string()),
             Err(e) => Err(format!("Failed to read index metadata: {e}")),
         }
     }
@@ -124,12 +118,9 @@ impl McpHandler {
                        Use full=true to drop the existing index and start fresh.",
         annotations(destructive_hint = true)
     )]
-    async fn vec_reindex(
-        &self,
-        params: Parameters<VecReindexParams>
-    ) -> Result<String, String> {
+    async fn vec_reindex(&self, params: Parameters<VecReindexParams>) -> Result<String, String> {
         let p = params.0;
-        
+
         if p.full {
             let db = self.state.db.lock().await;
             if let Err(e) = db.init_schema(self.state.embedder.dimensions()) {
@@ -144,23 +135,21 @@ impl McpHandler {
         );
 
         match indexer.index_project(&self.state.project_path).await {
-            Ok(report) => {
-                Ok(format!(
-                    "Re-indexing complete.\n\
+            Ok(report) => Ok(format!(
+                "Re-indexing complete.\n\
                      Files scanned:  {}\n\
                      Files indexed:  {}\n\
                      Chunks total:   {}\n\
                      Chunks new:     {}\n\
                      Chunks skipped: {}\n\
                      Duration:       {:.2}s\n",
-                    report.files_scanned,
-                    report.files_indexed,
-                    report.chunks_total,
-                    report.chunks_new,
-                    report.chunks_skipped,
-                    report.duration.as_secs_f64(),
-                ))
-            }
+                report.files_scanned,
+                report.files_indexed,
+                report.chunks_total,
+                report.chunks_new,
+                report.chunks_skipped,
+                report.duration.as_secs_f64(),
+            )),
             Err(e) => {
                 error!("vec_reindex failed: {e}");
                 Err(format!("Re-indexing failed: {e}"))
@@ -176,7 +165,7 @@ impl McpHandler {
     }
 }
 
-use rmcp::model::{InitializeResult, ServerCapabilities, Implementation, ProtocolVersion};
+use rmcp::model::{Implementation, InitializeResult, ProtocolVersion, ServerCapabilities};
 
 #[tool_handler]
 impl ServerHandler for McpHandler {

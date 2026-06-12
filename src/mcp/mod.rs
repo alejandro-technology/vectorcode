@@ -41,8 +41,14 @@ impl McpServer {
     /// Run the main message loop using rmcp sdk.
     pub async fn run(&mut self) -> Result<()> {
         let handler = McpHandler::new(self.state.clone());
-        let service = handler.serve(stdio()).await.map_err(|e| anyhow::anyhow!("Serve error: {}", e))?;
-        service.waiting().await.map_err(|e| anyhow::anyhow!("Service error: {}", e))?;
+        let service = handler
+            .serve(stdio())
+            .await
+            .map_err(|e| anyhow::anyhow!("Serve error: {}", e))?;
+        service
+            .waiting()
+            .await
+            .map_err(|e| anyhow::anyhow!("Service error: {}", e))?;
         Ok(())
     }
 }

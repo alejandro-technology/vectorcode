@@ -24,6 +24,14 @@ use crate::config::schema::WatcherConfig;
 
 use self::gitignore::{filter_paths, has_supported_extension, GitignoreFilter};
 
+/// A batch of file changes detected by the watcher.
+///
+/// Each entry is a `(path, is_removal)` tuple: `true` means the file was deleted.
+pub type ChangeBatch = Vec<(PathBuf, bool)>;
+
+/// An unbounded receiver for [`ChangeBatch`] notifications.
+pub type ChangeBatchReceiver = mpsc::UnboundedReceiver<ChangeBatch>;
+
 /// A file that has been modified but not yet re-indexed.
 #[derive(Debug, Clone)]
 pub struct PendingFile {
@@ -53,10 +61,7 @@ impl FileWatcher {
     ///
     /// The watcher starts monitoring immediately. It returns the FileWatcher instance
     /// along with an unbounded receiver for debounced batches of changed file paths.
-    pub fn new(
-        project_root: &Path,
-        config: &WatcherConfig,
-    ) -> Result<(Self, mpsc::UnboundedReceiver<Vec<(PathBuf, bool)>>)> {
+    pub fn new(project_root: &Path, config: &WatcherConfig) -> Result<(Self, ChangeBatchReceiver)> {
         let project_root = project_root.to_path_buf();
         let gitignore = Arc::new(GitignoreFilter::new(&project_root));
         let pending: Arc<RwLock<Vec<PendingFile>>> = Arc::new(RwLock::new(Vec::new()));
@@ -65,8 +70,8 @@ impl FileWatcher {
 
         // Unbounded channels: notify callback runs on a std::thread, so we use
         // unbounded channels to avoid blocking. (H14: prevents buffer overflow)
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<(PathBuf, bool)>>();
-        let (tx_pending, mut rx_pending) = mpsc::unbounded_channel::<Vec<(PathBuf, bool)>>();
+        let (tx, rx) = mpsc::unbounded_channel::<ChangeBatch>();
+        let (tx_pending, mut rx_pending) = mpsc::unbounded_channel::<ChangeBatch>();
 
         // Spawn a task to process pending updates from the channel (C7: replaces dead code).
         // Only spawn if a tokio runtime is available (tests may not have one).
@@ -184,8 +189,6 @@ impl FileWatcher {
         info!("File watcher monitoring {}", self.project_root.display());
         Ok(())
     }
-
-
 
     /// Get the list of files that have been modified but not yet re-indexed.
     ///

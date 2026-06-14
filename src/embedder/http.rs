@@ -58,6 +58,25 @@ pub fn should_retry(status: u16) -> bool {
     matches!(status, 429 | 500 | 503)
 }
 
+/// Read the `Retry-After` header from an HTTP response, if present and parseable.
+/// Support both delta-seconds (integer) and RFC 2822 HTTP date string.
+pub fn read_retry_after(response: &reqwest::Response) -> Option<Duration> {
+    let header_val = response.headers().get("retry-after")?.to_str().ok()?;
+    if let Ok(secs) = header_val.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    if let Ok(datetime) = chrono::DateTime::parse_from_rfc2822(header_val) {
+        let utc_now = chrono::Utc::now();
+        let target_utc = datetime.with_timezone(&chrono::Utc);
+        if target_utc > utc_now {
+            if let Ok(duration) = (target_utc - utc_now).to_std() {
+                return Some(duration);
+            }
+        }
+    }
+    None
+}
+
 /// Generate a jitter factor in [0.0, 1.0) from system time nanoseconds.
 ///
 /// This is a cheap source of randomness suitable for backoff jitter.
@@ -157,5 +176,63 @@ mod tests {
         assert_eq!(MAX_RETRIES, 5);
         assert_eq!(BASE_BACKOFF_MS, 1000);
         assert_eq!(MAX_BACKOFF_MS, 60_000);
+    }
+
+    #[test]
+    fn test_read_retry_after_missing() {
+        let http_res = http::Response::builder().status(429).body("").unwrap();
+        let response = reqwest::Response::from(http_res);
+        assert_eq!(read_retry_after(&response), None);
+    }
+
+    #[test]
+    fn test_read_retry_after_delta_seconds() {
+        let http_res = http::Response::builder()
+            .status(429)
+            .header("retry-after", "120")
+            .body("")
+            .unwrap();
+        let response = reqwest::Response::from(http_res);
+        assert_eq!(read_retry_after(&response), Some(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn test_read_retry_after_rfc2822_future() {
+        let future_time = chrono::Utc::now() + chrono::TimeDelta::try_seconds(120).unwrap();
+        let rfc2822_str = future_time.to_rfc2822();
+
+        let http_res = http::Response::builder()
+            .status(429)
+            .header("retry-after", rfc2822_str)
+            .body("")
+            .unwrap();
+        let response = reqwest::Response::from(http_res);
+        let result = read_retry_after(&response).expect("should parse future HTTP date");
+        assert!(result.as_secs() >= 118 && result.as_secs() <= 120);
+    }
+
+    #[test]
+    fn test_read_retry_after_rfc2822_past() {
+        let past_time = chrono::Utc::now() - chrono::TimeDelta::try_seconds(120).unwrap();
+        let rfc2822_str = past_time.to_rfc2822();
+
+        let http_res = http::Response::builder()
+            .status(429)
+            .header("retry-after", rfc2822_str)
+            .body("")
+            .unwrap();
+        let response = reqwest::Response::from(http_res);
+        assert_eq!(read_retry_after(&response), None);
+    }
+
+    #[test]
+    fn test_read_retry_after_invalid() {
+        let http_res = http::Response::builder()
+            .status(429)
+            .header("retry-after", "not-a-number-or-date")
+            .body("")
+            .unwrap();
+        let response = reqwest::Response::from(http_res);
+        assert_eq!(read_retry_after(&response), None);
     }
 }

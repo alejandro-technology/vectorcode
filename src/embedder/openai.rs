@@ -5,7 +5,8 @@
 //! Spec §7.2: OpenAI
 
 use crate::embedder::http::{
-    calculate_backoff, jitter_factor, should_retry, BASE_BACKOFF_MS, MAX_BACKOFF_MS, MAX_RETRIES,
+    calculate_backoff, jitter_factor, read_retry_after, should_retry, BASE_BACKOFF_MS,
+    MAX_BACKOFF_MS, MAX_RETRIES,
 };
 use crate::embedder::{Embedder, EmbedderResult};
 use crate::error::VectorCodeError;
@@ -107,19 +108,19 @@ struct OpenAiEmbeddingData {
     index: usize,
 }
 
-/// Read the `Retry-After` header from an HTTP response, if present and parseable.
-fn read_retry_after(response: &reqwest::Response) -> Option<Duration> {
-    response
-        .headers()
-        .get("retry-after")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(Duration::from_secs)
-}
-
 #[async_trait]
 impl Embedder for OpenAiEmbedder {
     async fn embed(&self, text: &str) -> EmbedderResult<Vec<f32>> {
+        let max_len = Self::MAX_TOKENS as usize * 4;
+        if text.len() > max_len {
+            return Err(VectorCodeError::EmbedderError {
+                message: format!(
+                    "Text length ({} bytes) exceeds maximum limit of {} bytes",
+                    text.len(),
+                    max_len
+                ),
+            });
+        }
         let url = self.embed_url();
         let body = self.build_request(&[text]);
 
@@ -189,6 +190,19 @@ impl Embedder for OpenAiEmbedder {
     }
 
     async fn embed_batch(&self, texts: &[&str]) -> EmbedderResult<Vec<Vec<f32>>> {
+        let max_len = Self::MAX_TOKENS as usize * 4;
+        for (i, text) in texts.iter().enumerate() {
+            if text.len() > max_len {
+                return Err(VectorCodeError::EmbedderError {
+                    message: format!(
+                        "Text at index {} length ({} bytes) exceeds maximum limit of {} bytes",
+                        i,
+                        text.len(),
+                        max_len
+                    ),
+                });
+            }
+        }
         let url = self.embed_url();
         let mut all_embeddings = Vec::with_capacity(texts.len());
 

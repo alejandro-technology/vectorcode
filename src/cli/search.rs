@@ -75,6 +75,22 @@ pub async fn execute(args: &SearchArgs, project_path: &std::path::Path, quiet: b
             }
         };
 
+    // Validate embedder configuration matches index metadata
+    if index_meta.dimensions != embedder.dimensions() {
+        anyhow::bail!(
+            "Index dimensions ({}) do not match current embedder dimensions ({})",
+            index_meta.dimensions,
+            embedder.dimensions()
+        );
+    }
+    if index_meta.provider != config.provider.name {
+        anyhow::bail!(
+            "Index provider ({}) does not match current configured provider ({})",
+            index_meta.provider,
+            config.provider.name
+        );
+    }
+
     // Create searcher
     let searcher = crate::engine::Searcher::new(
         std::sync::Arc::new(tokio::sync::Mutex::new(Database::open(&db_path)?)),

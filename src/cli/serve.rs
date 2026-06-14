@@ -75,7 +75,7 @@ pub async fn try_init_workspace(
     let db = Database::open(&db_path).map_err(|e| anyhow::anyhow!("{e}"))?;
     db.init_schema(embedder.dimensions())?;
 
-    // Validate provider dimensions match the existing index
+    // Validate provider dimensions and provider name match the existing index
     if let Some(existing_meta) =
         crate::store::meta::read_index_meta(db.conn()).map_err(|e| anyhow::anyhow!("{e}"))?
     {
@@ -86,6 +86,15 @@ pub async fn try_init_workspace(
                  or change the provider.",
                 existing_meta.dimensions,
                 embedder.dimensions()
+            );
+        }
+        if existing_meta.provider != cfg.provider.name {
+            anyhow::bail!(
+                "Provider mismatch: index was built with provider '{}', \
+                 but current configured provider is '{}'. Re-index with 'vectorcode index' \
+                 or change the provider.",
+                existing_meta.provider,
+                cfg.provider.name
             );
         }
     }

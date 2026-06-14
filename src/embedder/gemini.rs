@@ -5,7 +5,8 @@
 //! Spec §7.2: Gemini
 
 use crate::embedder::http::{
-    calculate_backoff, jitter_factor, should_retry, BASE_BACKOFF_MS, MAX_BACKOFF_MS, MAX_RETRIES,
+    calculate_backoff, jitter_factor, read_retry_after, should_retry, BASE_BACKOFF_MS,
+    MAX_BACKOFF_MS, MAX_RETRIES,
 };
 use crate::embedder::{Embedder, EmbedderResult};
 use crate::error::VectorCodeError;
@@ -162,16 +163,6 @@ struct GeminiEmbeddingValues {
 #[derive(Deserialize)]
 struct GeminiBatchResponse {
     embeddings: Vec<GeminiEmbeddingValues>,
-}
-
-/// Read the `Retry-After` header from an HTTP response, if present and parseable.
-fn read_retry_after(response: &reqwest::Response) -> Option<Duration> {
-    response
-        .headers()
-        .get("retry-after")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(Duration::from_secs)
 }
 
 #[async_trait]

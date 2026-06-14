@@ -109,6 +109,25 @@ pub async fn execute(args: &IndexArgs, project_path: &std::path::Path, quiet: bo
             }
         };
 
+    if !args.full {
+        if index_meta.dimensions != embedder.dimensions() {
+            anyhow::bail!(
+                "Index dimensions ({}) do not match current embedder dimensions ({}). \
+                 Run with '--full' to rebuild the index from scratch.",
+                index_meta.dimensions,
+                embedder.dimensions()
+            );
+        }
+        if index_meta.provider != config.provider.name {
+            anyhow::bail!(
+                "Index provider ({}) does not match current configured provider ({}). \
+                 Run with '--full' to rebuild the index from scratch.",
+                index_meta.provider,
+                config.provider.name
+            );
+        }
+    }
+
     // Create indexer and run
     let indexer = crate::engine::Indexer::new(
         std::sync::Arc::new(tokio::sync::Mutex::new(Database::open(&db_path)?)),

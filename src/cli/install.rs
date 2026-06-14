@@ -95,6 +95,9 @@ semantic similarity search. It finds code by meaning, not by name.
 - Don't re-verify vec_search results with grep — the source code in the
   result IS the current indexed content. Check the staleness banner if present.
 - Don't ignore the score — results below 0.4 are usually noise.
+- Don't call `vec_read_lines` sequentially (e.g., 1-100, 100-200) to
+  reconstruct an entire file. Use `vec_search` to find relevant code, then
+  read only the specific lines you need.
 
 ## Staleness
 
@@ -821,6 +824,10 @@ mod tests {
         assert!(
             content.contains("Anti-patterns"),
             "Should contain anti-patterns section"
+        );
+        assert!(
+            content.contains("vec_read_lines") && content.contains("sequentially"),
+            "Anti-patterns should warn against sequential vec_read_lines calls"
         );
     }
 

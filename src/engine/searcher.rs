@@ -92,9 +92,21 @@ impl Searcher {
         let fetch_limit = fetch_limit.max(50);
         let threshold = options.threshold;
 
+        // Build LIKE pattern for SQL-level path filtering
+        let path_like_pattern = options
+            .path
+            .as_deref()
+            .map(|p| format!("{}%", vectors::escape_like_pattern(p)));
+
         let mut results = {
             let db = self.db.lock().await;
-            vectors::search_similar(db.conn(), &query_vec, fetch_limit, threshold)?
+            vectors::search_similar(
+                db.conn(),
+                &query_vec,
+                fetch_limit,
+                threshold,
+                path_like_pattern.as_deref(),
+            )?
         };
 
         // Step 4: Filter by language
@@ -102,12 +114,7 @@ impl Searcher {
             results.retain(|r| r.language == *lang);
         }
 
-        // Step 5: Filter by path prefix
-        if let Some(path_prefix) = &options.path {
-            results.retain(|r| r.file_path.starts_with(path_prefix));
-        }
-
-        // Step 6: Apply final limit
+        // Step 5: Apply final limit
         results.truncate(options.limit);
 
         Ok(results)

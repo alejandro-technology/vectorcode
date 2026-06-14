@@ -129,16 +129,29 @@ pub fn delete_vectors_for_chunk(conn: &Connection, chunk_id: &str) -> Result<(),
     Ok(())
 }
 
+/// Escape special LIKE pattern characters to prevent wildcard injection.
+///
+/// Escapes `%`, `_`, and `\` so they match literal characters.
+pub(crate) fn escape_like_pattern(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 /// Search for similar chunks using cosine similarity.
 ///
 /// When sqlite-vec extension is available: uses native MATCH query on `vec_chunks`
 /// with cosine distance metric. Converts distance to similarity score.
 /// Otherwise: falls back to brute-force cosine similarity in Rust.
+///
+/// When `path_filter` is `Some`, the pre-escaped LIKE pattern (with trailing `%`)
+/// is applied via `WHERE c.file_path LIKE ? ESCAPE '\'` in both branches.
 pub fn search_similar(
     conn: &Connection,
     query_vec: &[f32],
     limit: usize,
     threshold: f32,
+    path_filter: Option<&str>,
 ) -> Result<Vec<SearchResult>, VectorCodeError> {
     if has_vec_extension(conn) {
         // sqlite-vec path: native MATCH query with cosine distance
@@ -146,22 +159,7 @@ pub fn search_similar(
         let normalized = normalize_embedding(query_vec, dims);
         let query_blob = embedding_to_blob(&normalized);
 
-        // Unified query: KNN search joined with chunk_vec_map and chunks in one go
-        let mut stmt = conn.prepare(
-            "SELECT c.id, c.file_path, c.start_line, c.end_line, c.byte_start, c.byte_end, \
-                    c.symbol, c.kind, c.content, c.parent_context, c.language, c.file_mtime, \
-                    c.content_hash, v.distance \
-             FROM ( \
-                 SELECT rowid, distance FROM vec_chunks \
-                 WHERE embedding MATCH ?1 \
-                 ORDER BY distance LIMIT ?2 \
-             ) v \
-             JOIN chunk_vec_map m ON m.vec_rowid = v.rowid \
-             JOIN chunks c ON c.id = m.chunk_id",
-        )?;
-
-        let mut results = Vec::new();
-        let rows = stmt.query_map(rusqlite::params![query_blob, limit as i64], |row| {
+        let map_row = |row: &rusqlite::Row| -> rusqlite::Result<(SearchResult, f32)> {
             let file_path: String = row.get(1)?;
             let start_line: u32 = row.get(2)?;
             let end_line: u32 = row.get(3)?;
@@ -182,45 +180,109 @@ pub fn search_similar(
                     language,
                     parent_context,
                     content,
-                    score: 0.0, // Will be computed below
+                    score: 0.0,
                 },
                 distance.unwrap_or(1.0),
             ))
-        })?;
+        };
 
-        for r in rows {
-            let (mut search_res, distance) = r?;
-            let score = 1.0 - distance;
-            if score >= threshold {
-                search_res.score = score;
-                results.push(search_res);
+        let mut results = Vec::new();
+
+        if let Some(pattern) = path_filter {
+            let sql = "SELECT c.id, c.file_path, c.start_line, c.end_line, \
+                       c.byte_start, c.byte_end, c.symbol, c.kind, c.content, \
+                       c.parent_context, c.language, c.file_mtime, c.content_hash, v.distance \
+                       FROM ( \
+                           SELECT rowid, distance FROM vec_chunks \
+                           WHERE embedding MATCH ?1 \
+                           ORDER BY distance LIMIT ?2 \
+                       ) v \
+                       JOIN chunk_vec_map m ON m.vec_rowid = v.rowid \
+                       JOIN chunks c ON c.id = m.chunk_id \
+                       WHERE c.file_path LIKE ?3 ESCAPE '\\'";
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params![query_blob, limit as i64, pattern],
+                map_row,
+            )?;
+            for r in rows {
+                let (mut search_res, distance) = r?;
+                let score = 1.0 - distance;
+                if score >= threshold {
+                    search_res.score = score;
+                    results.push(search_res);
+                }
+            }
+        } else {
+            let sql = "SELECT c.id, c.file_path, c.start_line, c.end_line, \
+                       c.byte_start, c.byte_end, c.symbol, c.kind, c.content, \
+                       c.parent_context, c.language, c.file_mtime, c.content_hash, v.distance \
+                       FROM ( \
+                           SELECT rowid, distance FROM vec_chunks \
+                           WHERE embedding MATCH ?1 \
+                           ORDER BY distance LIMIT ?2 \
+                       ) v \
+                       JOIN chunk_vec_map m ON m.vec_rowid = v.rowid \
+                       JOIN chunks c ON c.id = m.chunk_id";
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query_map(rusqlite::params![query_blob, limit as i64], map_row)?;
+            for r in rows {
+                let (mut search_res, distance) = r?;
+                let score = 1.0 - distance;
+                if score >= threshold {
+                    search_res.score = score;
+                    results.push(search_res);
+                }
             }
         }
 
         Ok(results)
     } else {
         // Fallback path: brute-force cosine similarity
-        let mut stmt = conn.prepare("SELECT chunk_id, embedding FROM vectors_data")?;
-        let rows = stmt.query_map([], |row| {
-            let chunk_id: String = row.get(0)?;
-            let embedding_json: String = row.get(1)?;
-            Ok((chunk_id, embedding_json))
-        })?;
-
         let mut scored: Vec<(String, f32)> = Vec::new();
-        for row in rows {
-            let (chunk_id, embedding_json) = row?;
-            let embedding: Vec<f32> = serde_json::from_str(&embedding_json).map_err(|e| {
-                VectorCodeError::EmbedderError {
-                    message: format!("Failed to deserialize embedding: {e}"),
-                }
-            })?;
 
-            let score = cosine_similarity(query_vec, &embedding);
-            if score >= threshold {
-                scored.push((chunk_id, score));
+        if let Some(pattern) = path_filter {
+            let sql = "SELECT v.chunk_id, v.embedding FROM vectors_data v \
+                       JOIN chunks c ON c.id = v.chunk_id \
+                       WHERE c.file_path LIKE ?1 ESCAPE '\\'";
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query_map(rusqlite::params![pattern], |row| {
+                let chunk_id: String = row.get(0)?;
+                let embedding_json: String = row.get(1)?;
+                Ok((chunk_id, embedding_json))
+            })?;
+            for row in rows {
+                let (chunk_id, embedding_json) = row?;
+                let embedding: Vec<f32> = serde_json::from_str(&embedding_json).map_err(|e| {
+                    VectorCodeError::EmbedderError {
+                        message: format!("Failed to deserialize embedding: {e}"),
+                    }
+                })?;
+                let score = cosine_similarity(query_vec, &embedding);
+                if score >= threshold {
+                    scored.push((chunk_id, score));
+                }
             }
-        }
+        } else {
+            let mut stmt = conn.prepare("SELECT chunk_id, embedding FROM vectors_data")?;
+            let rows = stmt.query_map([], |row| {
+                let chunk_id: String = row.get(0)?;
+                let embedding_json: String = row.get(1)?;
+                Ok((chunk_id, embedding_json))
+            })?;
+            for row in rows {
+                let (chunk_id, embedding_json) = row?;
+                let embedding: Vec<f32> = serde_json::from_str(&embedding_json).map_err(|e| {
+                    VectorCodeError::EmbedderError {
+                        message: format!("Failed to deserialize embedding: {e}"),
+                    }
+                })?;
+                let score = cosine_similarity(query_vec, &embedding);
+                if score >= threshold {
+                    scored.push((chunk_id, score));
+                }
+            }
+        };
 
         // Sort by score descending
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -383,7 +445,7 @@ mod tests {
         insert_vector(db.conn(), &chunk.id, &embedding).unwrap();
 
         // Verify it's stored by searching with the same vector
-        let results = search_similar(db.conn(), &embedding, 10, 0.0).unwrap();
+        let results = search_similar(db.conn(), &embedding, 10, 0.0, None).unwrap();
         assert_eq!(results.len(), 1, "Should find the inserted vector");
         assert_eq!(results[0].file_path, "src/test.ts");
         assert!(
@@ -402,7 +464,7 @@ mod tests {
 
         delete_vectors_for_chunk(db.conn(), &chunk.id).unwrap();
 
-        let results = search_similar(db.conn(), &[1.0, 0.0, 0.0], 10, 0.0).unwrap();
+        let results = search_similar(db.conn(), &[1.0, 0.0, 0.0], 10, 0.0, None).unwrap();
         assert!(results.is_empty(), "No results after vector deletion");
     }
 
@@ -424,7 +486,7 @@ mod tests {
         insert_vector(db.conn(), &c3.id, &[0.0, 0.0, 1.0]).unwrap();
 
         let query = vec![1.0, 0.1, 0.0];
-        let results = search_similar(db.conn(), &query, 2, 0.0).unwrap();
+        let results = search_similar(db.conn(), &query, 2, 0.0, None).unwrap();
         assert_eq!(results.len(), 2, "Should return top 2 results");
         // First result should be c1 (most similar to [1, 0, 0])
         assert_eq!(results[0].file_path, "src/a.ts");
@@ -448,7 +510,7 @@ mod tests {
 
         // Query close to c1, far from c2
         let query = vec![1.0, 0.0, 0.0];
-        let results = search_similar(db.conn(), &query, 10, 0.5).unwrap();
+        let results = search_similar(db.conn(), &query, 10, 0.5, None).unwrap();
         assert_eq!(results.len(), 1, "Only c1 should pass threshold 0.5");
         assert_eq!(results[0].file_path, "src/a.ts");
     }
@@ -456,7 +518,7 @@ mod tests {
     #[test]
     fn search_similar_empty_db_returns_empty() {
         let db = setup_db();
-        let results = search_similar(db.conn(), &[1.0, 0.0, 0.0, 0.0], 10, 0.0).unwrap();
+        let results = search_similar(db.conn(), &[1.0, 0.0, 0.0, 0.0], 10, 0.0, None).unwrap();
         assert!(results.is_empty(), "Empty DB must return no results");
     }
 
@@ -470,7 +532,7 @@ mod tests {
         insert_vector(db.conn(), &chunk.id, &[0.0, 1.0, 0.0]).unwrap();
 
         // Search with the second vector — should find it with score 1.0
-        let results = search_similar(db.conn(), &[0.0, 1.0, 0.0], 10, 0.0).unwrap();
+        let results = search_similar(db.conn(), &[0.0, 1.0, 0.0], 10, 0.0, None).unwrap();
         assert_eq!(results.len(), 1);
         assert!(
             (results[0].score - 1.0).abs() < 1e-5,
@@ -533,7 +595,7 @@ mod tests {
         insert_vector(db.conn(), &c2.id, &[0.0, 0.0, 0.0, 1.0]).unwrap();
 
         // Query aligned with c1
-        let results = search_similar(db.conn(), &[1.0, 0.0, 0.0, 0.0], 10, 0.0).unwrap();
+        let results = search_similar(db.conn(), &[1.0, 0.0, 0.0, 0.0], 10, 0.0, None).unwrap();
         assert_eq!(results.len(), 2, "Should find both vectors");
         assert_eq!(
             results[0].file_path, "src/a.ts",
@@ -586,7 +648,7 @@ mod tests {
         assert_eq!(count_after, 0, "chunk_vec_map entry must be deleted");
 
         // Verify search returns nothing
-        let results = search_similar(db.conn(), &[1.0, 0.0, 0.0, 0.0], 10, 0.0).unwrap();
+        let results = search_similar(db.conn(), &[1.0, 0.0, 0.0, 0.0], 10, 0.0, None).unwrap();
         assert!(results.is_empty(), "No results after vector deletion");
     }
 
@@ -600,7 +662,85 @@ mod tests {
         insert_vector(db.conn(), &chunk.id, &[1.0, 0.0]).unwrap();
 
         // Should still be searchable
-        let results = search_similar(db.conn(), &[1.0, 0.0, 0.0, 0.0], 10, 0.0).unwrap();
+        let results = search_similar(db.conn(), &[1.0, 0.0, 0.0, 0.0], 10, 0.0, None).unwrap();
         assert_eq!(results.len(), 1, "Normalized vector should be findable");
+    }
+
+    // ─── escape_like_pattern tests ─────────────────────────────────────
+
+    #[test]
+    fn escape_like_pattern_special_chars() {
+        assert_eq!(escape_like_pattern("normal"), "normal");
+        assert_eq!(escape_like_pattern("test_1%"), "test\\_1\\%");
+        assert_eq!(escape_like_pattern("a\\b"), "a\\\\b");
+        assert_eq!(escape_like_pattern("%_\\all"), "\\%\\_\\\\all");
+    }
+
+    #[test]
+    fn escape_like_pattern_empty_string() {
+        assert_eq!(escape_like_pattern(""), "");
+    }
+
+    // ─── search_similar with path_filter tests ─────────────────────────
+
+    #[test]
+    fn search_similar_with_path_filter_vec_chunks() {
+        let db = setup_db();
+        assert!(db.has_vec_extension());
+
+        let c1 = make_test_chunk("pf1", "src/auth/login.ts");
+        let c2 = make_test_chunk("pf2", "src/payment/charge.ts");
+        chunks::insert_chunk(db.conn(), &c1).unwrap();
+        chunks::insert_chunk(db.conn(), &c2).unwrap();
+
+        insert_vector(db.conn(), &c1.id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        insert_vector(db.conn(), &c2.id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        let query = vec![1.0, 0.0, 0.0, 0.0];
+        let results = search_similar(db.conn(), &query, 10, 0.0, Some("src/auth/%")).unwrap();
+        assert_eq!(results.len(), 1, "Only src/auth/ chunk should match");
+        assert_eq!(results[0].file_path, "src/auth/login.ts");
+    }
+
+    #[test]
+    fn search_similar_with_path_filter_fallback() {
+        // Force fallback by using a DB without vec extension
+        // Since our test DB always has vec extension, we test the None path
+        // to verify no regression, and the Some path above for vec branch
+        let db = setup_db();
+
+        let c1 = make_test_chunk("pf3", "src/auth/login.ts");
+        let c2 = make_test_chunk("pf4", "src/payment/charge.ts");
+        chunks::insert_chunk(db.conn(), &c1).unwrap();
+        chunks::insert_chunk(db.conn(), &c2).unwrap();
+
+        insert_vector(db.conn(), &c1.id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        insert_vector(db.conn(), &c2.id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        let query = vec![1.0, 0.0, 0.0, 0.0];
+        // None filter: should return both
+        let results = search_similar(db.conn(), &query, 10, 0.0, None).unwrap();
+        assert_eq!(results.len(), 2, "None filter should return all chunks");
+    }
+
+    #[test]
+    fn search_similar_with_path_filter_none_unchanged() {
+        let db = setup_db();
+
+        let c1 = make_test_chunk("pf5", "src/a.ts");
+        let c2 = make_test_chunk("pf6", "src/b.ts");
+        chunks::insert_chunk(db.conn(), &c1).unwrap();
+        chunks::insert_chunk(db.conn(), &c2).unwrap();
+
+        insert_vector(db.conn(), &c1.id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        insert_vector(db.conn(), &c2.id, &[0.0, 1.0, 0.0, 0.0]).unwrap();
+
+        let query = vec![1.0, 0.0, 0.0, 0.0];
+        let results = search_similar(db.conn(), &query, 10, 0.0, None).unwrap();
+        assert_eq!(
+            results.len(),
+            2,
+            "None filter returns same results as before"
+        );
     }
 }

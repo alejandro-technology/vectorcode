@@ -116,7 +116,7 @@ fn mcp_initialize_returns_server_info() {
 }
 
 #[test]
-fn mcp_tools_list_returns_four_tools() {
+fn mcp_tools_list_returns_five_tools() {
     let dir = tempfile::tempdir().unwrap();
     init_project(dir.path());
     let mut child = spawn_mcp_server(dir.path());
@@ -130,13 +130,14 @@ fn mcp_tools_list_returns_four_tools() {
     assert_eq!(parsed["id"], 2);
 
     let tools = parsed["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 4);
+    assert_eq!(tools.len(), 5);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"vec_search"));
     assert!(names.contains(&"vec_status"));
     assert!(names.contains(&"vec_reindex"));
     assert!(names.contains(&"vec_read_lines"));
+    assert!(names.contains(&"vec_outline"));
 
     child.stdin.take().unwrap();
     let _ = child.wait();
@@ -168,6 +169,28 @@ fn mcp_vec_status_returns_index_info() {
 }
 
 #[test]
+fn mcp_initialize_instructions_warn_against_sequential_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path());
+    let mut child = spawn_mcp_server(dir.path());
+
+    let request = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}"#;
+    let response = send_and_receive(&mut child, request);
+
+    let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+    let instructions = parsed["result"]["instructions"]
+        .as_str()
+        .expect("instructions should be present");
+    assert!(
+        instructions.contains("vec_read_lines") && instructions.contains("sequentially"),
+        "Server instructions should warn against sequential vec_read_lines calls"
+    );
+
+    child.stdin.take().unwrap();
+    let _ = child.wait();
+}
+
+#[test]
 fn mcp_closes_cleanly_on_stdin_eof() {
     let dir = tempfile::tempdir().unwrap();
     init_project(dir.path());
@@ -179,4 +202,70 @@ fn mcp_closes_cleanly_on_stdin_eof() {
 
     child.stdin.take().unwrap();
     let _status = child.wait().unwrap();
+}
+
+/// Helper: call an MCP tool and return the parsed response.
+fn call_mcp_tool(
+    child: &mut std::process::Child,
+    tool_name: &str,
+    arguments: &str,
+    id: i64,
+) -> serde_json::Value {
+    let request = format!(
+        r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{{"name":"{}","arguments":{}}}}}"#,
+        id, tool_name, arguments
+    );
+    let response = send_and_receive(child, &request);
+    serde_json::from_str(&response).unwrap()
+}
+
+#[test]
+fn mcp_vec_outline_rejects_path_outside_project() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path());
+    let mut child = spawn_mcp_server(dir.path());
+    initialize_mcp(&mut child, dir.path());
+
+    let parsed = call_mcp_tool(
+        &mut child,
+        "vec_outline",
+        r#"{"file_path":"../../etc/passwd"}"#,
+        10,
+    );
+
+    // Should have an error in the response
+    let content = parsed["result"]["content"].as_array().unwrap();
+    let text = content[0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("not found") || text.contains("Access denied") || text.contains("error"),
+        "Should reject path outside project, got: {text}"
+    );
+
+    child.stdin.take().unwrap();
+    let _ = child.wait();
+}
+
+#[test]
+fn mcp_vec_outline_file_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path());
+    let mut child = spawn_mcp_server(dir.path());
+    initialize_mcp(&mut child, dir.path());
+
+    let parsed = call_mcp_tool(
+        &mut child,
+        "vec_outline",
+        r#"{"file_path":"nonexistent_file.rs"}"#,
+        11,
+    );
+
+    let content = parsed["result"]["content"].as_array().unwrap();
+    let text = content[0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("not found") || text.contains("File not found"),
+        "Should return file not found error, got: {text}"
+    );
+
+    child.stdin.take().unwrap();
+    let _ = child.wait();
 }

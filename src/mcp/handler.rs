@@ -7,6 +7,8 @@ use serde::Deserialize;
 use tracing::error;
 
 use crate::engine::indexer::Indexer;
+use crate::engine::languages::SupportedLanguage;
+use crate::engine::outliner;
 use crate::engine::searcher::{SearchOptions, Searcher};
 use crate::mcp::{AppInnerState, AppState};
 use crate::store::meta;
@@ -84,6 +86,12 @@ pub struct VecReadLinesParams {
     pub start_line: usize,
     /// The ending line number (1-indexed, inclusive)
     pub end_line: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct VecOutlineParams {
+    /// The file path to outline (relative to project root)
+    pub file_path: String,
 }
 
 #[tool_router]
@@ -272,6 +280,74 @@ impl McpHandler {
         ))
     }
 
+    #[tool(
+        name = "vec_outline",
+        description = "Get a structural outline of a source file — top-level functions, \
+                       classes, structs, interfaces, and traits with their signatures. \
+                       Useful for understanding file structure without reading the entire file.",
+        annotations(read_only_hint = true)
+    )]
+    async fn vec_outline(&self, params: Parameters<VecOutlineParams>) -> Result<String, String> {
+        let p = params.0;
+        let inner_state = self.get_inner_state().await?;
+        let requested_path = inner_state.project_path.join(&p.file_path);
+
+        // Canonicalize to resolve any ../ and follow symlinks
+        let canonical =
+            match tokio::task::spawn_blocking(move || std::fs::canonicalize(&requested_path)).await
+            {
+                Ok(Ok(c)) => c,
+                _ => return Err(format!("File not found or invalid: {}", p.file_path)),
+            };
+
+        let canonical_project = std::fs::canonicalize(&inner_state.project_path)
+            .unwrap_or_else(|_| inner_state.project_path.clone());
+
+        if !canonical.starts_with(&canonical_project) {
+            return Err("Access denied: Path is outside of project bounds.".to_string());
+        }
+
+        let metadata = tokio::fs::metadata(&canonical)
+            .await
+            .map_err(|e| format!("Failed to get file metadata: {e}"))?;
+        if metadata.len() > 2 * 1024 * 1024 {
+            return Err("Access denied: File size exceeds the maximum limit of 2MB.".to_string());
+        }
+
+        let source = tokio::fs::read_to_string(&canonical)
+            .await
+            .map_err(|e| format!("Failed to read file: {e}"))?;
+
+        let ext = canonical.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let language = SupportedLanguage::from_extension(ext);
+
+        let items = outliner::outline_file(&source, &p.file_path, language);
+
+        if items.is_empty() {
+            return Ok(format!(
+                "No outline items found for {} (language: {}). \
+                 The file may be empty, unsupported, or contain no top-level symbols.",
+                p.file_path,
+                language.as_str()
+            ));
+        }
+
+        let mut output = format!("Outline of {} ({} items):\n\n", p.file_path, items.len());
+        for item in &items {
+            let vis = item
+                .visibility
+                .as_deref()
+                .map(|v| format!("{v} "))
+                .unwrap_or_default();
+            output.push_str(&format!(
+                "  L{:<5} {}{} {}\n",
+                item.start_line, vis, item.kind, item.signature
+            ));
+        }
+
+        Ok(output)
+    }
+
     pub fn new(state: AppState) -> Self {
         Self {
             state,
@@ -302,7 +378,10 @@ impl ServerHandler for McpHandler {
                                 IMPORTANT: Do not use generic file reading tools to read entire files \
                                 discovered via vec_search. Rely on the snippets returned. \
                                 If you need more surrounding context, use the `vec_read_lines` tool \
-                                to fetch only the specific lines you need.".to_string()),
+                                to fetch only the specific lines you need. \
+                                Don't call `vec_read_lines` sequentially (e.g., 1-100, 100-200) to \
+                                reconstruct an entire file. Use `vec_search` to find relevant code, then \
+                                read only the specific lines you need.".to_string()),
         }
     }
 

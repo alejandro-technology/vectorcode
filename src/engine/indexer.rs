@@ -871,9 +871,14 @@ def filter_active_users(users: list) -> list:
 
         // Each chunk should have a corresponding vector
         for chunk in &ts_chunks {
-            let results =
-                vectors::search_similar(indexer.db.lock().await.conn(), &[0.0; 64], 100, -1.0)
-                    .unwrap();
+            let results = vectors::search_similar(
+                indexer.db.lock().await.conn(),
+                &[0.0; 64],
+                100,
+                -1.0,
+                None,
+            )
+            .unwrap();
             let found = results.iter().any(|r| r.file_path == chunk.file_path);
             assert!(found, "Chunk {} should have a stored vector", chunk.id);
         }

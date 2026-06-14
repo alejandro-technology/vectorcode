@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::schemars::JsonSchema;
@@ -32,7 +30,13 @@ impl McpHandler {
         let known_root = self.state.known_root.read().await.clone();
         if let Some(root) = known_root {
             if root.join(".vectorcode").exists() {
-                match crate::cli::serve::try_init_workspace(&root, self.state.watch, self.state.debounce).await {
+                match crate::cli::serve::try_init_workspace(
+                    &root,
+                    self.state.watch,
+                    self.state.debounce,
+                )
+                .await
+                {
                     Ok(inner_state) => {
                         *self.state.inner.write().await = Some(inner_state.clone());
                         return Ok(inner_state);
@@ -165,6 +169,9 @@ impl McpHandler {
 
         if p.full {
             let db = inner_state.db.lock().await;
+            if let Err(e) = db.clear_database() {
+                return Err(format!("Failed to clear database: {e}"));
+            }
             if let Err(e) = db.init_schema(inner_state.embedder.dimensions()) {
                 return Err(format!("Failed to reinitialize schema: {e}"));
             }
@@ -306,7 +313,7 @@ impl ServerHandler for McpHandler {
         let state = self.state.clone();
         async move {
             tracing::info!("client initialized, fetching roots...");
-            
+
             // We must spawn a background task to fetch roots. Otherwise, waiting for the
             // client's response blocks the MCP message loop and causes a deadlock.
             tokio::spawn(async move {
@@ -343,13 +350,26 @@ impl ServerHandler for McpHandler {
                     if let Some(project_path) = chosen_root {
                         *state.known_root.write().await = Some(project_path.clone());
                         if project_path.join(".vectorcode").exists() {
-                            tracing::info!("Found initialized vectorcode workspace at {}", project_path.display());
-                            match crate::cli::serve::try_init_workspace(&project_path, state.watch, state.debounce).await {
+                            tracing::info!(
+                                "Found initialized vectorcode workspace at {}",
+                                project_path.display()
+                            );
+                            match crate::cli::serve::try_init_workspace(
+                                &project_path,
+                                state.watch,
+                                state.debounce,
+                            )
+                            .await
+                            {
                                 Ok(inner) => {
                                     *state.inner.write().await = Some(inner);
                                 }
                                 Err(e) => {
-                                    tracing::error!("Failed to initialize workspace from root {}: {}", project_path.display(), e);
+                                    tracing::error!(
+                                        "Failed to initialize workspace from root {}: {}",
+                                        project_path.display(),
+                                        e
+                                    );
                                 }
                             }
                         } else {

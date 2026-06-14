@@ -124,6 +124,10 @@ pub fn resolve_project_path(cli_path: Option<&PathBuf>) -> PathBuf {
 /// For API providers: reads API keys from config (which already has env overrides applied).
 /// Falls back to MockEmbedder for testing when real providers aren't available.
 pub async fn create_embedder_from_config(config: &Config) -> Result<Arc<dyn Embedder>> {
+    config
+        .validate()
+        .map_err(|e| anyhow::anyhow!("Configuration error: {}", e))?;
+
     match config.provider.name.as_str() {
         "onnx" => {
             let embedder = crate::embedder::onnx::OnnxEmbedder::from_cache_with_timeout()

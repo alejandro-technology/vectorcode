@@ -180,7 +180,7 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
     }
 
     let watch_arg = !args.no_watch;
-    
+
     // We start uninitialized. The MCP handler will attempt to discover the workspace
     // root during `initialize` or when the first tool is called.
     let state = AppState {
@@ -466,8 +466,6 @@ mod tests {
         let err = result.unwrap_err().to_string();
         assert!(err.contains("--mcp"), "Got: {err}");
     }
-
-
 
     #[test]
     fn serve_fails_with_gemini_no_api_key() {

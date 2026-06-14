@@ -204,4 +204,64 @@ default_limit = 25
         // Cleanup
         std::env::remove_var("VECTORCODE_PROVIDER");
     }
+
+    #[test]
+    fn config_validation_rejects_invalid_values() {
+        let mut cfg = Config::default();
+
+        cfg.indexing.concurrency = 0;
+        assert!(cfg.validate().is_err());
+        cfg.indexing.concurrency = 8;
+
+        cfg.indexing.max_file_size = 0;
+        assert!(cfg.validate().is_err());
+        cfg.indexing.max_file_size = 1000;
+
+        cfg.search.default_limit = 0;
+        assert!(cfg.validate().is_err());
+        cfg.search.default_limit = 10;
+
+        cfg.search.default_threshold = -0.5;
+        assert!(cfg.validate().is_err());
+        cfg.search.default_threshold = 1.5;
+        assert!(cfg.validate().is_err());
+        cfg.search.default_threshold = 0.3;
+
+        cfg.provider.name = "invalid".to_string();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn config_validation_rejects_missing_gemini_key() {
+        let mut cfg = Config::default();
+        cfg.provider.name = "gemini".to_string();
+
+        // No gemini config section
+        cfg.provider.gemini = None;
+        assert!(cfg.validate().is_err());
+
+        // Empty key
+        cfg.provider.gemini = Some(GeminiConfig {
+            api_key: "".to_string(),
+            model: "gemini-embedding-001".to_string(),
+            dimensions: 768,
+        });
+        assert!(cfg.validate().is_err());
+
+        // Placeholder key
+        cfg.provider.gemini = Some(GeminiConfig {
+            api_key: "your-api-key".to_string(),
+            model: "gemini-embedding-001".to_string(),
+            dimensions: 768,
+        });
+        assert!(cfg.validate().is_err());
+
+        // Valid key
+        cfg.provider.gemini = Some(GeminiConfig {
+            api_key: "real-key".to_string(),
+            model: "gemini-embedding-001".to_string(),
+            dimensions: 768,
+        });
+        assert!(cfg.validate().is_ok());
+    }
 }

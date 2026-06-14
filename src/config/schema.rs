@@ -62,6 +62,74 @@ impl Config {
             }
         }
     }
+
+    /// Validate configuration bounds and requirements.
+    pub fn validate(&self) -> Result<(), String> {
+        let valid_providers = ["onnx", "gemini", "ollama", "openai", "mock"];
+        if !valid_providers.contains(&self.provider.name.as_str()) {
+            return Err(format!("Unknown provider: {}", self.provider.name));
+        }
+
+        if self.indexing.max_file_size == 0 {
+            return Err("max_file_size must be greater than 0".to_string());
+        }
+
+        if self.indexing.concurrency == 0 {
+            return Err("concurrency must be greater than 0".to_string());
+        }
+
+        if self.watcher.debounce_ms == 0 {
+            return Err("watcher debounce_ms must be greater than 0".to_string());
+        }
+
+        if self.search.default_limit == 0 {
+            return Err("search default_limit must be greater than 0".to_string());
+        }
+
+        if self.search.default_threshold < 0.0 || self.search.default_threshold > 1.0 {
+            return Err(format!(
+                "search default_threshold must be between 0.0 and 1.0, got {}",
+                self.search.default_threshold
+            ));
+        }
+
+        // Validate active provider specific fields
+        match self.provider.name.as_str() {
+            "gemini" => {
+                if let Some(gemini) = &self.provider.gemini {
+                    if gemini.api_key.trim().is_empty() || gemini.api_key == "your-api-key" {
+                        return Err("Gemini API key is empty or not configured".to_string());
+                    }
+                    if gemini.dimensions == 0 {
+                        return Err("Gemini dimensions must be greater than 0".to_string());
+                    }
+                } else {
+                    return Err("Gemini config section is missing".to_string());
+                }
+            }
+            "openai" => {
+                if let Some(openai) = &self.provider.openai {
+                    if openai.api_key.trim().is_empty() || openai.api_key == "your-api-key" {
+                        return Err("OpenAI API key is empty or not configured".to_string());
+                    }
+                } else {
+                    return Err("OpenAI config section is missing".to_string());
+                }
+            }
+            "ollama" => {
+                if let Some(ollama) = &self.provider.ollama {
+                    if ollama.url.trim().is_empty() {
+                        return Err("Ollama URL is empty".to_string());
+                    }
+                } else {
+                    return Err("Ollama config section is missing".to_string());
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
 }
 
 /// Provider selection and per-provider settings.

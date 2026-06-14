@@ -7,7 +7,8 @@ use crate::VectorCodeError;
 
 /// Check if sqlite-vec extension is available for this connection.
 pub fn has_vec_extension(conn: &Connection) -> bool {
-    conn.prepare("SELECT vec_version()").is_ok()
+    static HAS_VEC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HAS_VEC.get_or_init(|| conn.prepare("SELECT vec_version()").is_ok())
 }
 
 /// Convert an f32 embedding to a little-endian binary blob for sqlite-vec.
@@ -145,50 +146,54 @@ pub fn search_similar(
         let normalized = normalize_embedding(query_vec, dims);
         let query_blob = embedding_to_blob(&normalized);
 
-        // Step 1: Query vec_chunks to get rowids and distances
+        // Unified query: KNN search joined with chunk_vec_map and chunks in one go
         let mut stmt = conn.prepare(
-            "SELECT rowid, distance FROM vec_chunks \
-            WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2",
+            "SELECT c.id, c.file_path, c.start_line, c.end_line, c.byte_start, c.byte_end, \
+                    c.symbol, c.kind, c.content, c.parent_context, c.language, c.file_mtime, \
+                    c.content_hash, v.distance \
+             FROM ( \
+                 SELECT rowid, distance FROM vec_chunks \
+                 WHERE embedding MATCH ?1 \
+                 ORDER BY distance LIMIT ?2 \
+             ) v \
+             JOIN chunk_vec_map m ON m.vec_rowid = v.rowid \
+             JOIN chunks c ON c.id = m.chunk_id",
         )?;
-        let vec_results: Vec<(i64, f32)> = stmt
-            .query_map(rusqlite::params![query_blob, limit as i64], |row| {
-                let rowid: i64 = row.get(0)?;
-                // distance may be NULL for zero vectors (cosine undefined)
-                let distance: Option<f32> = row.get(1)?;
-                Ok((rowid, distance.unwrap_or(1.0))) // Treat NULL as max distance (similarity=0)
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
 
-        // Step 2: For each result, look up chunk_id from chunk_vec_map
         let mut results = Vec::new();
-        for (rowid, distance) in vec_results {
+        let rows = stmt.query_map(rusqlite::params![query_blob, limit as i64], |row| {
+            let file_path: String = row.get(1)?;
+            let start_line: u32 = row.get(2)?;
+            let end_line: u32 = row.get(3)?;
+            let symbol: Option<String> = row.get(6)?;
+            let kind: String = row.get(7)?;
+            let content: String = row.get(8)?;
+            let parent_context: Option<String> = row.get(9)?;
+            let language: String = row.get(10)?;
+            let distance: Option<f32> = row.get(13)?;
+
+            Ok((
+                SearchResult {
+                    file_path,
+                    start_line,
+                    end_line,
+                    symbol,
+                    kind,
+                    language,
+                    parent_context,
+                    content,
+                    score: 0.0, // Will be computed below
+                },
+                distance.unwrap_or(1.0),
+            ))
+        })?;
+
+        for r in rows {
+            let (mut search_res, distance) = r?;
             let score = 1.0 - distance;
-            if score < threshold {
-                continue;
-            }
-
-            let chunk_id: Option<String> = conn
-                .query_row(
-                    "SELECT chunk_id FROM chunk_vec_map WHERE vec_rowid = ?1",
-                    [rowid],
-                    |row| row.get(0),
-                )
-                .ok();
-
-            if let Some(chunk_id) = chunk_id {
-                if let Some(chunk) = chunks::get_chunk(conn, &chunk_id)? {
-                    results.push(SearchResult {
-                        file_path: chunk.file_path,
-                        start_line: chunk.start_line,
-                        end_line: chunk.end_line,
-                        symbol: chunk.symbol,
-                        kind: chunk.kind,
-                        language: chunk.language,
-                        parent_context: chunk.parent_context,
-                        content: chunk.content,
-                        score,
-                    });
-                }
+            if score >= threshold {
+                search_res.score = score;
+                results.push(search_res);
             }
         }
 

@@ -53,14 +53,18 @@ fn initialize_mcp(child: &mut std::process::Child, dir: &std::path::Path) {
     let stdout = child.stdout.as_mut().unwrap();
     let mut reader = BufReader::new(stdout);
     let mut request_str = String::new();
-    reader.read_line(&mut request_str).unwrap(); eprintln!("READ: {}", request_str);
-    
+    reader.read_line(&mut request_str).unwrap();
+    eprintln!("READ: {}", request_str);
+
     // Parse the request to get the ID
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&request_str) {
         if parsed["method"] == "roots/list" {
             let id = parsed["id"].as_i64().unwrap();
             let uri = format!("file://{}", dir.display());
-            let reply = format!(r#"{{"jsonrpc":"2.0","id":{},"result":{{"roots":[{{"uri":"{}"}}]}}}}"#, id, uri);
+            let reply = format!(
+                r#"{{"jsonrpc":"2.0","id":{},"result":{{"roots":[{{"uri":"{}"}}]}}}}"#,
+                id, uri
+            );
             send_notification(child, &reply);
         }
     }

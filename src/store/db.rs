@@ -59,6 +59,7 @@ impl Database {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
         Ok(Self { conn })
     }
 
@@ -66,6 +67,7 @@ impl Database {
     pub fn open_in_memory() -> Result<Self, VectorCodeError> {
         register_sqlite_vec();
         let conn = Connection::open_in_memory()?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
         Ok(Self { conn })
     }
 
@@ -207,7 +209,7 @@ impl Database {
         drop(select_stmt);
 
         // Wrap all mutations in a transaction for atomicity
-        let mut tx = self.conn.unchecked_transaction()?;
+        let tx = self.conn.unchecked_transaction()?;
 
         for (chunk_id, embedding_json) in rows {
             let embedding: Vec<f32> = match serde_json::from_str(&embedding_json) {
@@ -259,6 +261,22 @@ impl Database {
     /// Get a mutable reference to the underlying connection.
     pub fn conn_mut(&mut self) -> &mut Connection {
         &mut self.conn
+    }
+
+    /// Clear all data from the database.
+    pub fn clear_database(&self) -> Result<(), VectorCodeError> {
+        let tx = self.conn.unchecked_transaction()?;
+        if crate::store::vectors::has_vec_extension(&tx) {
+            tx.execute("DELETE FROM vec_chunks", [])?;
+            tx.execute("DELETE FROM chunk_vec_map", [])?;
+        } else {
+            tx.execute("DELETE FROM vectors_data", [])?;
+        }
+        tx.execute("DELETE FROM chunks", [])?;
+        tx.execute("DELETE FROM files", [])?;
+        tx.execute("DELETE FROM meta", [])?;
+        tx.commit()?;
+        Ok(())
     }
 }
 
@@ -733,5 +751,51 @@ mod tests {
             distance.abs() < 0.01,
             "Cosine distance of identical vectors should be ~0.0, got {distance}"
         );
+    }
+
+    #[test]
+    fn clear_database_removes_all_data() {
+        let db = Database::open_in_memory().unwrap();
+        db.init_schema(4).unwrap();
+
+        // Insert some metadata
+        db.conn()
+            .execute(
+                "INSERT INTO meta (key, value) VALUES ('test_key', 'test_value')",
+                [],
+            )
+            .unwrap();
+
+        // Insert some chunks
+        db.conn()
+            .execute(
+                "INSERT INTO chunks (id, file_path, start_line, end_line, byte_start, byte_end, content, language, kind, file_mtime, content_hash) \
+                 VALUES ('chunk_1', 'file.rs', 1, 5, 0, 10, 'content', 'rust', 'line_block', 0, '')",
+                [],
+            )
+            .unwrap();
+
+        // Verify data exists
+        let chunk_count: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(chunk_count, 1);
+
+        // Clear database
+        db.clear_database().unwrap();
+
+        // Verify all tables are empty
+        let chunk_count: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(chunk_count, 0);
+
+        let meta_count: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM meta", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(meta_count, 0);
     }
 }

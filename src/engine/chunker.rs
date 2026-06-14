@@ -89,6 +89,10 @@ fn chunkable_node_types(language: SupportedLanguage) -> &'static [&'static str] 
     }
 }
 
+thread_local! {
+    static THREAD_PARSER: std::cell::RefCell<Parser> = std::cell::RefCell::new(Parser::new());
+}
+
 /// Chunk a source file into semantic units.
 pub fn chunk_file(source: &str, file_path: &str, language: SupportedLanguage) -> Vec<Chunk> {
     let ts_language = match language.tree_sitter_language() {
@@ -96,12 +100,15 @@ pub fn chunk_file(source: &str, file_path: &str, language: SupportedLanguage) ->
         None => return line_based_chunks(source, file_path, language),
     };
 
-    let mut parser = Parser::new();
-    if parser.set_language(&ts_language).is_err() {
-        return line_based_chunks(source, file_path, language);
-    }
+    let parse_res = THREAD_PARSER.with(|parser_cell| {
+        let mut parser = parser_cell.borrow_mut();
+        if parser.set_language(&ts_language).is_err() {
+            return None;
+        }
+        parser.parse(source, None)
+    });
 
-    let tree = match parser.parse(source, None) {
+    let tree = match parse_res {
         Some(tree) => tree,
         None => return line_based_chunks(source, file_path, language),
     };
@@ -113,6 +120,12 @@ pub fn chunk_file(source: &str, file_path: &str, language: SupportedLanguage) ->
     for child in root.children(&mut root.walk()) {
         if chunkable_types.contains(&child.kind()) {
             let node_source = &source[child.byte_range()];
+
+            // Skip empty/whitespace-only nodes
+            if node_source.trim().is_empty() {
+                continue;
+            }
+
             let size = node_source.len();
 
             if size < MIN_CHUNK_SIZE {
@@ -235,6 +248,12 @@ fn split_large_node(
     for child in node.children(&mut cursor) {
         if chunkable_types.contains(&child.kind()) {
             let child_source = &source[child.byte_range()];
+
+            // Skip empty/whitespace-only nodes
+            if child_source.trim().is_empty() {
+                continue;
+            }
+
             if child_source.len() <= MAX_CHUNK_SIZE {
                 chunks.push(make_chunk(
                     &child,
@@ -276,7 +295,12 @@ fn split_large_node(
             let chunk_content = lines[i..end].join("\n");
             if chunk_content.len() >= MIN_CHUNK_SIZE {
                 let byte_start = (node.start_byte() + line_offsets[i]) as u32;
-                let byte_end = (node.start_byte() + (if end < lines.len() { line_offsets[end] } else { node_source.len() })) as u32;
+                let byte_end = (node.start_byte()
+                    + (if end < lines.len() {
+                        line_offsets[end]
+                    } else {
+                        node_source.len()
+                    })) as u32;
                 let content_hash = compute_content_hash(&chunk_content);
                 chunks.push(Chunk {
                     id: compute_chunk_id(file_path, byte_start, byte_end),
@@ -328,7 +352,11 @@ fn line_based_chunks(source: &str, file_path: &str, language: SupportedLanguage)
 
         if !chunk_content.trim().is_empty() {
             let byte_start = line_offsets[i] as u32;
-            let byte_end = (if end < lines.len() { line_offsets[end] } else { source.len() }) as u32;
+            let byte_end = (if end < lines.len() {
+                line_offsets[end]
+            } else {
+                source.len()
+            }) as u32;
             let content_hash = compute_content_hash(&chunk_content);
 
             chunks.push(Chunk {
@@ -837,9 +865,10 @@ object CalculatorFactory {
         for i in 0..100 {
             large_source.push_str(&format!("line_{}\n", i));
         }
-        let chunks_large = line_based_chunks(&large_source, "large.txt", SupportedLanguage::Unknown);
+        let chunks_large =
+            line_based_chunks(&large_source, "large.txt", SupportedLanguage::Unknown);
         assert!(chunks_large.len() > 1);
-        
+
         // Verify that all chunk IDs are unique
         let mut ids = std::collections::HashSet::new();
         for chunk in &chunks_large {
@@ -851,7 +880,8 @@ object CalculatorFactory {
 
         // Test carriage returns
         let source_crlf = "line1\r\nline2\r\nline3\r\nline4\r\nline5";
-        let chunks_crlf = line_based_chunks(source_crlf, "test_crlf.txt", SupportedLanguage::Unknown);
+        let chunks_crlf =
+            line_based_chunks(source_crlf, "test_crlf.txt", SupportedLanguage::Unknown);
         assert!(!chunks_crlf.is_empty());
         assert_eq!(chunks_crlf[0].byte_start, 0);
         assert_eq!(chunks_crlf[0].byte_end, source_crlf.len() as u32);

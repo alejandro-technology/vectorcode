@@ -78,6 +78,10 @@ impl Config {
             return Err("concurrency must be greater than 0".to_string());
         }
 
+        if self.indexing.chunk_overlap >= 50 {
+            return Err("chunk_overlap must be less than 50".to_string());
+        }
+
         if self.watcher.debounce_ms == 0 {
             return Err("watcher debounce_ms must be greater than 0".to_string());
         }
@@ -236,6 +240,8 @@ pub struct IndexingConfig {
     pub exclude_extensions: Vec<String>,
     /// Max concurrent file processing tasks.
     pub concurrency: usize,
+    /// Line overlap for chunking.
+    pub chunk_overlap: usize,
 }
 
 impl Default for IndexingConfig {
@@ -266,6 +272,7 @@ impl Default for IndexingConfig {
                 ".ttf".into(),
             ],
             concurrency: 8,
+            chunk_overlap: 10,
         }
     }
 }

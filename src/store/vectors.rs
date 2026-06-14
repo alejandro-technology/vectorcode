@@ -13,7 +13,7 @@ pub fn has_vec_extension(conn: &Connection) -> bool {
 
 /// Convert an f32 embedding to a little-endian binary blob for sqlite-vec.
 fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
-    embedding.iter().flat_map(|f| f.to_le_bytes()).collect()
+    bytemuck::cast_slice(embedding).to_vec()
 }
 
 /// Normalize embedding to target dimensions by padding with zeros or truncating.

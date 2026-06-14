@@ -17,6 +17,19 @@ pub fn load_config(project_path: &std::path::Path) -> Result<Config> {
         Config::default()
     };
 
+    if let Some(gemini) = &config.provider.gemini {
+        let key = gemini.api_key.trim();
+        if !key.is_empty() && key != "your-api-key" {
+            eprintln!("Warning: Gemini API key is configured in the config file. For security reasons, please use the GEMINI_API_KEY environment variable instead.");
+        }
+    }
+    if let Some(openai) = &config.provider.openai {
+        let key = openai.api_key.trim();
+        if !key.is_empty() && key != "your-api-key" {
+            eprintln!("Warning: OpenAI API key is configured in the config file. For security reasons, please use the OPENAI_API_KEY environment variable instead.");
+        }
+    }
+
     // Apply environment variable overrides
     config.apply_env_overrides();
 
@@ -36,6 +49,7 @@ mod tests {
         assert_eq!(cfg.provider.name, "onnx");
         assert_eq!(cfg.indexing.max_file_size, 1_048_576);
         assert_eq!(cfg.indexing.concurrency, 8);
+        assert_eq!(cfg.indexing.chunk_overlap, 10);
         assert_eq!(cfg.watcher.debounce_ms, 2000);
         assert!(!cfg.watcher.disabled);
         assert_eq!(cfg.search.default_limit, 10);
@@ -228,6 +242,10 @@ default_limit = 25
         cfg.search.default_threshold = 0.3;
 
         cfg.provider.name = "invalid".to_string();
+        assert!(cfg.validate().is_err());
+        cfg.provider.name = "onnx".to_string();
+
+        cfg.indexing.chunk_overlap = 50;
         assert!(cfg.validate().is_err());
     }
 

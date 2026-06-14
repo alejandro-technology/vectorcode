@@ -12,9 +12,6 @@ const MAX_CHUNK_SIZE: usize = 2000;
 /// Line-based chunking window size (number of lines).
 const LINE_WINDOW_SIZE: usize = 50;
 
-/// Line-based chunking overlap (number of lines).
-const LINE_OVERLAP: usize = 10;
-
 /// Chunkable AST node types per language.
 fn chunkable_node_types(language: SupportedLanguage) -> &'static [&'static str] {
     match language {
@@ -95,9 +92,19 @@ thread_local! {
 
 /// Chunk a source file into semantic units.
 pub fn chunk_file(source: &str, file_path: &str, language: SupportedLanguage) -> Vec<Chunk> {
+    chunk_file_with_overlap(source, file_path, language, 10)
+}
+
+/// Chunk a source file into semantic units with a custom line overlap.
+pub fn chunk_file_with_overlap(
+    source: &str,
+    file_path: &str,
+    language: SupportedLanguage,
+    overlap: usize,
+) -> Vec<Chunk> {
     let ts_language = match language.tree_sitter_language() {
         Some(lang) => lang,
-        None => return line_based_chunks(source, file_path, language),
+        None => return line_based_chunks(source, file_path, language, overlap),
     };
 
     let parse_res = THREAD_PARSER.with(|parser_cell| {
@@ -110,7 +117,7 @@ pub fn chunk_file(source: &str, file_path: &str, language: SupportedLanguage) ->
 
     let tree = match parse_res {
         Some(tree) => tree,
-        None => return line_based_chunks(source, file_path, language),
+        None => return line_based_chunks(source, file_path, language, overlap),
     };
 
     let chunkable_types = chunkable_node_types(language);
@@ -133,15 +140,21 @@ pub fn chunk_file(source: &str, file_path: &str, language: SupportedLanguage) ->
             } else if size <= MAX_CHUNK_SIZE {
                 chunks.push(make_chunk(&child, source, file_path, language, None));
             } else {
-                let sub_chunks =
-                    split_large_node(&child, source, file_path, language, chunkable_types);
+                let sub_chunks = split_large_node(
+                    &child,
+                    source,
+                    file_path,
+                    language,
+                    chunkable_types,
+                    overlap,
+                );
                 chunks.extend(sub_chunks);
             }
         }
     }
 
     if chunks.is_empty() {
-        line_based_chunks(source, file_path, language)
+        line_based_chunks(source, file_path, language, overlap)
     } else {
         chunks
     }
@@ -188,6 +201,18 @@ fn extract_symbol(node: &tree_sitter::Node, source: &str) -> Option<String> {
         for child in node.children(&mut cursor) {
             if let Some(sym) = extract_symbol(&child, source) {
                 return Some(sym);
+            }
+        }
+        return None;
+    }
+
+    if node.kind() == "decorated_definition" {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "function_definition" || child.kind() == "class_definition" {
+                if let Some(sym) = extract_symbol(&child, source) {
+                    return Some(sym);
+                }
             }
         }
         return None;
@@ -240,6 +265,7 @@ fn split_large_node(
     file_path: &str,
     language: SupportedLanguage,
     chunkable_types: &[&str],
+    overlap: usize,
 ) -> Vec<Chunk> {
     let mut chunks = Vec::new();
     let parent_context = extract_parent_context(node, source);
@@ -263,8 +289,14 @@ fn split_large_node(
                     parent_context.clone(),
                 ));
             } else {
-                let sub_chunks =
-                    split_large_node(&child, source, file_path, language, chunkable_types);
+                let sub_chunks = split_large_node(
+                    &child,
+                    source,
+                    file_path,
+                    language,
+                    chunkable_types,
+                    overlap,
+                );
                 chunks.extend(sub_chunks);
             }
         }
@@ -318,7 +350,12 @@ fn split_large_node(
                     content_hash,
                 });
             }
-            i += LINE_WINDOW_SIZE - LINE_OVERLAP;
+            let step = if overlap >= LINE_WINDOW_SIZE {
+                1
+            } else {
+                LINE_WINDOW_SIZE - overlap
+            };
+            i += step;
         }
     }
 
@@ -326,7 +363,12 @@ fn split_large_node(
 }
 
 /// Line-based chunking fallback for unsupported languages.
-fn line_based_chunks(source: &str, file_path: &str, language: SupportedLanguage) -> Vec<Chunk> {
+fn line_based_chunks(
+    source: &str,
+    file_path: &str,
+    language: SupportedLanguage,
+    overlap: usize,
+) -> Vec<Chunk> {
     let mut line_offsets = Vec::new();
     let mut current_offset = 0;
     for line in source.lines() {
@@ -379,7 +421,12 @@ fn line_based_chunks(source: &str, file_path: &str, language: SupportedLanguage)
         if end >= lines.len() {
             break;
         }
-        i += LINE_WINDOW_SIZE - LINE_OVERLAP;
+        let step = if overlap >= LINE_WINDOW_SIZE {
+            1
+        } else {
+            LINE_WINDOW_SIZE - overlap
+        };
+        i += step;
     }
 
     chunks
@@ -855,7 +902,7 @@ object CalculatorFactory {
     #[test]
     fn test_line_based_chunks_offsets_and_unique_ids() {
         let source_lf = "line1\nline2\nline3\nline4\nline5";
-        let chunks_lf = line_based_chunks(source_lf, "test_lf.txt", SupportedLanguage::Unknown);
+        let chunks_lf = line_based_chunks(source_lf, "test_lf.txt", SupportedLanguage::Unknown, 10);
         assert!(!chunks_lf.is_empty());
         assert_eq!(chunks_lf[0].byte_start, 0);
         assert_eq!(chunks_lf[0].byte_end, source_lf.len() as u32);
@@ -866,7 +913,7 @@ object CalculatorFactory {
             large_source.push_str(&format!("line_{}\n", i));
         }
         let chunks_large =
-            line_based_chunks(&large_source, "large.txt", SupportedLanguage::Unknown);
+            line_based_chunks(&large_source, "large.txt", SupportedLanguage::Unknown, 10);
         assert!(chunks_large.len() > 1);
 
         // Verify that all chunk IDs are unique
@@ -881,9 +928,44 @@ object CalculatorFactory {
         // Test carriage returns
         let source_crlf = "line1\r\nline2\r\nline3\r\nline4\r\nline5";
         let chunks_crlf =
-            line_based_chunks(source_crlf, "test_crlf.txt", SupportedLanguage::Unknown);
+            line_based_chunks(source_crlf, "test_crlf.txt", SupportedLanguage::Unknown, 10);
         assert!(!chunks_crlf.is_empty());
         assert_eq!(chunks_crlf[0].byte_start, 0);
         assert_eq!(chunks_crlf[0].byte_end, source_crlf.len() as u32);
+    }
+
+    #[test]
+    fn chunk_python_decorated_function() {
+        let source = r#"
+@decorator
+@another(1, 2)
+def calculate_sum(a: int, b: int) -> int:
+    """Calculate the sum of two numbers."""
+    result = a + b
+    print(f"Result: {result}")
+    return result
+"#;
+        let chunks = chunk_file(source, "test.py", SupportedLanguage::Python);
+        assert!(!chunks.is_empty(), "Should produce at least one chunk");
+        assert_eq!(chunks[0].language, "python");
+        assert_eq!(chunks[0].symbol.as_deref(), Some("calculate_sum"));
+    }
+
+    #[test]
+    fn chunk_python_decorated_class() {
+        let source = r#"
+@dataclass
+class Calculator:
+    def __init__(self, initial: int = 0):
+        self.value = initial
+
+    def add(self, n: int) -> int:
+        self.value += n
+        return self.value
+"#;
+        let chunks = chunk_file(source, "calc.py", SupportedLanguage::Python);
+        assert!(!chunks.is_empty(), "Should produce at least one chunk");
+        assert_eq!(chunks[0].language, "python");
+        assert_eq!(chunks[0].symbol.as_deref(), Some("Calculator"));
     }
 }

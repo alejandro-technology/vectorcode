@@ -12,7 +12,7 @@ use tracing::info;
 
 use crate::config::schema::IndexingConfig;
 use crate::embedder::Embedder;
-use crate::engine::chunker::chunk_file;
+use crate::engine::chunker::chunk_file_with_overlap;
 use crate::engine::languages::SupportedLanguage;
 use crate::store::db::Database;
 use crate::store::{chunks, files, vectors};
@@ -141,14 +141,45 @@ impl Indexer {
         self.report_progress(ProgressEvent::EmbeddingStart(chunks_new));
         if !new_chunks.is_empty() {
             let texts: Vec<String> = new_chunks.iter().map(enrich_chunk_content).collect();
-            let mut embeddings = Vec::with_capacity(new_chunks.len());
-
             let batch_size = 100;
-            for batch in texts.chunks(batch_size) {
-                let text_refs: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
-                let batch_embeddings = self.embedder.embed_batch(&text_refs).await?;
-                embeddings.extend(batch_embeddings);
-                self.report_progress(ProgressEvent::EmbeddedBatch(batch.len()));
+            let chunks_batches: Vec<_> = texts
+                .chunks(batch_size)
+                .map(|chunk| chunk.to_vec())
+                .collect();
+            let num_batches = chunks_batches.len();
+
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.concurrency));
+            let mut join_set = tokio::task::JoinSet::new();
+
+            for (batch_idx, batch_texts) in chunks_batches.into_iter().enumerate() {
+                let embedder = self.embedder.clone();
+                let semaphore = semaphore.clone();
+
+                join_set.spawn(async move {
+                    let _permit = semaphore.acquire().await?;
+                    let text_refs: Vec<&str> = batch_texts.iter().map(|s| s.as_str()).collect();
+                    let batch_embeddings = embedder.embed_batch(&text_refs).await?;
+                    Ok::<_, anyhow::Error>((batch_idx, batch_embeddings))
+                });
+            }
+
+            let mut batch_results = vec![None; num_batches];
+            while let Some(res) = join_set.join_next().await {
+                let (batch_idx, batch_embeddings) = res??;
+                self.report_progress(ProgressEvent::EmbeddedBatch(batch_embeddings.len()));
+                batch_results[batch_idx] = Some(batch_embeddings);
+            }
+
+            let mut embeddings = Vec::with_capacity(new_chunks.len());
+            for opt in batch_results {
+                if let Some(batch_embs) = opt {
+                    embeddings.extend(batch_embs);
+                } else {
+                    return Err(crate::VectorCodeError::EmbedderError {
+                        message: "Missing batch embeddings result".to_string(),
+                    }
+                    .into());
+                }
             }
 
             if new_chunks.len() != embeddings.len() {
@@ -219,14 +250,45 @@ impl Indexer {
         if !new_chunks.is_empty() {
             self.report_progress(ProgressEvent::EmbeddingStart(chunks_new));
             let texts: Vec<String> = new_chunks.iter().map(enrich_chunk_content).collect();
-            let mut embeddings = Vec::with_capacity(new_chunks.len());
-
             let batch_size = 100;
-            for batch in texts.chunks(batch_size) {
-                let text_refs: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
-                let batch_embeddings = self.embedder.embed_batch(&text_refs).await?;
-                embeddings.extend(batch_embeddings);
-                self.report_progress(ProgressEvent::EmbeddedBatch(batch.len()));
+            let chunks_batches: Vec<_> = texts
+                .chunks(batch_size)
+                .map(|chunk| chunk.to_vec())
+                .collect();
+            let num_batches = chunks_batches.len();
+
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.concurrency));
+            let mut join_set = tokio::task::JoinSet::new();
+
+            for (batch_idx, batch_texts) in chunks_batches.into_iter().enumerate() {
+                let embedder = self.embedder.clone();
+                let semaphore = semaphore.clone();
+
+                join_set.spawn(async move {
+                    let _permit = semaphore.acquire().await?;
+                    let text_refs: Vec<&str> = batch_texts.iter().map(|s| s.as_str()).collect();
+                    let batch_embeddings = embedder.embed_batch(&text_refs).await?;
+                    Ok::<_, anyhow::Error>((batch_idx, batch_embeddings))
+                });
+            }
+
+            let mut batch_results = vec![None; num_batches];
+            while let Some(res) = join_set.join_next().await {
+                let (batch_idx, batch_embeddings) = res??;
+                self.report_progress(ProgressEvent::EmbeddedBatch(batch_embeddings.len()));
+                batch_results[batch_idx] = Some(batch_embeddings);
+            }
+
+            let mut embeddings = Vec::with_capacity(new_chunks.len());
+            for opt in batch_results {
+                if let Some(batch_embs) = opt {
+                    embeddings.extend(batch_embs);
+                } else {
+                    return Err(crate::VectorCodeError::EmbedderError {
+                        message: "Missing batch embeddings result".to_string(),
+                    }
+                    .into());
+                }
             }
 
             if new_chunks.len() != embeddings.len() {
@@ -276,115 +338,142 @@ impl Indexer {
         file_paths: &[PathBuf],
         project_path: &Path,
     ) -> Result<(Vec<Chunk>, usize, usize)> {
-        let mut new_chunks: Vec<Chunk> = Vec::new();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.concurrency));
+        let mut join_set = tokio::task::JoinSet::new();
+
+        for file_path in file_paths {
+            let file_path = file_path.clone();
+            let db = self.db.clone();
+            let config = self.config.clone();
+            let project_path = project_path.to_path_buf();
+            let semaphore = semaphore.clone();
+
+            join_set.spawn(async move {
+                let _permit = semaphore.acquire().await?;
+
+                let relative_path = file_path
+                    .strip_prefix(&project_path)
+                    .unwrap_or(&file_path)
+                    .to_string_lossy()
+                    .to_string();
+
+                // Get file metadata
+                let metadata = match tokio::fs::metadata(&file_path).await {
+                    Ok(m) => m,
+                    Err(_) => return Ok::<_, anyhow::Error>((Vec::new(), 0, 0)),
+                };
+
+                // Skip files > max_file_size
+                if metadata.len() > config.max_file_size {
+                    return Ok((Vec::new(), 0, 0));
+                }
+
+                let mtime = metadata
+                    .modified()
+                    .map(|t| {
+                        t.duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64
+                    })
+                    .unwrap_or(0);
+                let size = metadata.len() as i64;
+
+                // Read file content (skip binary/unreadable files)
+                let content = match tokio::fs::read_to_string(&file_path).await {
+                    Ok(c) => c,
+                    Err(_) => return Ok((Vec::new(), 0, 0)),
+                };
+                let content_hash = compute_content_hash(&content);
+
+                // Fast path: check if file is unchanged without long locks
+                {
+                    let db_guard = db.lock().await;
+                    if let Some(file_record) = files::get_file(db_guard.conn(), &relative_path)? {
+                        if file_record.mtime == mtime
+                            && file_record.size == size
+                            && file_record.hash == content_hash
+                        {
+                            // File unchanged — count existing chunks as skipped
+                            let existing_chunks =
+                                chunks::list_chunks_by_file(db_guard.conn(), &relative_path)?;
+                            let chunks_skipped = existing_chunks.len();
+                            return Ok((Vec::new(), 0, chunks_skipped));
+                        }
+                    }
+                }
+
+                // File is new or changed — parse and chunk off the tokio reactor thread
+                let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                let language = SupportedLanguage::from_extension(ext);
+                let content_clone = content.clone();
+                let relative_path_clone = relative_path.clone();
+                let overlap = config.chunk_overlap;
+                let file_chunks = tokio::task::spawn_blocking(move || {
+                    chunk_file_with_overlap(&content_clone, &relative_path_clone, language, overlap)
+                })
+                .await
+                .map_err(|e| crate::error::VectorCodeError::EmbedderError {
+                    message: format!("Task panic: {}", e),
+                })?;
+
+                // Collect new chunk IDs to detect removed chunks
+                let new_chunk_ids: HashSet<String> =
+                    file_chunks.iter().map(|c| c.id.clone()).collect();
+
+                let mut file_new_chunks = Vec::new();
+                let mut chunks_skipped = 0;
+                let mut files_indexed = 0;
+
+                {
+                    let mut db_guard = db.lock().await;
+                    let tx = db_guard.conn_mut().transaction()?;
+
+                    // Get existing chunks for this file
+                    let existing_chunks = chunks::list_chunks_by_file(&tx, &relative_path)?;
+
+                    // Delete old chunks that are no longer present in the file
+                    for old_chunk in &existing_chunks {
+                        if !new_chunk_ids.contains(&old_chunk.id) {
+                            chunks::delete_chunk(&tx, &old_chunk.id)?;
+                        }
+                    }
+
+                    // Filter out chunks that already exist with the same content hash
+                    for mut chunk in file_chunks {
+                        if chunks::chunk_exists_with_hash(&tx, &chunk.id, &chunk.content_hash)? {
+                            chunks_skipped += 1;
+                            continue;
+                        }
+                        chunk.file_mtime = mtime;
+                        file_new_chunks.push(chunk);
+                    }
+
+                    if !file_new_chunks.is_empty() {
+                        files_indexed = 1;
+                    }
+
+                    // Update file record
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    files::upsert_file(&tx, &relative_path, mtime, size, &content_hash, now)?;
+                    tx.commit()?;
+                }
+
+                Ok((file_new_chunks, files_indexed, chunks_skipped))
+            });
+        }
+
+        let mut new_chunks = Vec::new();
         let mut files_indexed = 0;
         let mut chunks_skipped = 0;
 
-        for file_path in file_paths {
-            let relative_path = file_path
-                .strip_prefix(project_path)
-                .unwrap_or(file_path)
-                .to_string_lossy()
-                .to_string();
-
-            // Get file metadata
-            let metadata = match tokio::fs::metadata(file_path).await {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-
-            // Skip files > max_file_size
-            if metadata.len() > self.config.max_file_size {
-                continue;
-            }
-
-            let mtime = metadata
-                .modified()
-                .map(|t| {
-                    t.duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as i64
-                })
-                .unwrap_or(0);
-            let size = metadata.len() as i64;
-
-            // Read file content (skip binary/unreadable files)
-            let content = match tokio::fs::read_to_string(file_path).await {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let content_hash = compute_content_hash(&content);
-
-            // Fast path: check if file is unchanged without long locks
-            {
-                let db_guard = self.db.lock().await;
-                if let Some(file_record) = files::get_file(db_guard.conn(), &relative_path)? {
-                    if file_record.mtime == mtime
-                        && file_record.size == size
-                        && file_record.hash == content_hash
-                    {
-                        // File unchanged — count existing chunks as skipped
-                        let existing_chunks =
-                            chunks::list_chunks_by_file(db_guard.conn(), &relative_path)?;
-                        chunks_skipped += existing_chunks.len();
-                        continue;
-                    }
-                }
-            }
-
-            // File is new or changed — parse and chunk off the tokio reactor thread
-            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let language = SupportedLanguage::from_extension(ext);
-            let content_clone = content.clone();
-            let relative_path_clone = relative_path.clone();
-            let file_chunks = tokio::task::spawn_blocking(move || {
-                chunk_file(&content_clone, &relative_path_clone, language)
-            })
-            .await
-            .map_err(|e| crate::error::VectorCodeError::EmbedderError {
-                message: format!("Task panic: {}", e),
-            })?;
-
-            // Collect new chunk IDs to detect removed chunks
-            let new_chunk_ids: HashSet<String> = file_chunks.iter().map(|c| c.id.clone()).collect();
-
-            let mut db_guard = self.db.lock().await;
-            let tx = db_guard.conn_mut().transaction()?;
-
-            // Get existing chunks for this file
-            let existing_chunks = chunks::list_chunks_by_file(&tx, &relative_path)?;
-
-            // Delete old chunks that are no longer present in the file
-            for old_chunk in &existing_chunks {
-                if !new_chunk_ids.contains(&old_chunk.id) {
-                    chunks::delete_chunk(&tx, &old_chunk.id)?;
-                }
-            }
-
-            // Filter out chunks that already exist with the same content hash
-            let mut file_new_chunks = Vec::new();
-            for mut chunk in file_chunks {
-                if chunks::chunk_exists_with_hash(&tx, &chunk.id, &chunk.content_hash)? {
-                    chunks_skipped += 1;
-                    continue;
-                }
-                chunk.file_mtime = mtime;
-                file_new_chunks.push(chunk);
-            }
-
-            if !file_new_chunks.is_empty() {
-                files_indexed += 1;
-                new_chunks.extend(file_new_chunks);
-            }
-
-            // Update file record
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            files::upsert_file(&tx, &relative_path, mtime, size, &content_hash, now)?;
-            tx.commit()?;
-
+        while let Some(res) = join_set.join_next().await {
+            let (file_chunks, indexed, skipped) = res??;
+            new_chunks.extend(file_chunks);
+            files_indexed += indexed;
+            chunks_skipped += skipped;
             self.report_progress(ProgressEvent::ProcessedFile);
         }
 

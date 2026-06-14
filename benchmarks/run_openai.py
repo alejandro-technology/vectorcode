@@ -1,177 +1,55 @@
-import os, subprocess, json, sys
-from pathlib import Path
+#!/usr/bin/env python3
+"""Run Phase 2 and/or Phase 3 benchmarks using OpenAI models."""
+
+import argparse
+import os
+import sys
+
 from openai import OpenAI
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+from _lib.adapters import OpenAIAdapter
+from _lib.report import PhaseReport, write_phase2_report, write_phase3_report
+from _lib.runner import run_phase
 
-# Opencode supports both /v1/chat/completions and /v1/messages
-# For OpenAI SDK, base_url is typically /v1
-client = OpenAI(api_key=os.environ.get("OPENCODE_API_KEY"), base_url="https://opencode.ai/zen/go/v1")
 
-def _find_vectorcode() -> list[str]:
-    env_bin = os.environ.get("VECTORCODE_BIN")
-    if env_bin:
-        return [env_bin]
-    import shutil
-    if shutil.which("vectorcode"):
-        return ["vectorcode"]
-    return ["cargo", "run", "--quiet", "--"]
-
-def tool_execute_bash(command: str) -> str:
-    print(f"    [Tool] bash: {command}")
-    try:
-        res = subprocess.run(command, cwd=REPO_ROOT, shell=True, capture_output=True, text=True, timeout=15.0)
-        out = res.stdout
-        if res.stderr:
-            out += f"\nSTDERR:\n{res.stderr}"
-        if not out:
-            out = "(Command executed successfully with no output)"
-        return out[:8000] # truncate
-    except Exception as e:
-        return f"Error executing bash: {e}"
-
-def tool_vec_search(query: str) -> str:
-    print(f"    [Tool] vec_search: {query}")
-    cmd = [*_find_vectorcode(), "search", query, "--json", "--limit", "4"]
-    try:
-        res = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, timeout=30.0)
-        return res.stdout[:15000] # Increased truncation limit since chunks are bigger
-    except Exception as e:
-        return f"Error searching: {e}"
-
-def tool_read_file(path: str) -> str:
-    print(f"    [Tool] read_file: {path}")
-    full_path = REPO_ROOT / path
-    try:
-        return full_path.read_text(encoding="utf-8")[:8000]
-    except Exception as e:
-        return f"Error reading file: {e}"
-
-def tool_vec_read_lines(path: str, start: int, end: int) -> str:
-    print(f"    [Tool] vec_read_lines: {path} ({start}-{end})")
-    full_path = REPO_ROOT / path
-    try:
-        lines = full_path.read_text(encoding="utf-8").splitlines()
-        s = max(0, start - 1)
-        e = min(len(lines), end)
-        if s >= e: return "Error: invalid range"
-        extracted = "\\n".join(lines[s:e])
-        return f"Lines {start}-{end} of {path}:\\n{extracted}"
-    except Exception as e:
-        return f"Error reading lines: {e}"
-
-def tool_vec_outline(path: str) -> str:
-    print(f"    [Tool] vec_outline: {path}")
-    cmd = [*_find_vectorcode(), "outline", path]
-    try:
-        res = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, timeout=15.0)
-        return res.stdout[:8000]
-    except Exception as e:
-        return f"Error outlining: {e}"
-
-def run_agent(arm_id, model, system_prompt, task, use_read_file=True, effort=None):
-    tools = []
-    if arm_id == "A":
-        tools = [{"type": "function", "function": {"name": "execute_bash", "description": "Execute a bash command (e.g. grep, find)", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}}]
-        if use_read_file:
-            tools.append({"type": "function", "function": {"name": "read_file", "description": "Read full contents of a file", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}})
-    else:
-        tools = [{"type": "function", "function": {"name": "vec_search", "description": "Semantic search over the codebase. Returns code snippets.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}]
-        if use_read_file:
-            tools.append({"type": "function", "function": {"name": "vec_read_lines", "description": "Read specific lines of a file", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}}, "required": ["path", "start_line", "end_line"]}}})
-            tools.append({
-                "type": "function",
-                "function": {
-                    "name": "vec_outline",
-                    "description": "Get a structural outline of a source file — top-level functions, classes, structs, interfaces, and traits with their signatures. Useful for understanding file structure without reading the entire file.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "file_path": {"type": "string", "description": "The file path to outline (relative to project root)"}
-                        },
-                        "required": ["file_path"]
-                    }
-                }
-            })
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": task}
-    ]
-    
-    total_tokens = 0
-    final_text = ""
-    
-    print(f"\n--- Starting Arm {arm_id} ({model}) ---")
-    for step in range(15):
-        try:
-            kwargs = {
-                "model": model,
-                "messages": messages,
-                "tools": tools,
-            }
-            if effort:
-                kwargs["extra_body"] = {"reasoning_effort": effort}
-            else:
-                kwargs["temperature"] = 0.0
-
-            response = client.chat.completions.create(**kwargs)
-        except Exception as e:
-            print("API Error:", e)
-            break
-            
-        if response.usage:
-            total_tokens += response.usage.prompt_tokens
-            
-        msg = response.choices[0].message
-        messages.append(msg)
-        
-        if msg.tool_calls:
-            for tc in msg.tool_calls:
-                args = json.loads(tc.function.arguments)
-                if tc.function.name == "execute_bash": res = tool_execute_bash(args.get("command", ""))
-                elif tc.function.name == "vec_search": res = tool_vec_search(args.get("query", ""))
-                elif tc.function.name == "read_file": res = tool_read_file(args.get("path", ""))
-                elif tc.function.name == "vec_read_lines": res = tool_vec_read_lines(args.get("path", ""), args.get("start_line", 1), args.get("end_line", 1))
-                elif tc.function.name == "vec_outline": res = tool_vec_outline(args.get("file_path", ""))
-                else: res = "Unknown tool"
-                
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "name": tc.function.name,
-                    "content": res
-                })
-        else:
-            final_text = msg.content or ""
-            print(f"    [Done] Generated ({len(final_text)} chars)")
-            break
-            
-    return total_tokens, final_text
-
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="kimi-k2.6")
-    parser.add_argument("--effort", default=None)
+def main():
+    parser = argparse.ArgumentParser(description="Run OpenAI benchmarks.")
+    parser.add_argument("--model", default="kimi-k2.6", help="Model identifier")
+    parser.add_argument("--effort", default=None, help="Reasoning effort hint")
+    parser.add_argument(
+        "--phase", choices=["p2", "p3"], required=True, help="Phase to run (p2 or p3)"
+    )
     args = parser.parse_args()
 
-    sys_p2 = "You are an expert Rust developer agent. Your task is to explore the codebase using the provided tools, understand the patterns, and generate the requested code. Once you have enough context, output ONLY the final Rust code."
-    task_p2 = "Add a new CLI `status` subcommand that displays index health statistics, following the exact same conventions as the existing `install` CLI subcommand in `src/cli/install.rs`."
+    api_key = os.environ.get("OPENCODE_API_KEY")
+    if not api_key:
+        print("Error: OPENCODE_API_KEY is not set.", file=sys.stderr)
+        sys.exit(1)
 
-    sys_p3 = "You are an expert Rust developer agent. Your task is to explore the codebase using the provided tools, understand the global architecture, and answer the question. Once you have enough context, output ONLY your final answer."
-    task_p3 = "Explica la arquitectura del sistema de embeddings de este proyecto: ¿qué trait principal se usa, cuáles son sus métodos, qué proveedores lo implementan y en qué parte del código se instancia el proveedor según la configuración?"
+    client = OpenAI(api_key=api_key, base_url="https://opencode.ai/zen/go/v1")
+    adapter = OpenAIAdapter()
 
-    print(f"Running P2 & P3 on {args.model}")
-    
-    a2_tok, a2_res = run_agent("A", args.model, sys_p2, task_p2, True, args.effort)
-    b2_tok, b2_res = run_agent("B", args.model, sys_p2, task_p2, True, args.effort)
-    
-    a3_tok, a3_res = run_agent("A", args.model, sys_p3, task_p3, True, args.effort)
-    b3_tok, b3_res = run_agent("B", args.model, sys_p3, task_p3, False, args.effort)
+    print(f"Running Phase {args.phase} on {args.model}")
 
-    print("\nFINAL RESULTS:")
-    print(f"P2 Arm A: {a2_tok} tokens")
-    print(f"P2 Arm B: {b2_tok} tokens")
-    print(f"P3 Arm A: {a3_tok} tokens")
-    print(f"P3 Arm B: {b3_tok} tokens")
+    if args.phase == "p2":
+        print("\n--- PHASE 2: Code Generation ---")
+        a2, b2, qa2, qb2 = run_phase("p2", args.model, adapter, client, args.effort)
+        savings2 = (a2.tokens - b2.tokens) / a2.tokens * 100 if a2.tokens > 0 else 0
+        report2 = PhaseReport(
+            args.model, a2.tokens, a2.tool_calls, qa2, b2.tokens, b2.tool_calls, qb2, savings2
+        )
+        write_phase2_report(report2)
+        print(f"\nPhase 2 Complete. Token savings: {savings2:.1f}%")
+    elif args.phase == "p3":
+        print("\n--- PHASE 3: Global Context Answering ---")
+        a3, b3, qa3, qb3 = run_phase("p3", args.model, adapter, client, args.effort)
+        savings3 = (a3.tokens - b3.tokens) / a3.tokens * 100 if a3.tokens > 0 else 0
+        report3 = PhaseReport(
+            args.model, a3.tokens, None, qa3, b3.tokens, None, qb3, savings3
+        )
+        write_phase3_report(report3)
+        print(f"\nPhase 3 Complete. Token savings: {savings3:.1f}%")
+
+
+if __name__ == "__main__":
+    main()

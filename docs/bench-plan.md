@@ -40,14 +40,14 @@ El objetivo de este roadmap es validar el ROI, la precisión y el impacto de Vec
 **Flujo SDD a Utilizar:** `/sdd-new "Benchmark End-to-End Tarea del Imitador (Fase 2)"`
 
 **Entregables y Tareas:**
-1. **Script Simulador de Agentes (`benchmarks/phase2_token_savings.py`)**
+1. **Script Simulador de Agentes (`benchmarks/run_openai.py` / `benchmarks/run_anthropic.py`)**
    - ✅ Implementado: Harness de dos brazos con secuencias programadas (6 steps Arm A, 5 steps Arm B).
    - *Brazo A (Baseline):* `grep`, `read_file`, `generate`.
    - *Brazo B (VectorCode):* `vec_search`, `read_file`, `generate`.
    - Token counting con `tiktoken` (cl100k_base) + fallback chars/4.
    - Quality evaluator con 7 reglas de convención desde `install.rs`.
    - 10 tests unitarios inline.
-2. **Parser de Sesiones (`benchmarks/agent-eval/parse-session.mjs`)**
+2. **Parser de Sesiones (`benchmarks/_lib/parse_session.py`)**
    - ✅ Implementado: 214 líneas, Node.js ES module.
    - Suma tokens totales y de exploración, cuenta pasos de exploración antes de generación.
    - 5 tests inline. Output match entre Python y Node.js verificado.
@@ -83,7 +83,7 @@ El objetivo de este roadmap es validar el ROI, la precisión y el impacto de Vec
 2. **Ejecución y Extracción**
    - Ejecutaremos el prompt en dos escenarios. Escenario sin VectorCode (que probablemente vuelque archivos enteros) y con VectorCode.
    - Extraeremos la respuesta final del LLM de cada escenario.
-3. **AI Judge Evaluator (`benchmarks/phase3_context_bloat.py`)**
+3. **AI Judge Evaluator (`benchmarks/run_openai.py --phase p3`)**
    - Escribiremos un script que envíe ambas respuestas junto con el "Golden Summary" a un modelo evaluador (JD-Judge-A / `jd-judge-a`).
    - El juez IA estará instruido para calificar la Precisión y Completitud (0-100) y detectar alucinaciones.
 4. **Reporte**
@@ -91,6 +91,5 @@ El objetivo de este roadmap es validar el ROI, la precisión y el impacto de Vec
 
 ## Open Questions (Resueltas)
 
-> ~~¿Hay alguna preferencia sobre el lenguaje para los scripts de los benchmarks?~~ ✅ **Resuelto:** Python para el harness principal, Node.js para `parse-session.mjs`. Ambos implementados y probados.
->
+> ~~¿Hay alguna preferencia sobre el lenguaje para los scripts de los benchmarks?~~ ✅ **Resuelto:** Todo implementado en Python (harness, parsing y generador de reportes) usando el paquete compartido `_lib/`.
 > ~~¿Las pruebas de la Fase 2 las ejecutaremos contra un modelo LLM real?~~ ✅ **Resuelto:** Secuencias programadas (scripted sequences) sin LLM real para mantener determinismo, bajo costo y repetibilidad.

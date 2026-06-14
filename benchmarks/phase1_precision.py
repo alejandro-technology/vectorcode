@@ -181,7 +181,7 @@ def run_init(cmd_prefix: list[str], project_path: Path) -> float:
     # Clean up before init — init errors if .vectorcode/ already exists
     _clean_vectorcode_dir(project_path)
 
-    cmd = [*cmd_prefix, "--quiet", "init", "--provider", provider]
+    cmd = [*cmd_prefix, "--quiet", "--project-path", str(project_path), "init", "--provider", provider]
     if model:
         cmd.extend(["--model", model])
 
@@ -210,7 +210,7 @@ def run_index(cmd_prefix: list[str], project_path: Path) -> float:
     Raises:
         RuntimeError: If index exits with non-zero code.
     """
-    cmd = [*cmd_prefix, "--quiet", "index", "--full"]
+    cmd = [*cmd_prefix, "--quiet", "--project-path", str(project_path), "index", "--full"]
 
     start = time.perf_counter()
     result = _run_subprocess(cmd, project_path, timeout=1800.0)
@@ -244,6 +244,8 @@ def run_search(
     """
     cmd = [
         *cmd_prefix,
+        "--project-path",
+        str(project_path),
         "search",
         query,
         "--json",

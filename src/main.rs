@@ -23,6 +23,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Search(args) => {
             vectorcode::cli::search::execute(args, &project_path, cli.quiet).await?;
         }
+        Commands::Outline(args) => {
+            vectorcode::cli::outline::execute(args, &project_path)?;
+        }
         Commands::Status(args) => {
             vectorcode::cli::status::execute(args, &project_path)?;
         }

@@ -1,7 +1,13 @@
 //! `vectorcode status` — show index status and health (spec §12.5).
+//!
+//! Reads the index database metadata and displays formatted status
+//! including provider, model, dimensions, version, file/chunk counts,
+//! and last sync time. Compares meta stats against actual DB counts
+//! to detect staleness.
 
 use anyhow::Result;
 use clap::Args;
+use tracing::info;
 
 use crate::store::db::Database;
 use crate::store::meta;
@@ -10,13 +16,15 @@ use crate::store::meta;
 #[derive(Args, Debug)]
 pub struct StatusArgs {}
 
-/// Execute the `status` command.
+/// Execute the `status` command (spec §12.5).
 ///
 /// Reads meta table and prints formatted status including:
 /// - Provider, model, dimensions
 /// - Version
 /// - Files indexed, chunks stored
 /// - Last sync time
+///
+/// Also compares meta stats against actual DB counts to detect staleness.
 pub fn execute(args: &StatusArgs, project_path: &std::path::Path) -> Result<()> {
     let _ = args; // No options currently
 
@@ -25,20 +33,20 @@ pub fn execute(args: &StatusArgs, project_path: &std::path::Path) -> Result<()> 
 
     // Check initialization
     if !vc_dir.exists() {
-        println!(
+        eprintln!(
             "VectorCode is not initialized in {}.",
             project_path.display()
         );
-        println!("Run `vectorcode init` to set up.");
+        eprintln!("Run `vectorcode init` to set up.");
         return Ok(());
     }
 
     if !db_path.exists() {
-        println!(
+        eprintln!(
             "VectorCode directory exists but index.db is missing in {}.",
             project_path.display()
         );
-        println!("Run `vectorcode init` to reinitialize.");
+        eprintln!("Run `vectorcode init` to reinitialize.");
         return Ok(());
     }
 
@@ -48,35 +56,37 @@ pub fn execute(args: &StatusArgs, project_path: &std::path::Path) -> Result<()> 
 
     match index_meta {
         Some(meta) => {
-            println!("VectorCode Status");
-            println!("=================");
-            println!("  Project:       {}", project_path.display());
-            println!("  Provider:      {}", meta.provider);
-            println!("  Model:         {}", meta.model);
-            println!("  Dimensions:    {}", meta.dimensions);
-            println!("  Version:       {}", meta.vectorcode_version);
-            println!("  Created:       {}", meta.created_at);
-            println!("  Files indexed: {}", meta.files_indexed);
-            println!("  Chunks stored: {}", meta.chunks_stored);
+            info!("Reading index status for {}", project_path.display());
+
+            eprintln!("VectorCode Status");
+            eprintln!("=================");
+            eprintln!("  Project:       {}", project_path.display());
+            eprintln!("  Provider:      {}", meta.provider);
+            eprintln!("  Model:         {}", meta.model);
+            eprintln!("  Dimensions:    {}", meta.dimensions);
+            eprintln!("  Version:       {}", meta.vectorcode_version);
+            eprintln!("  Created:       {}", meta.created_at);
+            eprintln!("  Files indexed: {}", meta.files_indexed);
+            eprintln!("  Chunks stored: {}", meta.chunks_stored);
             match meta.last_sync_at {
-                Some(ref sync) => println!("  Last sync:     {sync}"),
-                None => println!("  Last sync:     never"),
+                Some(ref sync) => eprintln!("  Last sync:     {sync}"),
+                None => eprintln!("  Last sync:     never"),
             }
 
             // Show actual counts from DB
             let actual_chunks = meta::count_chunks(db.conn())?;
             let actual_files = meta::count_files(db.conn())?;
             if actual_chunks != meta.chunks_stored || actual_files != meta.files_indexed {
-                println!();
-                println!("  ⚠ Meta stats may be out of date:");
-                println!("    Actual files:   {actual_files}");
-                println!("    Actual chunks:  {actual_chunks}");
-                println!("    Run `vectorcode index` to update.");
+                eprintln!();
+                eprintln!("  ⚠ Meta stats may be out of date:");
+                eprintln!("    Actual files:   {actual_files}");
+                eprintln!("    Actual chunks:  {actual_chunks}");
+                eprintln!("    Run `vectorcode index` to update.");
             }
         }
         None => {
-            println!("VectorCode directory exists but index metadata is missing.");
-            println!("Run `vectorcode init` to reinitialize.");
+            eprintln!("VectorCode directory exists but index metadata is missing.");
+            eprintln!("Run `vectorcode init` to reinitialize.");
         }
     }
 

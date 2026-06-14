@@ -74,8 +74,8 @@ pub async fn execute(args: &InitArgs, project_path: &std::path::Path, quiet: boo
     };
 
     // Prompt for API key if needed (gemini, openai)
-    let api_key = prompt_api_key_if_needed(&provider);
-    let ollama_url = prompt_ollama_url_if_needed(&provider);
+    let api_key = prompt_api_key_if_needed(&provider, quiet);
+    let ollama_url = prompt_ollama_url_if_needed(&provider, quiet);
 
     // Step 1: Create .vectorcode/ directory
     std::fs::create_dir_all(&vc_dir)?;
@@ -267,8 +267,11 @@ fn prompt_provider_interactive() -> ProviderArg {
 ///
 /// Returns the API key string (may be empty if user skips).
 #[cfg(not(test))]
-fn prompt_api_key_if_needed(provider: &ProviderArg) -> String {
+fn prompt_api_key_if_needed(provider: &ProviderArg, quiet: bool) -> String {
     if !provider_requires_api_key(provider) {
+        return String::new();
+    }
+    if quiet {
         return String::new();
     }
 
@@ -282,19 +285,28 @@ fn prompt_api_key_if_needed(provider: &ProviderArg) -> String {
 }
 
 #[cfg(test)]
-fn prompt_api_key_if_needed(_provider: &ProviderArg) -> String {
+fn prompt_api_key_if_needed(_provider: &ProviderArg, _quiet: bool) -> String {
     // In tests, skip API key prompt
     String::new()
 }
 
+#[cfg(test)]
+fn prompt_ollama_url_if_needed(_provider: &ProviderArg, _quiet: bool) -> String {
+    // In tests, skip Ollama URL prompt
+    "http://localhost:11434".to_string()
+}
+
 /// Prompt for Ollama URL if the provider is Ollama.
 #[cfg(not(test))]
-fn prompt_ollama_url_if_needed(provider: &ProviderArg) -> String {
+fn prompt_ollama_url_if_needed(provider: &ProviderArg, quiet: bool) -> String {
     if !matches!(provider, ProviderArg::Ollama) {
         return String::new();
     }
 
     let default_url = "http://localhost:11434";
+    if quiet {
+        return default_url.to_string();
+    }
     eprint!("Enter Ollama server URL (default: {default_url}): ");
     let mut url = String::new();
     if std::io::stdin().read_line(&mut url).is_err() {
@@ -367,8 +379,8 @@ model = "{model}"
         r#"{provider_section}
 [indexing]
 max_file_size = 1_048_576
-exclude_dirs = [".agents", ".atl", ".codegraph", ".vectorcode", ".git", "node_modules", "target", "__pycache__", "vendor", "dist", "build", ".next"]
-exclude_extensions = [".min.js", ".map", ".lock", ".svg", ".png", ".jpg", ".ico", ".woff", ".woff2", ".ttf", ".md"]
+exclude_dirs = [".agents", ".atl", ".codegraph", ".vectorcode", ".git", "node_modules", "target", "__pycache__", "vendor", "dist", "build", ".next", "benchmarks", "fixtures", "tests"]
+exclude_extensions = [".min.js", ".map", ".lock", ".svg", ".png", ".jpg", ".ico", ".woff", ".woff2", ".ttf", ".md", ".json", ".txt", ".toml", ".yaml", ".yml", ".sh"]
 
 [watcher]
 debounce_ms = 2000

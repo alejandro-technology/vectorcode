@@ -60,6 +60,15 @@ def tool_vec_read_lines(path: str, start: int, end: int) -> str:
     except Exception as e:
         return f"Error reading lines: {e}"
 
+def tool_vec_outline(path: str) -> str:
+    print(f"    [Tool] vec_outline: {path}")
+    cmd = [*_find_vectorcode(), "outline", path]
+    try:
+        res = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, timeout=15.0)
+        return res.stdout[:8000]
+    except Exception as e:
+        return f"Error outlining: {e}"
+
 def run_agent(arm_id, model, system_prompt, task, use_read_file=True, effort=None):
     tools = []
     if arm_id == "A":
@@ -70,6 +79,20 @@ def run_agent(arm_id, model, system_prompt, task, use_read_file=True, effort=Non
         tools = [{"type": "function", "function": {"name": "vec_search", "description": "Semantic search over the codebase. Returns code snippets.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}]
         if use_read_file:
             tools.append({"type": "function", "function": {"name": "vec_read_lines", "description": "Read specific lines of a file", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}}, "required": ["path", "start_line", "end_line"]}}})
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "vec_outline",
+                    "description": "Get a structural outline of a source file — top-level functions, classes, structs, interfaces, and traits with their signatures. Useful for understanding file structure without reading the entire file.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {"type": "string", "description": "The file path to outline (relative to project root)"}
+                        },
+                        "required": ["file_path"]
+                    }
+                }
+            })
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -110,6 +133,7 @@ def run_agent(arm_id, model, system_prompt, task, use_read_file=True, effort=Non
                 elif tc.function.name == "vec_search": res = tool_vec_search(args.get("query", ""))
                 elif tc.function.name == "read_file": res = tool_read_file(args.get("path", ""))
                 elif tc.function.name == "vec_read_lines": res = tool_vec_read_lines(args.get("path", ""), args.get("start_line", 1), args.get("end_line", 1))
+                elif tc.function.name == "vec_outline": res = tool_vec_outline(args.get("file_path", ""))
                 else: res = "Unknown tool"
                 
                 messages.append({

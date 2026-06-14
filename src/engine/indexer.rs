@@ -525,6 +525,11 @@ pub fn discover_files(project_path: &Path, config: &IndexingConfig) -> Vec<PathB
             continue;
         }
 
+        // Only index files with supported language extensions
+        if !crate::watcher::gitignore::has_supported_extension(&path) {
+            continue;
+        }
+
         files.push(path);
     }
 

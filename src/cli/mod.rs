@@ -6,6 +6,7 @@
 pub mod index;
 pub mod init;
 pub mod install;
+pub mod outline;
 pub mod search;
 pub mod serve;
 pub mod status;
@@ -51,6 +52,8 @@ pub enum Commands {
     Index(index::IndexArgs),
     /// Search the index from the command line.
     Search(search::SearchArgs),
+    /// Show outline of a source file's top-level symbols.
+    Outline(outline::OutlineArgs),
     /// Show index status and health.
     Status(status::StatusArgs),
     /// Start the MCP server.

@@ -254,14 +254,29 @@ fn split_large_node(
     // If no chunkable children, fall back to line-based splitting of this node
     if chunks.is_empty() {
         let node_source = &source[node.byte_range()];
+        let mut line_offsets = Vec::new();
+        let mut current_offset = 0;
+        for line in node_source.lines() {
+            line_offsets.push(current_offset);
+            let next_bytes = &node_source[current_offset + line.len()..];
+            let newline_len = if next_bytes.starts_with("\r\n") {
+                2
+            } else if next_bytes.starts_with('\n') {
+                1
+            } else {
+                0
+            };
+            current_offset += line.len() + newline_len;
+        }
+
         let lines: Vec<&str> = node_source.lines().collect();
         let mut i = 0;
         while i < lines.len() {
             let end = (i + LINE_WINDOW_SIZE).min(lines.len());
             let chunk_content = lines[i..end].join("\n");
             if chunk_content.len() >= MIN_CHUNK_SIZE {
-                let byte_start = node.start_byte() as u32;
-                let byte_end = (byte_start as usize + chunk_content.len()) as u32;
+                let byte_start = (node.start_byte() + line_offsets[i]) as u32;
+                let byte_end = (node.start_byte() + (if end < lines.len() { line_offsets[end] } else { node_source.len() })) as u32;
                 let content_hash = compute_content_hash(&chunk_content);
                 chunks.push(Chunk {
                     id: compute_chunk_id(file_path, byte_start, byte_end),
@@ -288,6 +303,21 @@ fn split_large_node(
 
 /// Line-based chunking fallback for unsupported languages.
 fn line_based_chunks(source: &str, file_path: &str, language: SupportedLanguage) -> Vec<Chunk> {
+    let mut line_offsets = Vec::new();
+    let mut current_offset = 0;
+    for line in source.lines() {
+        line_offsets.push(current_offset);
+        let next_bytes = &source[current_offset + line.len()..];
+        let newline_len = if next_bytes.starts_with("\r\n") {
+            2
+        } else if next_bytes.starts_with('\n') {
+            1
+        } else {
+            0
+        };
+        current_offset += line.len() + newline_len;
+    }
+
     let lines: Vec<&str> = source.lines().collect();
     let mut chunks = Vec::new();
     let mut i = 0;
@@ -297,10 +327,8 @@ fn line_based_chunks(source: &str, file_path: &str, language: SupportedLanguage)
         let chunk_content = lines[i..end].join("\n");
 
         if !chunk_content.trim().is_empty() {
-            let byte_start = source
-                [..source.lines().nth(i).unwrap_or("").as_ptr() as usize - source.as_ptr() as usize]
-                .len() as u32;
-            let byte_end = (byte_start as usize + chunk_content.len()) as u32;
+            let byte_start = line_offsets[i] as u32;
+            let byte_end = (if end < lines.len() { line_offsets[end] } else { source.len() }) as u32;
             let content_hash = compute_content_hash(&chunk_content);
 
             chunks.push(Chunk {
@@ -794,5 +822,38 @@ object CalculatorFactory {
             "Should produce chunks from Kotlin source"
         );
         assert_eq!(chunks[0].language, "kotlin");
+    }
+
+    #[test]
+    fn test_line_based_chunks_offsets_and_unique_ids() {
+        let source_lf = "line1\nline2\nline3\nline4\nline5";
+        let chunks_lf = line_based_chunks(source_lf, "test_lf.txt", SupportedLanguage::Unknown);
+        assert!(!chunks_lf.is_empty());
+        assert_eq!(chunks_lf[0].byte_start, 0);
+        assert_eq!(chunks_lf[0].byte_end, source_lf.len() as u32);
+
+        // Let's construct a large file to force multiple chunks.
+        let mut large_source = String::new();
+        for i in 0..100 {
+            large_source.push_str(&format!("line_{}\n", i));
+        }
+        let chunks_large = line_based_chunks(&large_source, "large.txt", SupportedLanguage::Unknown);
+        assert!(chunks_large.len() > 1);
+        
+        // Verify that all chunk IDs are unique
+        let mut ids = std::collections::HashSet::new();
+        for chunk in &chunks_large {
+            assert!(ids.insert(chunk.id.clone()), "Duplicate chunk ID found!");
+            // Also check that the byte slice matches the chunk content
+            let byte_slice = &large_source[chunk.byte_start as usize..chunk.byte_end as usize];
+            assert!(byte_slice.contains(&chunk.content[..chunk.content.len().min(10)]));
+        }
+
+        // Test carriage returns
+        let source_crlf = "line1\r\nline2\r\nline3\r\nline4\r\nline5";
+        let chunks_crlf = line_based_chunks(source_crlf, "test_crlf.txt", SupportedLanguage::Unknown);
+        assert!(!chunks_crlf.is_empty());
+        assert_eq!(chunks_crlf[0].byte_start, 0);
+        assert_eq!(chunks_crlf[0].byte_end, source_crlf.len() as u32);
     }
 }

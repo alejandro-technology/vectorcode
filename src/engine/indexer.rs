@@ -162,13 +162,13 @@ impl Indexer {
                 .into());
             }
 
-            let db = self.db.lock().await;
-            db.conn().execute("BEGIN", [])?;
+            let mut db = self.db.lock().await;
+            let tx = db.conn_mut().transaction()?;
             for (chunk, embedding) in new_chunks.iter().zip(embeddings.iter()) {
-                chunks::insert_chunk(db.conn(), chunk)?;
-                vectors::insert_vector(db.conn(), &chunk.id, embedding)?;
+                chunks::insert_chunk(&tx, chunk)?;
+                vectors::insert_vector(&tx, &chunk.id, embedding)?;
             }
-            db.conn().execute("COMMIT", [])?;
+            tx.commit()?;
         }
 
         // Clean stale chunks (files that no longer exist on disk)
@@ -240,13 +240,13 @@ impl Indexer {
                 .into());
             }
 
-            let db = self.db.lock().await;
-            db.conn().execute("BEGIN", [])?;
+            let mut db = self.db.lock().await;
+            let tx = db.conn_mut().transaction()?;
             for (chunk, embedding) in new_chunks.iter().zip(embeddings.iter()) {
-                chunks::insert_chunk(db.conn(), chunk)?;
-                vectors::insert_vector(db.conn(), &chunk.id, embedding)?;
+                chunks::insert_chunk(&tx, chunk)?;
+                vectors::insert_vector(&tx, &chunk.id, embedding)?;
             }
-            db.conn().execute("COMMIT", [])?;
+            tx.commit()?;
         }
 
         // Count total chunks in DB

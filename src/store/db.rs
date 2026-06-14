@@ -187,23 +187,29 @@ impl Database {
             return Ok(());
         }
 
-        // Wrap all mutations in a transaction for atomicity
-        self.conn.execute("BEGIN", [])?;
-
         let mut select_stmt = self
             .conn
             .prepare("SELECT chunk_id, embedding FROM vectors_data")?;
-        let rows = select_stmt.query_map([], |row| {
+        let rows_iter = select_stmt.query_map([], |row| {
             let chunk_id: String = row.get(0)?;
             let embedding_json: String = row.get(1)?;
             Ok((chunk_id, embedding_json))
         })?;
 
-        for row in rows {
-            let (chunk_id, embedding_json) = row.map_err(|e| VectorCodeError::EmbedderError {
+        let mut rows = Vec::new();
+        for r in rows_iter {
+            rows.push(r.map_err(|e| VectorCodeError::EmbedderError {
                 message: format!("Migration read error: {e}"),
-            })?;
+            })?);
+        }
 
+        // Drop the statement to release lock/borrows before writing
+        drop(select_stmt);
+
+        // Wrap all mutations in a transaction for atomicity
+        let mut tx = self.conn.unchecked_transaction()?;
+
+        for (chunk_id, embedding_json) in rows {
             let embedding: Vec<f32> = match serde_json::from_str(&embedding_json) {
                 Ok(v) => v,
                 Err(_) => continue, // Skip malformed rows
@@ -216,23 +222,23 @@ impl Database {
             let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
 
             // Insert into vec_chunks (let SQLite assign rowid)
-            self.conn.execute(
+            tx.execute(
                 "INSERT INTO vec_chunks(rowid, embedding) VALUES (NULL, ?1)",
                 rusqlite::params![blob],
             )?;
 
             // Get the assigned rowid
-            let vec_rowid: i64 = self.conn.last_insert_rowid();
+            let vec_rowid: i64 = tx.last_insert_rowid();
 
             // Store the mapping
-            self.conn.execute(
+            tx.execute(
                 "INSERT OR REPLACE INTO chunk_vec_map (chunk_id, vec_rowid) VALUES (?1, ?2)",
                 (&chunk_id, vec_rowid),
             )?;
         }
 
         // Commit transaction after all inserts succeed
-        self.conn.execute("COMMIT", [])?;
+        tx.commit()?;
 
         Ok(())
     }

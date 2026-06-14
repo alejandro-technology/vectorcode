@@ -106,7 +106,7 @@ impl McpHandler {
         );
 
         let options = SearchOptions {
-            limit: p.limit.unwrap_or(10),
+            limit: p.limit.unwrap_or(10).min(100),
             threshold: p.threshold.unwrap_or(0.0),
             language: p.language,
             path: p.path,
@@ -229,21 +229,34 @@ impl McpHandler {
             return Err("Access denied: Path is outside of project bounds.".to_string());
         }
 
+        if p.start_line == 0 {
+            return Err("Invalid start_line".to_string());
+        }
+        if p.end_line < p.start_line {
+            return Err("start_line must be <= end_line".to_string());
+        }
+        if p.end_line - p.start_line + 1 > 500 {
+            return Err("Requested line range exceeds the maximum limit of 500 lines.".to_string());
+        }
+
+        let metadata = tokio::fs::metadata(&canonical)
+            .await
+            .map_err(|e| format!("Failed to get file metadata: {e}"))?;
+        if metadata.len() > 2 * 1024 * 1024 {
+            return Err("Access denied: File size exceeds the maximum limit of 2MB.".to_string());
+        }
+
         let content = tokio::fs::read_to_string(&canonical)
             .await
             .map_err(|e| format!("Failed to read file: {e}"))?;
 
         let lines: Vec<&str> = content.lines().collect();
-        if p.start_line == 0 || p.start_line > lines.len() {
-            return Err("Invalid start_line".to_string());
+        if p.start_line > lines.len() {
+            return Err("Invalid start_line (exceeds file length)".to_string());
         }
 
         let start_idx = p.start_line - 1;
         let end_idx = std::cmp::min(p.end_line, lines.len());
-
-        if start_idx >= end_idx {
-            return Err("start_line must be <= end_line".to_string());
-        }
 
         let extracted = lines[start_idx..end_idx].join("\n");
         Ok(format!(
@@ -302,19 +315,28 @@ impl ServerHandler for McpHandler {
                     // Find the first root that has a .vectorcode directory
                     let mut chosen_root = None;
                     for root in &roots_result.roots {
-                        let path_str = root.uri.trim_start_matches("file://");
-                        let path = PathBuf::from(path_str);
-                        if path.join(".vectorcode").exists() {
-                            chosen_root = Some(path);
-                            break;
+                        if let Ok(url) = url::Url::parse(&root.uri) {
+                            if url.scheme() == "file" {
+                                if let Ok(path) = url.to_file_path() {
+                                    if path.join(".vectorcode").exists() {
+                                        chosen_root = Some(path);
+                                        break;
+                                    }
+                                }
+                            }
                         }
                     }
 
                     // If none have .vectorcode, fallback to the first root
                     if chosen_root.is_none() {
                         if let Some(first_root) = roots_result.roots.first() {
-                            let path_str = first_root.uri.trim_start_matches("file://");
-                            chosen_root = Some(PathBuf::from(path_str));
+                            if let Ok(url) = url::Url::parse(&first_root.uri) {
+                                if url.scheme() == "file" {
+                                    if let Ok(path) = url.to_file_path() {
+                                        chosen_root = Some(path);
+                                    }
+                                }
+                            }
                         }
                     }
 

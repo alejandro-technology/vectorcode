@@ -80,6 +80,7 @@ async-trait = "0.1"
 rmcp = { version = "0.8.1", features = ["server", "transport-io"] }
 rmcp-macros = "0.8"
 schemars = { version = "1.2", features = ["derive"] }
+url = "2"
 
 # Self-update
 self-replace = "1"

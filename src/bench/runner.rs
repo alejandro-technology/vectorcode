@@ -108,6 +108,7 @@ async fn execute_query(
         threshold: 0.0, // No threshold for benchmarking
         language: None,
         path: None,
+        ..Default::default()
     };
 
     let results = searcher.search(&query.text, search_options).await?;

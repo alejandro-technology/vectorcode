@@ -6,12 +6,38 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use async_trait::async_trait;
 
 use crate::config::schema::SearchConfig;
 use crate::embedder::Embedder;
 use crate::store::db::Database;
 use crate::store::vectors;
 use crate::types::SearchResult;
+
+/// Search mode — determines which search strategy to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum SearchMode {
+    /// Dense semantic search using vector embeddings (default).
+    #[default]
+    Dense,
+    /// Sparse lexical search using FTS5 bm25 ranking.
+    Sparse,
+    /// Hybrid search combining dense + sparse via RRF fusion.
+    Hybrid,
+}
+
+/// Strategy trait for search implementations (spec §10).
+///
+/// Abstracts over Dense, Sparse, and Hybrid search modes.
+/// Each implementor provides its own `search` logic and reports its mode.
+#[async_trait]
+pub trait SearchStrategy: Send + Sync {
+    /// Execute a search query with the given options.
+    async fn search(&self, query: &str, options: SearchOptions) -> Result<Vec<SearchResult>>;
+
+    /// Return the search mode this strategy implements.
+    fn mode(&self) -> SearchMode;
+}
 
 /// Options for a semantic search query (spec §10.2).
 #[derive(Debug, Clone)]
@@ -24,6 +50,10 @@ pub struct SearchOptions {
     pub language: Option<String>,
     /// Filter by file path prefix (e.g., "src/auth/").
     pub path: Option<String>,
+    /// Search mode: Dense, Sparse, or Hybrid.
+    pub mode: SearchMode,
+    /// RRF fusion constant (default: 60).
+    pub rrf_k: u32,
 }
 
 impl Default for SearchOptions {
@@ -33,19 +63,27 @@ impl Default for SearchOptions {
             threshold: 0.3,
             language: None,
             path: None,
+            mode: SearchMode::Dense,
+            rrf_k: 60,
         }
     }
 }
 
-/// Semantic search engine over indexed code chunks (spec §10).
-pub struct Searcher {
+/// Dense semantic search engine over indexed code chunks (spec §10).
+///
+/// Uses vector embeddings and cosine similarity for semantic search.
+/// Implements `SearchStrategy` with `mode() -> SearchMode::Dense`.
+pub struct DenseSearcher {
     db: Arc<tokio::sync::Mutex<Database>>,
     embedder: Arc<dyn Embedder>,
     config: SearchConfig,
 }
 
-impl Searcher {
-    /// Create a new Searcher with the given database, embedder, and config.
+/// Backward-compatible type alias — all existing callers use `Searcher`.
+pub type Searcher = DenseSearcher;
+
+impl DenseSearcher {
+    /// Create a new DenseSearcher with the given database, embedder, and config.
     pub fn new(
         db: Arc<tokio::sync::Mutex<Database>>,
         embedder: Arc<dyn Embedder>,
@@ -65,6 +103,8 @@ impl Searcher {
             threshold: self.config.default_threshold,
             language: None,
             path: None,
+            mode: SearchMode::Dense,
+            rrf_k: 60,
         }
     }
 
@@ -118,6 +158,18 @@ impl Searcher {
         results.truncate(options.limit);
 
         Ok(results)
+    }
+}
+
+#[async_trait]
+impl SearchStrategy for DenseSearcher {
+    async fn search(&self, query: &str, options: SearchOptions) -> Result<Vec<SearchResult>> {
+        // Delegate to the inherent method (same logic, zero behavior change)
+        self.search(query, options).await
+    }
+
+    fn mode(&self) -> SearchMode {
+        SearchMode::Dense
     }
 }
 
@@ -225,6 +277,34 @@ mod tests {
         assert_eq!(enriched, "code that ");
     }
 
+    // ─── SearchMode tests ──────────────────────────────────────────────
+
+    #[test]
+    fn search_mode_default_is_dense() {
+        let mode = SearchMode::default();
+        assert_eq!(mode, SearchMode::Dense);
+    }
+
+    // ─── SearchStrategy trait tests ────────────────────────────────────
+
+    #[test]
+    fn dense_searcher_mode_returns_dense() {
+        let searcher = setup_searcher();
+        assert_eq!(searcher.mode(), SearchMode::Dense);
+    }
+
+    #[tokio::test]
+    async fn dense_searcher_implements_search_strategy() {
+        let searcher = setup_searcher();
+        // Verify we can call search through the trait
+        let strategy: &dyn SearchStrategy = &searcher;
+        let results = strategy
+            .search("test query", SearchOptions::default())
+            .await
+            .unwrap();
+        assert!(results.is_empty(), "Empty DB should return no results");
+    }
+
     // ─── SearchOptions tests ───────────────────────────────────────────
 
     #[test]
@@ -234,6 +314,8 @@ mod tests {
         assert!((opts.threshold - 0.3).abs() < f32::EPSILON);
         assert!(opts.language.is_none());
         assert!(opts.path.is_none());
+        assert_eq!(opts.mode, SearchMode::Dense);
+        assert_eq!(opts.rrf_k, 60);
     }
 
     #[test]

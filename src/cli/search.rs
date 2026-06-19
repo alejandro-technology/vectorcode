@@ -104,6 +104,7 @@ pub async fn execute(args: &SearchArgs, project_path: &std::path::Path, quiet: b
         threshold: args.threshold,
         language: args.language.clone(),
         path: args.path.clone(),
+        ..Default::default()
     };
 
     // Execute search

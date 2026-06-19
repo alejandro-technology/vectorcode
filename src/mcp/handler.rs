@@ -122,6 +122,7 @@ impl McpHandler {
             threshold: p.threshold.unwrap_or(0.0),
             language: p.language,
             path: p.path,
+            ..Default::default()
         };
 
         match searcher.search(&p.query, options).await {

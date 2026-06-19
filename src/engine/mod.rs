@@ -6,4 +6,4 @@ pub mod outliner;
 pub mod searcher;
 
 pub use indexer::{IndexReport, Indexer};
-pub use searcher::{SearchOptions, Searcher};
+pub use searcher::{DenseSearcher, SearchMode, SearchOptions, SearchStrategy, Searcher};

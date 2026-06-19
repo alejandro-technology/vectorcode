@@ -3,6 +3,7 @@
 //! Each subcommand is implemented in its own module. This module defines
 //! the top-level `Cli` struct and shared helpers.
 
+pub mod benchmark;
 pub mod index;
 pub mod init;
 pub mod install;
@@ -64,6 +65,8 @@ pub enum Commands {
     Uninstall(uninstall::UninstallArgs),
     /// Self-update the binary.
     Upgrade(upgrade::UpgradeArgs),
+    /// Run code-search quality benchmarks.
+    Benchmark(benchmark::BenchmarkArgs),
 }
 
 /// Supported embedding providers for the `init --provider` flag.
@@ -246,6 +249,10 @@ mod tests {
         assert!(
             subcommand_names.contains(&"upgrade"),
             "Missing upgrade: {subcommand_names:?}"
+        );
+        assert!(
+            subcommand_names.contains(&"benchmark"),
+            "Missing benchmark: {subcommand_names:?}"
         );
     }
 

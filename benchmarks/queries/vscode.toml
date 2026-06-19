@@ -1,0 +1,66 @@
+# Golden query set for vscode-corpus benchmark
+# Queries target the vscode sparse checkout: src/vs/editor, src/vs/base/common, src/vs/platform
+# Each query has hand-labeled relevance judgments (0-3 scale).
+
+name = "vscode"
+
+[[queries]]
+text = "text editor model and buffer management"
+# Judgments will be filled after first clone verifies file paths
+[[queries.judgments]]
+file = "placeholder.ts"
+grade = 0
+
+[[queries]]
+text = "cursor positioning and selection logic"
+[[queries.judgments]]
+file = "placeholder.ts"
+grade = 0
+
+[[queries]]
+text = "syntax highlighting and tokenization"
+[[queries.judgments]]
+file = "placeholder.ts"
+grade = 0
+
+[[queries]]
+text = "code folding and region detection"
+[[queries.judgments]]
+file = "placeholder.ts"
+grade = 0
+
+[[queries]]
+text = "find and replace with regex support"
+[[queries.judgments]]
+file = "placeholder.ts"
+grade = 0
+
+[[queries]]
+text = "event emitter and listener pattern"
+[[queries.judgments]]
+file = "placeholder.ts"
+grade = 0
+
+[[queries]]
+text = "disposable resource cleanup"
+[[queries.judgments]]
+file = "placeholder.ts"
+grade = 0
+
+[[queries]]
+text = "URI parsing and validation"
+[[queries.judgments]]
+file = "placeholder.ts"
+grade = 0
+
+[[queries]]
+text = "async cancellation token"
+[[queries.judgments]]
+file = "placeholder.ts"
+grade = 0
+
+[[queries]]
+text = "dependency injection service registration"
+[[queries.judgments]]
+file = "placeholder.ts"
+grade = 0

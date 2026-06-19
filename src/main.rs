@@ -41,6 +41,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Upgrade(args) => {
             vectorcode::cli::upgrade::execute(args).await?;
         }
+        Commands::Benchmark(args) => {
+            vectorcode::cli::benchmark::execute(args, &project_path, cli.quiet).await?;
+        }
     }
 
     Ok(())

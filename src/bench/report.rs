@@ -36,7 +36,10 @@ impl std::str::FromStr for OutputFormat {
 /// Write benchmark results as a formatted table to stdout.
 pub fn write_table(result: &BenchmarkResult) -> Result<()> {
     println!();
-    println!("Benchmark Results: {}", result.corpus);
+    println!(
+        "Benchmark Results: {} (mode: {})",
+        result.corpus, result.search_mode
+    );
     println!("{}", "=".repeat(60));
     println!(
         "Files indexed: {} | Chunks: {} | Queries: {}",
@@ -78,6 +81,47 @@ pub fn write_table(result: &BenchmarkResult) -> Result<()> {
     Ok(())
 }
 
+/// Write a comparison table for multiple benchmark results (one per mode).
+pub fn write_multi_mode_table(results: &[BenchmarkResult]) -> Result<()> {
+    if results.is_empty() {
+        return Ok(());
+    }
+
+    println!();
+    println!("Multi-Mode Benchmark Comparison: {}", results[0].corpus);
+    println!("{}", "=".repeat(80));
+
+    // Summary header
+    println!(
+        "{:<15} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "Mode", "Files", "Chunks", "R@5", "nDCG@10", "MRR"
+    );
+    println!("{}", "-".repeat(80));
+
+    for result in results {
+        println!(
+            "{:<15} {:>10} {:>10} {:>10.4} {:>10.4} {:>10.4}",
+            result.search_mode,
+            result.files_indexed,
+            result.chunks_created,
+            result.aggregate.recall_at_5,
+            result.aggregate.ndcg_at_10,
+            result.aggregate.mrr,
+        );
+    }
+
+    println!();
+
+    // Per-mode timing
+    println!("Duration by mode:");
+    for result in results {
+        println!("  {:<15} {:.2}s", result.search_mode, result.duration_secs);
+    }
+    println!();
+
+    Ok(())
+}
+
 /// Write benchmark results as JSON to a file.
 pub fn write_json(result: &BenchmarkResult, path: &Path) -> Result<()> {
     let json = serde_json::to_string_pretty(result)?;
@@ -101,6 +145,7 @@ pub fn write_baseline(result: &BenchmarkResult, output_dir: &Path) -> Result<()>
     writeln!(file, "# Benchmark Baseline")?;
     writeln!(file)?;
     writeln!(file, "**Corpus**: {}", result.corpus)?;
+    writeln!(file, "**Search Mode**: {}", result.search_mode)?;
     writeln!(file, "**Date**: {}", chrono_now())?;
     writeln!(
         file,
@@ -156,6 +201,7 @@ mod tests {
     fn sample_result() -> BenchmarkResult {
         BenchmarkResult {
             corpus: "test".to_string(),
+            search_mode: "dense".to_string(),
             files_indexed: 10,
             chunks_created: 50,
             queries_executed: 2,
@@ -224,7 +270,30 @@ mod tests {
         let baseline_content = std::fs::read_to_string(&baseline_path).unwrap();
         assert!(baseline_content.contains("# Benchmark Baseline"));
         assert!(baseline_content.contains("test"));
+        assert!(baseline_content.contains("dense"));
         assert!(baseline_content.contains("0.7"));
+    }
+
+    #[test]
+    fn test_write_multi_mode_table_output() {
+        let dense = sample_result();
+        let hybrid = BenchmarkResult {
+            search_mode: "hybrid".to_string(),
+            aggregate: AggregateMetrics {
+                recall_at_5: 0.8,
+                recall_at_10: 0.95,
+                ndcg_at_10: 0.85,
+                mrr: 0.8,
+            },
+            ..sample_result()
+        };
+        // Just verify it doesn't panic
+        write_multi_mode_table(&[dense, hybrid]).unwrap();
+    }
+
+    #[test]
+    fn test_write_multi_mode_table_empty() {
+        write_multi_mode_table(&[]).unwrap();
     }
 
     #[test]

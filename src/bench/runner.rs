@@ -21,22 +21,24 @@ use crate::bench::metrics;
 use crate::bench::schema::{AggregateMetrics, BenchmarkResult, Query, QueryResult, QuerySet};
 use crate::config::schema::{IndexingConfig, SearchConfig};
 use crate::embedder::Embedder;
-use crate::engine::{Indexer, Searcher};
+use crate::engine::{build_strategy, Indexer, SearchMode, SearchStrategy};
 use crate::store::db::Database;
 use crate::types::SearchResult;
 
-/// Run a full benchmark against a corpus.
+/// Run a full benchmark against a corpus using the specified search mode.
 ///
 /// This function:
 /// - Creates a temporary directory for the corpus
 /// - Indexes all corpus files with the provided embedder
-/// - Executes each query through the Searcher
+/// - Builds the appropriate search strategy for the given mode
+/// - Executes each query through the strategy
 /// - Computes per-query and aggregate metrics
 /// - Cleans up the temp directory on drop
 pub async fn run_benchmark(
     corpus: &dyn Corpus,
     queries: &QuerySet,
     embedder: Arc<dyn Embedder>,
+    mode: SearchMode,
 ) -> Result<BenchmarkResult> {
     let start = Instant::now();
 
@@ -68,15 +70,18 @@ pub async fn run_benchmark(
 
     let index_report = indexer.index_files(&absolute_files, corpus_path).await?;
 
-    // Step 3: Create searcher
-    let search_config = SearchConfig::default();
-    let searcher = Searcher::new(db.clone(), embedder.clone(), search_config);
+    // Step 3: Build search strategy for the requested mode
+    let mut search_config = SearchConfig::default();
+    if mode == SearchMode::HybridRerank {
+        search_config.rerank.enabled = true;
+    }
+    let strategy = build_strategy(mode, db.clone(), embedder.clone(), search_config).await;
 
     // Step 4: Execute queries and compute metrics
     let mut query_results = Vec::new();
 
     for query in &queries.queries {
-        let result = execute_query(query, &searcher, corpus_path).await?;
+        let result = execute_query(query, strategy.as_ref(), corpus_path).await?;
         query_results.push(result);
     }
 
@@ -87,6 +92,7 @@ pub async fn run_benchmark(
 
     Ok(BenchmarkResult {
         corpus: corpus.name().to_string(),
+        search_mode: mode.to_string(),
         files_indexed: index_report.files_indexed,
         chunks_created: index_report.chunks_new,
         queries_executed: queries.queries.len(),
@@ -99,7 +105,7 @@ pub async fn run_benchmark(
 /// Execute a single query and compute its metrics.
 async fn execute_query(
     query: &Query,
-    searcher: &Searcher,
+    strategy: &dyn SearchStrategy,
     corpus_path: &Path,
 ) -> Result<QueryResult> {
     // Run search with limit=10 (for recall@10 and nDCG@10)
@@ -111,7 +117,7 @@ async fn execute_query(
         ..Default::default()
     };
 
-    let results = searcher.search(&query.text, search_options).await?;
+    let results = strategy.search(&query.text, search_options).await?;
 
     // Deduplicate chunk results to file-level ranking
     let predicted = dedupe_to_file_rank(&results, corpus_path);
@@ -200,6 +206,24 @@ fn compute_aggregate_metrics(query_results: &[QueryResult]) -> AggregateMetrics 
     }
 }
 
+/// Run benchmarks across multiple search modes and collect all results.
+///
+/// Calls `run_benchmark` for each mode in sequence. Useful for comparing
+/// dense vs hybrid vs hybrid-rerank performance in a single CLI invocation.
+pub async fn run_multi_mode_benchmark(
+    corpus: &dyn Corpus,
+    queries: &QuerySet,
+    embedder: Arc<dyn Embedder>,
+    modes: &[SearchMode],
+) -> Result<Vec<BenchmarkResult>> {
+    let mut results = Vec::with_capacity(modes.len());
+    for &mode in modes {
+        let result = run_benchmark(corpus, queries, embedder.clone(), mode).await?;
+        results.push(result);
+    }
+    Ok(results)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,7 +291,7 @@ pub fn search(query: &str) -> Vec<String> {
         };
 
         let embedder = Arc::new(MockEmbedder::new(384));
-        let result = run_benchmark(&corpus, &queries, embedder).await;
+        let result = run_benchmark(&corpus, &queries, embedder, SearchMode::Dense).await;
 
         assert!(
             result.is_ok(),
@@ -276,6 +300,7 @@ pub fn search(query: &str) -> Vec<String> {
         );
         let result = result.unwrap();
         assert_eq!(result.corpus, "test");
+        assert_eq!(result.search_mode, "dense");
         assert_eq!(result.files_indexed, 2);
         assert_eq!(result.queries_executed, 1);
         assert!(!result.query_results.is_empty());
@@ -361,5 +386,78 @@ pub fn search(query: &str) -> Vec<String> {
         assert_eq!(agg.recall_at_10, 0.0);
         assert_eq!(agg.ndcg_at_10, 0.0);
         assert_eq!(agg.mrr, 0.0);
+    }
+
+    /// Helper: create a temporary corpus with two test files.
+    async fn setup_test_corpus() -> (TempDir, LocalCorpus) {
+        let src_dir = TempDir::new().unwrap();
+        let src_path = src_dir.path();
+
+        tokio::fs::write(
+            src_path.join("error.rs"),
+            "pub struct Error { message: String }\nimpl std::fmt::Display for Error {}\n",
+        )
+        .await
+        .unwrap();
+
+        tokio::fs::write(
+            src_path.join("search.rs"),
+            "pub fn search(query: &str) -> Vec<String> { vec![query.to_string()] }\n",
+        )
+        .await
+        .unwrap();
+
+        let corpus = LocalCorpus::new(
+            "test".to_string(),
+            src_path.to_path_buf(),
+            vec![".rs".to_string()],
+        );
+        (src_dir, corpus)
+    }
+
+    fn test_queries() -> QuerySet {
+        QuerySet {
+            name: "test".to_string(),
+            queries: vec![Query {
+                text: "error handling".to_string(),
+                judgments: vec![RelevanceJudgment {
+                    file: "error.rs".to_string(),
+                    grade: 3,
+                }],
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_result_includes_mode() {
+        let (_dir, corpus) = setup_test_corpus().await;
+        let queries = test_queries();
+        let embedder = Arc::new(MockEmbedder::new(384));
+
+        let result = run_benchmark(&corpus, &queries, embedder, SearchMode::Dense)
+            .await
+            .unwrap();
+
+        assert_eq!(result.search_mode, "dense");
+    }
+
+    #[tokio::test]
+    async fn test_run_multi_mode_benchmark() {
+        let (_dir, corpus) = setup_test_corpus().await;
+        let queries = test_queries();
+        let embedder = Arc::new(MockEmbedder::new(384));
+
+        let modes = vec![SearchMode::Dense, SearchMode::Hybrid];
+        let results = run_multi_mode_benchmark(&corpus, &queries, embedder, &modes)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].search_mode, "dense");
+        assert_eq!(results[1].search_mode, "hybrid");
+
+        // Both should have indexed the same number of files
+        assert_eq!(results[0].files_indexed, 2);
+        assert_eq!(results[1].files_indexed, 2);
     }
 }

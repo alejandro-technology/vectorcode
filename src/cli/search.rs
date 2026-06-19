@@ -37,8 +37,8 @@ pub struct SearchArgs {
     #[arg(long)]
     pub json: bool,
 
-    /// Search mode: dense (semantic), sparse (lexical FTS5), hybrid (both).
-    #[arg(long, value_parser(["dense", "sparse", "hybrid"]), default_value = "dense")]
+    /// Search mode: dense (semantic), sparse (lexical FTS5), hybrid (both), hybrid-rerank (with cross-encoder).
+    #[arg(long, value_parser(["dense", "sparse", "hybrid", "hybrid-rerank"]), default_value = "dense")]
     pub mode: String,
 }
 
@@ -65,6 +65,15 @@ pub async fn execute(args: &SearchArgs, project_path: &std::path::Path, quiet: b
 
     // Parse search mode from CLI arg (already validated by clap value_parser)
     let mode: SearchMode = args.mode.parse().unwrap_or(SearchMode::Dense);
+
+    // Warn if hybrid-rerank requested but rerank is not enabled in config
+    if mode == SearchMode::HybridRerank && !config.search.rerank.enabled && !quiet {
+        eprintln!(
+            "Warning: --mode hybrid-rerank requested but [search.rerank] enabled = false in config.\n\
+             Falling back to hybrid search without reranking.\n\
+             Set [search.rerank] enabled = true in .vectorcode/config.toml to enable."
+        );
+    }
 
     // Create embedder only when needed (sparse mode skips embedder entirely)
     let embedder: Arc<dyn crate::embedder::Embedder> = if mode == SearchMode::Sparse {
@@ -109,7 +118,8 @@ pub async fn execute(args: &SearchArgs, project_path: &std::path::Path, quiet: b
         std::sync::Arc::new(tokio::sync::Mutex::new(Database::open(&db_path)?)),
         embedder,
         config.search.clone(),
-    );
+    )
+    .await;
 
     // Build search options
     let options = SearchOptions {
@@ -300,6 +310,17 @@ mod tests {
         match cli.command {
             crate::cli::Commands::Search(args) => {
                 assert_eq!(args.mode, "hybrid");
+            }
+            _ => panic!("Expected Search command"),
+        }
+    }
+
+    #[test]
+    fn search_args_parse_mode_hybrid_rerank() {
+        let cli = Cli::parse_from(["vectorcode", "search", "--mode", "hybrid-rerank", "query"]);
+        match cli.command {
+            crate::cli::Commands::Search(args) => {
+                assert_eq!(args.mode, "hybrid-rerank");
             }
             _ => panic!("Expected Search command"),
         }

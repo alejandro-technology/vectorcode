@@ -76,6 +76,9 @@ pub struct BenchmarkResult {
     /// Corpus name.
     pub corpus: String,
 
+    /// Search mode used for this run ("dense", "sparse", "hybrid", "hybrid-rerank").
+    pub search_mode: String,
+
     /// Number of files indexed.
     pub files_indexed: usize,
 
@@ -214,6 +217,7 @@ mod tests {
     fn test_benchmark_result_serialization() {
         let result = BenchmarkResult {
             corpus: "mini".to_string(),
+            search_mode: "dense".to_string(),
             files_indexed: 25,
             chunks_created: 150,
             queries_executed: 10,
@@ -230,5 +234,6 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("mini"));
         assert!(json.contains("0.65"));
+        assert!(json.contains("dense"));
     }
 }

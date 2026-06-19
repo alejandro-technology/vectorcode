@@ -107,12 +107,35 @@ vectorcode search "payment retry logic"
 # With filters
 vectorcode search "auth middleware" --language typescript --path src/
 
+# Search modes
+vectorcode search --mode dense "query"      # Dense vector search (default)
+vectorcode search --mode sparse "query"     # BM25 lexical search (FTS5)
+vectorcode search --mode hybrid "query"     # Dense + Sparse RRF fusion
+vectorcode search --mode hybrid-rerank "query"  # Hybrid + ONNX cross-encoder reranking
+
 # JSON output
 vectorcode search "error handling" --json
 
 # Custom limit and threshold
 vectorcode search "database connection" --limit 20 --threshold 0.5
 ```
+
+### Reranker (Hybrid+Rerank Mode)
+
+VectorCode supports an optional ONNX cross-encoder reranker that re-scores the
+top-K hybrid search results for higher precision. The reranker runs locally
+(no API calls) using the [BGE-Reranker-v2-m3](https://huggingface.co/Xenova/bge-reranker-v2-m3) model (~571MB).
+
+```bash
+# Enable reranker in config (.vectorcode/config.toml):
+[search.rerank]
+enabled = true
+top_k = 20          # Re-rank top 20 hybrid results
+timeout_ms = 5000   # Fallback to hybrid if reranker exceeds timeout
+```
+
+If the reranker fails to load or times out, search gracefully falls back to
+plain hybrid mode — no errors, no interrupted queries.
 
 ### MCP Server
 
@@ -183,6 +206,15 @@ disabled = false
 [search]
 default_limit = 10
 default_threshold = 0.3
+mode = "dense"            # dense | sparse | hybrid | hybrid-rerank
+
+[search.rrf]
+k = 60                    # RRF fusion constant
+
+[search.rerank]
+enabled = false
+top_k = 20                # Re-rank top-K hybrid results
+timeout_ms = 5000         # Fallback to hybrid on timeout
 ```
 
 ### Environment Variable Overrides

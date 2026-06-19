@@ -8,19 +8,27 @@ use rusqlite::Connection;
 use crate::error::VectorCodeError;
 use crate::types::SearchResult;
 
-/// Strip FTS5 special characters from a query string.
+/// Strip FTS5 special characters from a query string and quote each token.
 ///
-/// FTS5 interprets `*`, `^`, `"`, `(`, `)`, `:`, `;` as operators.
-/// If left in user queries, they cause MATCH syntax errors.
-/// After stripping, collapse whitespace and trim.
+/// FTS5 interprets `*`, `^`, `"`, `(`, `)`, `:`, `;`, `-`, `+`, `NEAR` as
+/// operators. If left in user queries, they cause MATCH syntax errors or
+/// unintended boolean logic (e.g. "key-based" → `key` NOT `based`).
+/// After stripping, each remaining token is wrapped in double quotes so
+/// FTS5 treats it as a literal phrase term, preventing column-name
+/// misinterpretation.
 pub(crate) fn sanitize_fts_query(query: &str) -> String {
     let stripped: String = query
         .chars()
-        .filter(|c| !matches!(c, '*' | '^' | '"' | '(' | ')' | ':' | ';'))
+        .filter(|c| !matches!(c, '*' | '^' | '"' | '(' | ')' | ':' | ';' | '-' | '+'))
         .collect();
 
-    // Collapse whitespace and trim
-    stripped.split_whitespace().collect::<Vec<_>>().join(" ")
+    // Quote each token to prevent FTS5 operator/column interpretation
+    let quoted: Vec<String> = stripped
+        .split_whitespace()
+        .map(|word| format!("\"{word}\""))
+        .collect();
+
+    quoted.join(" ")
 }
 
 /// Execute a sparse FTS5 search with bm25 ranking.
@@ -98,49 +106,59 @@ mod tests {
 
     #[test]
     fn sanitize_strips_asterisk() {
-        assert_eq!(sanitize_fts_query("foo*bar"), "foobar");
+        assert_eq!(sanitize_fts_query("foo*bar"), "\"foobar\"");
     }
 
     #[test]
     fn sanitize_strips_caret() {
-        assert_eq!(sanitize_fts_query("foo^bar"), "foobar");
+        assert_eq!(sanitize_fts_query("foo^bar"), "\"foobar\"");
     }
 
     #[test]
     fn sanitize_strips_double_quotes() {
-        assert_eq!(sanitize_fts_query(r#"foo"bar""#), "foobar");
+        assert_eq!(sanitize_fts_query(r#"foo"bar""#), "\"foobar\"");
     }
 
     #[test]
     fn sanitize_strips_parentheses() {
-        assert_eq!(sanitize_fts_query("foo(bar)"), "foobar");
+        assert_eq!(sanitize_fts_query("foo(bar)"), "\"foobar\"");
     }
 
     #[test]
     fn sanitize_strips_colon() {
-        assert_eq!(sanitize_fts_query("foo:bar"), "foobar");
+        assert_eq!(sanitize_fts_query("foo:bar"), "\"foobar\"");
     }
 
     #[test]
     fn sanitize_strips_semicolon() {
-        assert_eq!(sanitize_fts_query("foo;bar"), "foobar");
+        assert_eq!(sanitize_fts_query("foo;bar"), "\"foobar\"");
+    }
+
+    #[test]
+    fn sanitize_strips_hyphen() {
+        assert_eq!(sanitize_fts_query("key-based"), "\"keybased\"");
+    }
+
+    #[test]
+    fn sanitize_strips_plus() {
+        assert_eq!(sanitize_fts_query("foo+bar"), "\"foobar\"");
     }
 
     #[test]
     fn sanitize_strips_all_special_chars_combined() {
-        assert_eq!(sanitize_fts_query(r#"foo*^"();:bar"#), "foobar");
+        assert_eq!(sanitize_fts_query(r#"foo*^"();:-+bar"#), "\"foobar\"");
     }
 
     #[test]
     fn sanitize_collapses_whitespace_after_stripping() {
-        // Special chars surrounded by spaces → spaces collapse
-        assert_eq!(sanitize_fts_query("foo * * * bar"), "foo bar");
+        // Special chars surrounded by spaces → spaces collapse, each token quoted
+        assert_eq!(sanitize_fts_query("foo * * * bar"), "\"foo\" \"bar\"");
     }
 
     #[test]
     fn sanitize_special_chars_between_words_with_spaces() {
         // When special chars are between words with spaces, words remain separate
-        assert_eq!(sanitize_fts_query("foo * bar"), "foo bar");
+        assert_eq!(sanitize_fts_query("foo * bar"), "\"foo\" \"bar\"");
     }
 
     #[test]
@@ -150,22 +168,35 @@ mod tests {
 
     #[test]
     fn sanitize_only_special_chars_returns_empty() {
-        assert_eq!(sanitize_fts_query("*^\"():;"), "");
+        assert_eq!(sanitize_fts_query("*^\"():;-+"), "");
     }
 
     #[test]
-    fn sanitize_normal_query_unchanged() {
-        assert_eq!(sanitize_fts_query("authenticate user"), "authenticate user");
+    fn sanitize_normal_query_quoted() {
+        assert_eq!(
+            sanitize_fts_query("authenticate user"),
+            "\"authenticate\" \"user\""
+        );
     }
 
     #[test]
     fn sanitize_preserves_single_word() {
-        assert_eq!(sanitize_fts_query("authenticateUser"), "authenticateUser");
+        assert_eq!(
+            sanitize_fts_query("authenticateUser"),
+            "\"authenticateUser\""
+        );
     }
 
     #[test]
     fn sanitize_trims_leading_trailing_whitespace() {
-        assert_eq!(sanitize_fts_query("  hello world  "), "hello world");
+        assert_eq!(sanitize_fts_query("  hello world  "), "\"hello\" \"world\"");
+    }
+
+    #[test]
+    fn sanitize_hyphenated_word_strips_hyphen() {
+        // "key-based" → strip hyphen → "keybased" → quote → "\"keybased\""
+        // This prevents FTS5 from interpreting "-" as NOT operator
+        assert_eq!(sanitize_fts_query("key-based"), "\"keybased\"");
     }
 
     // ─── search_sparse tests (need DB with FTS5 schema) ───────────────

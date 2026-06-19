@@ -92,8 +92,8 @@ impl ModelManager {
     /// Download model and tokenizer from the given URLs.
     ///
     /// This is the internal implementation used by `download_model()`, exposed
-    /// for testability with custom URLs.
-    async fn download_from(
+    /// as `pub(crate)` so the reranker can reuse it with custom HuggingFace URLs.
+    pub(crate) async fn download_from(
         &self,
         model_url: &str,
         tokenizer_url: &str,
@@ -147,7 +147,9 @@ impl ModelManager {
     }
 
     /// Fetch a URL with an indicatif progress bar, returning the bytes.
-    async fn fetch_with_progress(
+    ///
+    /// Exposed as `pub(crate)` so the reranker can reuse the download infrastructure.
+    pub(crate) async fn fetch_with_progress(
         client: &reqwest::Client,
         url: &str,
         label: &str,

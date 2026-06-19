@@ -45,6 +45,9 @@ pub enum VectorCodeError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("Reranker error: {message}")]
+    RerankerError { message: String },
 }
 
 #[cfg(test)]
@@ -186,6 +189,22 @@ mod tests {
         assert!(
             msg.contains("IO error") || msg.contains("No such file"),
             "Expected IO error message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn reranker_error_display_message() {
+        let err = VectorCodeError::RerankerError {
+            message: "model load failed".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Reranker error"),
+            "Expected 'Reranker error' prefix, got: {msg}"
+        );
+        assert!(
+            msg.contains("model load failed"),
+            "Expected detail message, got: {msg}"
         );
     }
 }

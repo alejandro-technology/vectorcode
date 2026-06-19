@@ -5,10 +5,13 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use tracing::warn;
 
+use crate::reranker::{RerankDocument, Reranker};
 use crate::types::SearchResult;
 
 use super::{SearchMode, SearchOptions, SearchStrategy};
@@ -68,14 +71,24 @@ pub fn rrf_fuse(result_sets: &[Vec<SearchResult>], k: u32, limit: usize) -> Vec<
 /// Runs both search strategies in parallel using `tokio::join!`.
 /// Graceful degradation: if one searcher fails, returns results from the other.
 /// If both fail, returns the first error.
+///
+/// When constructed with `with_reranker()`, the top-K fused candidates are
+/// re-scored by a cross-encoder reranker. On timeout or error, the reranker
+/// is skipped and RRF-ordered results are returned (graceful degradation).
 pub struct HybridSearcher {
     dense: Arc<dyn SearchStrategy>,
     sparse: Arc<dyn SearchStrategy>,
     rrf_k: u32,
+    reranker: Option<Arc<dyn Reranker>>,
+    reranker_top_k: usize,
+    reranker_timeout: Duration,
+    mode: SearchMode,
 }
 
 impl HybridSearcher {
-    /// Create a new HybridSearcher with dense and sparse strategies.
+    /// Create a new HybridSearcher with dense and sparse strategies (no reranker).
+    ///
+    /// This is the backward-compatible constructor — `mode()` returns `SearchMode::Hybrid`.
     pub fn new(
         dense: Arc<dyn SearchStrategy>,
         sparse: Arc<dyn SearchStrategy>,
@@ -85,6 +98,34 @@ impl HybridSearcher {
             dense,
             sparse,
             rrf_k,
+            reranker: None,
+            reranker_top_k: 0,
+            reranker_timeout: Duration::from_secs(5),
+            mode: SearchMode::Hybrid,
+        }
+    }
+
+    /// Create a HybridSearcher with an optional reranker for cross-encoder re-scoring.
+    ///
+    /// When `reranker` is `Some`, the `search()` method will re-score the top
+    /// `reranker_top_k` fused candidates using the reranker within `reranker_timeout`.
+    /// `mode()` returns `SearchMode::HybridRerank`.
+    pub fn with_reranker(
+        dense: Arc<dyn SearchStrategy>,
+        sparse: Arc<dyn SearchStrategy>,
+        rrf_k: u32,
+        reranker: Option<Arc<dyn Reranker>>,
+        reranker_top_k: usize,
+        reranker_timeout: Duration,
+    ) -> Self {
+        Self {
+            dense,
+            sparse,
+            rrf_k,
+            reranker,
+            reranker_top_k,
+            reranker_timeout,
+            mode: SearchMode::HybridRerank,
         }
     }
 }
@@ -101,29 +142,107 @@ impl SearchStrategy for HybridSearcher {
             self.sparse.search(query, options)
         );
 
-        match (dense_result, sparse_result) {
+        let fused = match (dense_result, sparse_result) {
             (Ok(dense_results), Ok(sparse_results)) => {
                 // Both succeeded — fuse via RRF
-                let fused = rrf_fuse(&[dense_results, sparse_results], rrf_k, limit);
-                Ok(fused)
+                rrf_fuse(&[dense_results, sparse_results], rrf_k, limit)
             }
             (Ok(dense_results), Err(_)) => {
                 // Sparse failed — return dense results (graceful degradation)
-                Ok(dense_results.into_iter().take(limit).collect())
+                dense_results.into_iter().take(limit).collect()
             }
             (Err(_), Ok(sparse_results)) => {
                 // Dense failed — return sparse results (graceful degradation)
-                Ok(sparse_results.into_iter().take(limit).collect())
+                sparse_results.into_iter().take(limit).collect()
             }
             (Err(e), Err(_)) => {
                 // Both failed — return first error
-                Err(e)
+                return Err(e);
+            }
+        };
+
+        // If reranker is available and we have candidates, re-score top-K
+        if let Some(reranker) = &self.reranker {
+            if !fused.is_empty() && self.reranker_top_k > 0 {
+                return Ok(self.apply_reranking(query, fused, reranker).await);
             }
         }
+
+        Ok(fused)
     }
 
     fn mode(&self) -> SearchMode {
-        SearchMode::Hybrid
+        self.mode
+    }
+}
+
+impl HybridSearcher {
+    /// Re-score the top-K fused results using the reranker.
+    ///
+    /// On timeout or error, logs a warning and returns the original RRF-ordered
+    /// results (graceful degradation — never propagates reranker errors).
+    async fn apply_reranking(
+        &self,
+        query: &str,
+        fused: Vec<SearchResult>,
+        reranker: &Arc<dyn Reranker>,
+    ) -> Vec<SearchResult> {
+        let top_k = self.reranker_top_k.min(fused.len());
+        let (top_candidates, tail) = {
+            let mut fused = fused;
+            let tail = fused.split_off(top_k);
+            (fused, tail)
+        };
+
+        // Build RerankDocuments from top candidates
+        let docs: Vec<RerankDocument> = top_candidates
+            .iter()
+            .enumerate()
+            .map(|(i, r)| RerankDocument {
+                content: r.content.clone(),
+                index: i,
+            })
+            .collect();
+
+        // Call reranker with timeout
+        let rerank_result =
+            tokio::time::timeout(self.reranker_timeout, reranker.rerank(query, &docs)).await;
+
+        match rerank_result {
+            Ok(Ok(scores)) => {
+                // scores: Vec<(original_index, relevance_score)> sorted by score DESC
+                // Rebuild top_candidates ordered by reranker scores
+                let mut reranked: Vec<SearchResult> = scores
+                    .iter()
+                    .filter_map(|(orig_idx, score)| {
+                        top_candidates.get(*orig_idx).map(|r| SearchResult {
+                            score: *score,
+                            ..r.clone()
+                        })
+                    })
+                    .collect();
+
+                // Append the tail (unchanged)
+                reranked.extend(tail);
+                reranked
+            }
+            Ok(Err(e)) => {
+                warn!("Reranker returned error, falling back to RRF order: {e}");
+                // Reconstruct original order: top_candidates + tail
+                let mut result = top_candidates;
+                result.extend(tail);
+                result
+            }
+            Err(_elapsed) => {
+                warn!(
+                    "Reranker timed out after {}ms, falling back to RRF order",
+                    self.reranker_timeout.as_millis()
+                );
+                let mut result = top_candidates;
+                result.extend(tail);
+                result
+            }
+        }
     }
 }
 
@@ -457,5 +576,278 @@ mod tests {
         // Verify we can use it through the trait
         let strategy: &dyn SearchStrategy = &hybrid;
         assert_eq!(strategy.mode(), SearchMode::Hybrid);
+    }
+
+    // ─── MockReranker ──────────────────────────────────────────────────
+
+    use crate::error::VectorCodeError;
+
+    struct MockReranker {
+        scores: Vec<(usize, f32)>,
+        should_fail: bool,
+        delay: Option<Duration>,
+    }
+
+    impl MockReranker {
+        fn new(scores: Vec<(usize, f32)>) -> Self {
+            Self {
+                scores,
+                should_fail: false,
+                delay: None,
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                scores: vec![],
+                should_fail: true,
+                delay: None,
+            }
+        }
+
+        fn slow(delay: Duration) -> Self {
+            Self {
+                scores: vec![],
+                should_fail: false,
+                delay: Some(delay),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Reranker for MockReranker {
+        async fn rerank(
+            &self,
+            _query: &str,
+            _docs: &[RerankDocument],
+        ) -> crate::reranker::Result<Vec<(usize, f32)>> {
+            if self.should_fail {
+                return Err(VectorCodeError::RerankerError {
+                    message: "mock failure".into(),
+                });
+            }
+            if let Some(delay) = self.delay {
+                tokio::time::sleep(delay).await;
+            }
+            Ok(self.scores.clone())
+        }
+
+        fn model_name(&self) -> &str {
+            "mock-reranker"
+        }
+
+        fn provider_name(&self) -> &str {
+            "mock"
+        }
+    }
+
+    fn make_reranker_searcher(
+        dense_results: Vec<SearchResult>,
+        sparse_results: Vec<SearchResult>,
+        reranker: MockReranker,
+        top_k: usize,
+        timeout: Duration,
+    ) -> HybridSearcher {
+        let dense = Arc::new(MockSearcher {
+            results: dense_results,
+            mode: SearchMode::Dense,
+        });
+        let sparse = Arc::new(MockSearcher {
+            results: sparse_results,
+            mode: SearchMode::Sparse,
+        });
+        HybridSearcher::with_reranker(dense, sparse, 60, Some(Arc::new(reranker)), top_k, timeout)
+    }
+
+    // ─── HybridSearcher + Reranker tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn hybrid_searcher_with_reranker_mode_returns_hybrid_rerank() {
+        let dense = Arc::new(MockSearcher {
+            results: vec![],
+            mode: SearchMode::Dense,
+        });
+        let sparse = Arc::new(MockSearcher {
+            results: vec![],
+            mode: SearchMode::Sparse,
+        });
+        let searcher = HybridSearcher::with_reranker(
+            dense,
+            sparse,
+            60,
+            Some(Arc::new(MockReranker::new(vec![]))),
+            20,
+            Duration::from_secs(5),
+        );
+        assert_eq!(searcher.mode(), SearchMode::HybridRerank);
+    }
+
+    #[tokio::test]
+    async fn hybrid_searcher_with_reranker_success_reorders_top_k() {
+        // 3 candidates from dense, 0 from sparse (simple case)
+        let dense_results = vec![
+            make_result("a.ts", 1, 10, 0.9),
+            make_result("b.ts", 1, 10, 0.8),
+            make_result("c.ts", 1, 10, 0.7),
+        ];
+
+        // Reranker reverses the order: c > b > a
+        let reranker = MockReranker::new(vec![(2, 0.95), (1, 0.85), (0, 0.75)]);
+        let searcher =
+            make_reranker_searcher(dense_results, vec![], reranker, 3, Duration::from_secs(5));
+
+        let options = SearchOptions::default();
+        let results = searcher.search("test query", options).await.unwrap();
+
+        // After reranking: c.ts first (score 0.95), b.ts second (0.85), a.ts third (0.75)
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].file_path, "c.ts");
+        assert!((results[0].score - 0.95).abs() < 1e-6);
+        assert_eq!(results[1].file_path, "b.ts");
+        assert!((results[1].score - 0.85).abs() < 1e-6);
+        assert_eq!(results[2].file_path, "a.ts");
+        assert!((results[2].score - 0.75).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn hybrid_searcher_with_reranker_preserves_metadata() {
+        let dense_results = vec![make_result("x.ts", 42, 50, 0.9)];
+
+        // Reranker returns same score but different value
+        let reranker = MockReranker::new(vec![(0, 0.99)]);
+        let searcher =
+            make_reranker_searcher(dense_results, vec![], reranker, 1, Duration::from_secs(5));
+
+        let options = SearchOptions::default();
+        let results = searcher.search("test query", options).await.unwrap();
+
+        assert_eq!(results.len(), 1);
+        // Metadata preserved from original SearchResult
+        assert_eq!(results[0].file_path, "x.ts");
+        assert_eq!(results[0].start_line, 42);
+        assert_eq!(results[0].end_line, 50);
+        assert_eq!(results[0].kind, "function_declaration");
+        assert_eq!(results[0].language, "typescript");
+        // Score updated by reranker
+        assert!((results[0].score - 0.99).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn hybrid_searcher_with_reranker_timeout_fallback() {
+        let dense_results = vec![
+            make_result("a.ts", 1, 10, 0.9),
+            make_result("b.ts", 1, 10, 0.8),
+        ];
+
+        // Reranker that takes 2 seconds — timeout is 50ms
+        let reranker = MockReranker::slow(Duration::from_secs(2));
+        let searcher = make_reranker_searcher(
+            dense_results,
+            vec![],
+            reranker,
+            2,
+            Duration::from_millis(50),
+        );
+
+        let options = SearchOptions::default();
+        let results = searcher.search("test query", options).await.unwrap();
+
+        // Should fall back to RRF order (not crash)
+        assert_eq!(results.len(), 2);
+        // RRF scores are deterministic — just verify we got results back
+        assert!(!results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hybrid_searcher_with_reranker_error_fallback() {
+        let dense_results = vec![
+            make_result("a.ts", 1, 10, 0.9),
+            make_result("b.ts", 1, 10, 0.8),
+        ];
+
+        let reranker = MockReranker::failing();
+        let searcher =
+            make_reranker_searcher(dense_results, vec![], reranker, 2, Duration::from_secs(5));
+
+        let options = SearchOptions::default();
+        let results = searcher.search("test query", options).await.unwrap();
+
+        // Should fall back to RRF order (not error)
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn hybrid_searcher_no_reranker_behaves_like_before() {
+        let dense_results = vec![
+            make_result("shared.ts", 1, 10, 0.9),
+            make_result("only_dense.ts", 1, 10, 0.7),
+        ];
+        let sparse_results = vec![
+            make_result("shared.ts", 1, 10, 0.8),
+            make_result("only_sparse.ts", 1, 10, 0.6),
+        ];
+
+        // with_reranker but reranker is None — should behave like plain hybrid
+        let dense = Arc::new(MockSearcher {
+            results: dense_results,
+            mode: SearchMode::Dense,
+        });
+        let sparse = Arc::new(MockSearcher {
+            results: sparse_results,
+            mode: SearchMode::Sparse,
+        });
+        let searcher = HybridSearcher::with_reranker(
+            dense,
+            sparse,
+            60,
+            None, // no reranker
+            20,
+            Duration::from_secs(5),
+        );
+
+        let options = SearchOptions::default();
+        let results = searcher.search("test query", options).await.unwrap();
+
+        // Same behavior as HybridSearcher::new — 3 unique fused results
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].file_path, "shared.ts");
+    }
+
+    #[tokio::test]
+    async fn hybrid_searcher_with_reranker_empty_fused_is_noop() {
+        let reranker = MockReranker::new(vec![]);
+        let searcher = make_reranker_searcher(vec![], vec![], reranker, 20, Duration::from_secs(5));
+
+        let options = SearchOptions::default();
+        let results = searcher.search("test query", options).await.unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hybrid_searcher_with_reranker_top_k_smaller_than_fused() {
+        // 5 fused results, but reranker only processes top 2
+        let dense_results = vec![
+            make_result("a.ts", 1, 10, 0.9),
+            make_result("b.ts", 1, 10, 0.8),
+            make_result("c.ts", 1, 10, 0.7),
+        ];
+
+        // Reranker reverses top 2: b > a
+        let reranker = MockReranker::new(vec![(1, 0.99), (0, 0.88)]);
+        let searcher =
+            make_reranker_searcher(dense_results, vec![], reranker, 2, Duration::from_secs(5));
+
+        let options = SearchOptions::default();
+        let results = searcher.search("test query", options).await.unwrap();
+
+        // Top 2 reranked + 1 tail (c.ts)
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].file_path, "b.ts");
+        assert!((results[0].score - 0.99).abs() < 1e-6);
+        assert_eq!(results[1].file_path, "a.ts");
+        assert!((results[1].score - 0.88).abs() < 1e-6);
+        // Tail preserved
+        assert_eq!(results[2].file_path, "c.ts");
     }
 }

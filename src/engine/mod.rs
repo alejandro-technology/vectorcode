@@ -13,3 +13,6 @@ pub use searcher::{
     build_strategy, DenseSearcher, SearchMode, SearchOptions, SearchStrategy, Searcher,
 };
 pub use sparse_searcher::SparseSearcher;
+
+// Re-export reranker types for engine consumers
+pub use crate::reranker::{RerankDocument, Reranker};

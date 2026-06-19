@@ -16,6 +16,7 @@ use crate::types::SearchResult;
 
 use super::fusion::HybridSearcher;
 use super::sparse_searcher::SparseSearcher;
+use crate::reranker::Reranker;
 
 /// Search mode — determines which search strategy to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -27,6 +28,19 @@ pub enum SearchMode {
     Sparse,
     /// Hybrid search combining dense + sparse via RRF fusion.
     Hybrid,
+    /// Hybrid search with cross-encoder reranking of top candidates.
+    HybridRerank,
+}
+
+impl std::fmt::Display for SearchMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dense => write!(f, "dense"),
+            Self::Sparse => write!(f, "sparse"),
+            Self::Hybrid => write!(f, "hybrid"),
+            Self::HybridRerank => write!(f, "hybrid-rerank"),
+        }
+    }
 }
 
 impl std::str::FromStr for SearchMode {
@@ -37,8 +51,9 @@ impl std::str::FromStr for SearchMode {
             "dense" => Ok(Self::Dense),
             "sparse" => Ok(Self::Sparse),
             "hybrid" => Ok(Self::Hybrid),
+            "hybrid-rerank" => Ok(Self::HybridRerank),
             other => Err(format!(
-                "unknown search mode '{other}', expected: dense, sparse, hybrid"
+                "unknown search mode '{other}', expected: dense, sparse, hybrid, hybrid-rerank"
             )),
         }
     }
@@ -195,7 +210,10 @@ impl SearchStrategy for DenseSearcher {
 ///
 /// Factory function that creates the right `SearchStrategy` implementation
 /// for the requested mode. Used by CLI/MCP to dispatch search requests.
-pub fn build_strategy(
+///
+/// For `HybridRerank`, the reranker is loaded asynchronously (lazy, with timeout).
+/// If the reranker fails to load, falls back to plain hybrid search.
+pub async fn build_strategy(
     mode: SearchMode,
     db: Arc<tokio::sync::Mutex<Database>>,
     embedder: Arc<dyn Embedder>,
@@ -209,6 +227,34 @@ pub fn build_strategy(
                 Arc::new(DenseSearcher::new(db.clone(), embedder, config.clone()));
             let sparse: Arc<dyn SearchStrategy> = Arc::new(SparseSearcher::new(db, config.clone()));
             Arc::new(HybridSearcher::new(dense, sparse, config.rrf_k))
+        }
+        SearchMode::HybridRerank => {
+            let reranker: Option<Arc<dyn Reranker>> = if config.rerank.enabled {
+                match crate::reranker::onnx::OnnxReranker::from_cache_with_timeout().await {
+                    Ok(r) => Some(Arc::new(r)),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Reranker failed to load: {e}. Falling back to hybrid search."
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            let dense: Arc<dyn SearchStrategy> =
+                Arc::new(DenseSearcher::new(db.clone(), embedder, config.clone()));
+            let sparse: Arc<dyn SearchStrategy> = Arc::new(SparseSearcher::new(db, config.clone()));
+            let timeout = std::time::Duration::from_millis(config.rerank.timeout_ms);
+            Arc::new(HybridSearcher::with_reranker(
+                dense,
+                sparse,
+                config.rrf_k,
+                reranker,
+                config.rerank.top_k,
+                timeout,
+            ))
         }
     }
 }
@@ -341,6 +387,14 @@ mod tests {
     }
 
     #[test]
+    fn search_mode_from_str_hybrid_rerank() {
+        assert_eq!(
+            "hybrid-rerank".parse::<SearchMode>().unwrap(),
+            SearchMode::HybridRerank
+        );
+    }
+
+    #[test]
     fn search_mode_from_str_invalid_returns_error() {
         assert!("invalid".parse::<SearchMode>().is_err());
     }
@@ -349,6 +403,7 @@ mod tests {
     fn search_mode_from_str_case_sensitive() {
         assert!("Dense".parse::<SearchMode>().is_err());
         assert!("HYBRID".parse::<SearchMode>().is_err());
+        assert!("Hybrid-Rerank".parse::<SearchMode>().is_err());
     }
 
     // ─── SearchStrategy trait tests ────────────────────────────────────
@@ -373,8 +428,8 @@ mod tests {
 
     // ─── build_strategy tests ──────────────────────────────────────────
 
-    #[test]
-    fn build_strategy_dense_returns_dense_searcher() {
+    #[tokio::test]
+    async fn build_strategy_dense_returns_dense_searcher() {
         let db = setup_test_db();
         let embedder = Arc::new(MockEmbedder::new(64));
         let config = SearchConfig::default();
@@ -383,12 +438,13 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(db)),
             embedder,
             config,
-        );
+        )
+        .await;
         assert_eq!(strategy.mode(), SearchMode::Dense);
     }
 
-    #[test]
-    fn build_strategy_sparse_returns_sparse_searcher() {
+    #[tokio::test]
+    async fn build_strategy_sparse_returns_sparse_searcher() {
         let db = setup_test_db();
         let embedder = Arc::new(MockEmbedder::new(64));
         let config = SearchConfig::default();
@@ -397,12 +453,13 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(db)),
             embedder,
             config,
-        );
+        )
+        .await;
         assert_eq!(strategy.mode(), SearchMode::Sparse);
     }
 
-    #[test]
-    fn build_strategy_hybrid_returns_hybrid_searcher() {
+    #[tokio::test]
+    async fn build_strategy_hybrid_returns_hybrid_searcher() {
         let db = setup_test_db();
         let embedder = Arc::new(MockEmbedder::new(64));
         let config = SearchConfig::default();
@@ -411,8 +468,25 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(db)),
             embedder,
             config,
-        );
+        )
+        .await;
         assert_eq!(strategy.mode(), SearchMode::Hybrid);
+    }
+
+    #[tokio::test]
+    async fn build_strategy_hybrid_rerank_returns_hybrid_searcher() {
+        let db = setup_test_db();
+        let embedder = Arc::new(MockEmbedder::new(64));
+        // rerank.enabled = false → no reranker loaded, but mode is still HybridRerank
+        let config = SearchConfig::default();
+        let strategy = build_strategy(
+            SearchMode::HybridRerank,
+            Arc::new(tokio::sync::Mutex::new(db)),
+            embedder,
+            config,
+        )
+        .await;
+        assert_eq!(strategy.mode(), SearchMode::HybridRerank);
     }
 
     // ─── SearchOptions tests ───────────────────────────────────────────
@@ -437,6 +511,7 @@ mod tests {
             default_threshold: 0.5,
             default_mode: "sparse".to_string(),
             rrf_k: 100,
+            ..Default::default()
         };
         let searcher = Searcher::new(
             std::sync::Arc::new(tokio::sync::Mutex::new(db)),

@@ -104,12 +104,20 @@ impl Config {
             ));
         }
 
-        let valid_modes = ["dense", "sparse", "hybrid"];
+        let valid_modes = ["dense", "sparse", "hybrid", "hybrid-rerank"];
         if !valid_modes.contains(&self.search.default_mode.as_str()) {
             return Err(format!(
-                "search default_mode must be one of: dense, sparse, hybrid. Got: {}",
+                "search default_mode must be one of: dense, sparse, hybrid, hybrid-rerank. Got: {}",
                 self.search.default_mode
             ));
+        }
+
+        if self.search.rerank.top_k == 0 {
+            return Err("search rerank top_k must be greater than 0".to_string());
+        }
+
+        if self.search.rerank.timeout_ms == 0 {
+            return Err("search rerank timeout_ms must be greater than 0".to_string());
         }
 
         // Validate active provider specific fields
@@ -382,6 +390,31 @@ impl Default for WatcherConfig {
     }
 }
 
+/// Reranker settings for hybrid-rerank search mode.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct RerankConfig {
+    /// Whether the reranker is enabled.
+    pub enabled: bool,
+    /// Model name for the reranker.
+    pub model: String,
+    /// Number of top candidates to rerank.
+    pub top_k: usize,
+    /// Timeout in milliseconds for reranker inference.
+    pub timeout_ms: u64,
+}
+
+impl Default for RerankConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: "BGE-Reranker-v2-m3".to_string(),
+            top_k: 20,
+            timeout_ms: 5000,
+        }
+    }
+}
+
 /// Search defaults per spec §13.2.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -390,10 +423,12 @@ pub struct SearchConfig {
     pub default_limit: usize,
     /// Default minimum similarity threshold (0.0–1.0).
     pub default_threshold: f32,
-    /// Default search mode: "dense", "sparse", or "hybrid".
+    /// Default search mode: "dense", "sparse", "hybrid", or "hybrid-rerank".
     pub default_mode: String,
     /// RRF K parameter for reciprocal rank fusion (default: 60).
     pub rrf_k: u32,
+    /// Reranker configuration for hybrid-rerank mode.
+    pub rerank: RerankConfig,
 }
 
 impl Default for SearchConfig {
@@ -403,6 +438,7 @@ impl Default for SearchConfig {
             default_threshold: 0.3,
             default_mode: "dense".to_string(),
             rrf_k: 60,
+            rerank: RerankConfig::default(),
         }
     }
 }
@@ -470,6 +506,18 @@ mod tests {
     }
 
     #[test]
+    fn search_config_search_mode_parses_hybrid_rerank() {
+        let config = SearchConfig {
+            default_mode: "hybrid-rerank".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.search_mode(),
+            crate::engine::SearchMode::HybridRerank
+        );
+    }
+
+    #[test]
     fn search_config_search_mode_invalid_falls_back_to_dense() {
         let config = SearchConfig {
             default_mode: "invalid".to_string(),
@@ -521,10 +569,60 @@ mod tests {
 
     #[test]
     fn validate_accepts_valid_search_modes() {
-        for mode in &["dense", "sparse", "hybrid"] {
+        for mode in &["dense", "sparse", "hybrid", "hybrid-rerank"] {
             let mut config = Config::default();
             config.search.default_mode = mode.to_string();
             assert!(config.validate().is_ok(), "Mode '{mode}' should be valid");
         }
+    }
+
+    // ─── RerankConfig ──────────────────────────────────────────────────
+
+    #[test]
+    fn search_config_default_rerank_disabled() {
+        let config = SearchConfig::default();
+        assert!(!config.rerank.enabled);
+        assert_eq!(config.rerank.model, "BGE-Reranker-v2-m3");
+        assert_eq!(config.rerank.top_k, 20);
+        assert_eq!(config.rerank.timeout_ms, 5000);
+    }
+
+    #[test]
+    fn search_config_deserialize_with_rerank_config() {
+        let toml_str = r#"
+            default_limit = 10
+            default_threshold = 0.3
+            default_mode = "hybrid-rerank"
+            rrf_k = 60
+
+            [rerank]
+            enabled = true
+            model = "custom-reranker"
+            top_k = 10
+            timeout_ms = 2000
+        "#;
+        let config: SearchConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.rerank.enabled);
+        assert_eq!(config.rerank.model, "custom-reranker");
+        assert_eq!(config.rerank.top_k, 10);
+        assert_eq!(config.rerank.timeout_ms, 2000);
+    }
+
+    #[test]
+    fn validate_rejects_zero_rerank_top_k() {
+        let mut config = Config::default();
+        config.search.rerank.top_k = 0;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("top_k"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_rerank_timeout_ms() {
+        let mut config = Config::default();
+        config.search.rerank.timeout_ms = 0;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("timeout_ms"));
     }
 }

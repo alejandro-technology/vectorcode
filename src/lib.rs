@@ -5,6 +5,7 @@ pub mod embedder;
 pub mod engine;
 pub mod error;
 pub mod mcp;
+pub mod reranker;
 pub mod store;
 pub mod types;
 pub mod watcher;

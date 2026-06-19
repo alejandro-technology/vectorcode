@@ -21,11 +21,9 @@ use tokenizers::Tokenizer;
 const SESSION_CREATION_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// HuggingFace CDN base URL for BGE-Reranker-v2-m3 (Xenova ONNX export).
-#[allow(dead_code)] // Used by download_model, wired in Task 3
 const HF_BASE_URL: &str = "https://huggingface.co/Xenova/bge-reranker-v2-m3/resolve/main";
 
 /// ONNX model path within the HuggingFace repo.
-#[allow(dead_code)] // Used by download_model, wired in Task 3
 const ONNX_MODEL_PATH: &str = "onnx/model.onnx";
 
 /// Filename for the tokenizer within the model directory.
@@ -113,10 +111,27 @@ impl OnnxReranker {
 
     /// Async wrapper around `from_cache()` with a 60-second timeout.
     ///
-    /// Runs ONNX session creation on a raw OS thread (not tokio's blocking
-    /// pool) so the process can exit even if the library hangs.
+    /// If the model is not cached locally, it is downloaded automatically
+    /// from HuggingFace (~571 MB).  After download, ONNX session creation
+    /// runs on a raw OS thread (not tokio's blocking pool) so the process
+    /// can exit even if the library hangs.
     pub async fn from_cache_with_timeout() -> RerankResult<Self> {
         let manager = RerankerModelManager::new();
+
+        // Download the model on first use if it is not already cached.
+        if !manager.is_downloaded() {
+            tracing::info!(
+                "Reranker model not found in cache. Downloading BGE-Reranker-v2-m3 (~571 MB) ..."
+            );
+            manager.download_model().await.map_err(|e| VectorCodeError::RerankerError {
+                message: format!(
+                    "Failed to download reranker model from HuggingFace: {e}\n\
+                     You can also download it manually from https://huggingface.co/Xenova/bge-reranker-v2-m3\n\
+                     and place model.onnx + tokenizer.json into ~/.vectorcode/models/bge-reranker-v2-m3/"
+                ),
+            })?;
+        }
+
         Self::from_reranker_model_manager_with_timeout(&manager).await
     }
 
@@ -256,12 +271,17 @@ impl RerankerModelManager {
     /// Returns `(model_bytes, tokenizer_bytes)`.
     ///
     /// # Errors
-    /// Returns a `RerankerError` if the files are not cached, suggesting `vectorcode init`.
+    /// Returns a `RerankerError` if the files are not cached.
+    /// Callers should call `download_model()` first if the model is missing.
     fn load_model(&self) -> Result<(Vec<u8>, Vec<u8>), VectorCodeError> {
         if !self.is_downloaded() {
             return Err(VectorCodeError::RerankerError {
-                message: "Reranker model not found in cache. Run `vectorcode init` to download it."
-                    .to_string(),
+                message: format!(
+                    "Reranker model not found at {}. \
+                     Download it with the `vectorcode init` reranker step \
+                     or place model.onnx + tokenizer.json manually.",
+                    self.inner.model_dir().display()
+                ),
             });
         }
 
@@ -274,8 +294,6 @@ impl RerankerModelManager {
     /// Download the BGE-Reranker ONNX model and tokenizer from HuggingFace.
     ///
     /// Reuses the embedder's `ModelManager::download_from` with reranker-specific URLs.
-    /// Exposed as `pub(crate)` for use by `cli/init.rs` during project initialization.
-    #[allow(dead_code)] // Wired in Task 3 (cli/init.rs)
     pub(crate) async fn download_model(&self) -> Result<(), VectorCodeError> {
         let model_url = format!("{HF_BASE_URL}/{ONNX_MODEL_PATH}");
         let tokenizer_url = format!("{HF_BASE_URL}/{TOKENIZER_FILENAME}");
@@ -467,32 +485,37 @@ mod tests {
             Ok(_) => unreachable!(),
         };
         assert!(
-            err_msg.contains("vectorcode init"),
-            "Error should suggest running init, got: {err_msg}"
+            err_msg.contains("Reranker model not found"),
+            "Error should mention model not found, got: {err_msg}"
         );
     }
 
+    /// The internal `from_reranker_model_manager_with_timeout` does NOT
+    /// auto-download — it is the fast path used after download has already
+    /// succeeded (or for testing with pre-seeded directories).
     #[tokio::test]
-    async fn from_cache_with_timeout_errors_when_model_not_downloaded() {
+    async fn from_reranker_model_manager_with_timeout_errors_when_not_cached() {
         let empty_dir = tempfile::tempdir().unwrap();
         let manager = RerankerModelManager::with_model_dir(empty_dir.path().to_path_buf());
         let result = OnnxReranker::from_reranker_model_manager_with_timeout(&manager).await;
         assert!(
             result.is_err(),
-            "from_cache_with_timeout should fail when model files are missing"
+            "internal timeout path should fail when model files are missing"
         );
         let err_msg = match result {
             Err(e) => e.to_string(),
             Ok(_) => unreachable!(),
         };
         assert!(
-            err_msg.contains("vectorcode init"),
-            "Error should suggest running init, got: {err_msg}"
+            err_msg.contains("Reranker model not found"),
+            "Error should mention model path, got: {err_msg}"
         );
     }
 
+    /// `from_model_dir_with_timeout` also skips auto-download — it expects
+    /// the directory to already contain the model files.
     #[tokio::test]
-    async fn from_cache_with_timeout_returns_error_not_panic() {
+    async fn from_model_dir_with_timeout_errors_when_empty() {
         let empty_dir = tempfile::tempdir().unwrap();
         let result =
             OnnxReranker::from_model_dir_with_timeout(empty_dir.path().to_path_buf()).await;
@@ -572,8 +595,8 @@ mod tests {
             Ok(_) => unreachable!(),
         };
         assert!(
-            err_msg.contains("vectorcode init"),
-            "Error should suggest running init, got: {err_msg}"
+            err_msg.contains("Reranker model not found"),
+            "Error should mention model not found, got: {err_msg}"
         );
     }
 
@@ -596,15 +619,15 @@ mod tests {
     }
 
     #[test]
-    fn reranker_model_manager_load_model_errors_with_init_hint() {
+    fn reranker_model_manager_load_model_errors_when_empty() {
         let dir = tempfile::tempdir().unwrap();
         let manager = RerankerModelManager::with_model_dir(dir.path().to_path_buf());
         let result = manager.load_model();
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("vectorcode init"),
-            "Error should suggest running init, got: {err_msg}"
+            err_msg.contains("Reranker model not found"),
+            "Error should mention missing model, got: {err_msg}"
         );
     }
 }

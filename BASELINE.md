@@ -112,7 +112,8 @@ Listo para Fase 1.5 (reranker ONNX) y Fase 1.6 (re-medición completa con hybrid
 # Fase 1.5-1.6: Reranker ONNX + Re-medición (2026-06-19)
 
 Multi-mode benchmark comparing dense, sparse, hybrid (RRF), and hybrid-rerank
-search strategies over the mini corpus.
+search strategies over the mini corpus. **Reranker active** — BGE-Reranker-v2-m3
+cross-encoder running on CPU via ONNX Runtime.
 
 ## Configuración
 
@@ -120,7 +121,8 @@ search strategies over the mini corpus.
 |-------|-------|
 | Date | 2026-06-19 |
 | Embedder | Ollama / embeddinggemma:latest (768d) |
-| Reranker | BGE-Reranker-v2-m3 (ONNX, int8, ~571MB) — **not downloaded** |
+| Reranker | BGE-Reranker-v2-m3 (ONNX int8, ~571MB, self-contained) |
+| Reranker Source | `onnx-community/bge-reranker-v2-m3-ONNX` (HuggingFace) |
 | Reranker Timeout | 5000ms |
 | Reranker Top-K | 20 |
 | Platform | ARM (Apple Silicon) |
@@ -129,43 +131,56 @@ search strategies over the mini corpus.
 | Chunks | 83 |
 | Queries | 15 |
 
-> **Note:** The hybrid-rerank mode fell back to plain hybrid because the reranker
-> model (`Xenova/bge-reranker-v2-m3`) was not cached locally. To enable reranking,
-> download the model to `~/.vectorcode/models/bge-reranker-v2-m3/` from HuggingFace.
-
 ## Resultados — Multi-Mode Comparison
 
-| Mode | Recall@5 | Recall@10 | nDCG@10 | MRR | Duration |
-|------|----------|-----------|---------|-----|----------|
-| Dense | 0.3000 | 0.3000 | 0.2660 | 0.4333 | 16.1s |
-| Sparse (FTS5) | 0.0333 | 0.0333 | 0.0469 | 0.0667 | 7.5s |
-| Hybrid (RRF) | 0.2333 | 0.3000 | 0.1677 | 0.1322 | 14.5s |
-| Hybrid+Rerank* | 0.2000 | 0.3333 | 0.1721 | 0.1390 | 15.7s |
+| Mode | Recall@5 | nDCG@10 | MRR | Duration |
+|------|----------|---------|-----|----------|
+| Dense | 0.2667 | 0.1983 | 0.2333 | 11.6s |
+| Sparse (FTS5) | 0.0333 | 0.0469 | 0.0667 | 9.2s |
+| Hybrid (RRF) | 0.2000 | 0.1417 | 0.1389 | 11.3s |
+| **Hybrid+Rerank** | **0.2000** | **0.2083** | **0.3000** | 32.6s |
 
-*\* Fell back to hybrid — reranker model not downloaded. Results differ slightly
-due to Ollama embedder variance between runs.*
+### Mejora del Reranker sobre Hybrid
+
+| Métrica | Hybrid | Hybrid+Rerank | Delta |
+|---------|--------|---------------|-------|
+| nDCG@10 | 0.1417 | 0.2083 | **+47%** |
+| MRR | 0.1389 | 0.3000 | **+116%** |
+| Recall@5 | 0.2000 | 0.2000 | = |
+
+### Mejora total sobre Dense-only (Fase 1.2 baseline)
+
+| Métrica | Dense (Fase 1.2) | Hybrid+Rerank | Delta |
+|---------|-------------------|---------------|-------|
+| nDCG@10 | ~0.20 | 0.2083 | **+4%** |
+| MRR | ~0.23 | 0.3000 | **+30%** |
 
 ## Análisis
 
-**Dense** remains the strongest single-mode strategy for this corpus (MRR 0.4333),
-driven by strong Rust/thiserror recall. TypeScript/defu and Python/itsdangerous
-queries remain challenging for the embeddinggemma model.
+**El reranker funciona.** nDCG@10 mejora un 47% sobre hybrid y MRR más del doble.
+El cross-encoder re-ordena el top-K con scores de relevancia mucho más finos que
+RRF, empujando los documentos correctos a las primeras posiciones.
 
-**Sparse (FTS5/BM25)** performs poorly on natural-language queries (R@5 0.0333).
-This is expected — BM25 excels at exact term matching, not semantic intent.
-Its value is as a complement to dense in the hybrid fusion.
+**Recall@5 no cambia** porque el reranker no descubre documentos nuevos — solo
+re-ordena lo que el retrieval (dense+sparse) ya encontró. El recall es
+responsabilidad del retrieval; nDCG y MRR son responsabilidad del ranking.
 
-**Hybrid (RRF)** improves Recall@10 to match Dense (0.3000) while adding lexical
-coverage. The nDCG@10 is lower than Dense because RRF fusion introduces some
-rank noise from the sparse channel. The fusion is conservative (RRF k=60).
+**Latencia**: 32.6s vs 11.3s (~3×). El costo de correr un cross-encoder de 568M
+parámetros en CPU pura. El modo es explícitamente opt-in (`--mode hybrid-rerank`),
+dejando al usuario elegir entre velocidad y calidad. Para agentes IA que hacen
+búsquedas esporádicas, el trade-off es aceptable.
 
-**Hybrid+Rerank** could not be fully evaluated — the ONNX reranker model requires
-a ~571MB download from HuggingFace. Once downloaded, the reranker should re-order
-the top-20 hybrid results using cross-encoder scoring, improving nDCG and MRR.
+**Dense vs Hybrid+Rerank**: El pipeline completo (dense + sparse + RRF + reranker)
+supera al dense-only original en calidad de ranking. Sparse solo (FTS5/BM25) sigue
+siendo débil para queries en lenguaje natural, pero su valor está en complementar
+al dense en la fusión RRF.
 
-**Bug fix during benchmark:** Fixed a pre-existing FTS5 bug where hyphenated query
-terms (e.g., "key-based") caused `no such column` errors. The `sanitize_fts_query`
-function now strips `-` and `+` operators and quotes all tokens.
+**Bugs corregidos durante Fase 1.5-1.6**:
+- `sanitize_fts_query`: términos con guiones ("key-based") causaban error FTS5
+- `from_cache_with_timeout()`: no descargaba el modelo automáticamente
+- URL del modelo: `Xenova/bge-reranker-v2-m3` no existe → `onnx-community/...`
+- `model.onnx` con external data → `model_quantized.onnx` self-contained
+- `token_type_ids`: XLM-RoBERTa no acepta este input (solo BERT)
 
 ## Verificación
 
@@ -179,10 +194,9 @@ function now strips `-` and `+` operators and quotes all tokens.
 # Requires: Ollama running with embeddinggemma:latest
 ollama pull embeddinggemma:latest
 
+# First run with hybrid-rerank triggers automatic model download (~571MB)
+cargo run -- search "test" --mode hybrid-rerank
+
 # Run multi-mode benchmark
 cargo run -- benchmark --corpus mini --output table --mode all
-
-# For full hybrid-rerank evaluation, download the reranker model first:
-# Model: Xenova/bge-reranker-v2-m3 (~571MB)
-# Place in: ~/.vectorcode/models/bge-reranker-v2-m3/model.onnx + tokenizer.json
 ```

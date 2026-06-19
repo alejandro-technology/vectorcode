@@ -320,14 +320,6 @@ fn prompt_ollama_url_if_needed(provider: &ProviderArg, quiet: bool) -> String {
     }
 }
 
-#[cfg(test)]
-fn prompt_ollama_url_if_needed(provider: &ProviderArg) -> String {
-    if !matches!(provider, ProviderArg::Ollama) {
-        return String::new();
-    }
-    "http://localhost:11434".to_string()
-}
-
 /// Generate the config.toml content for the chosen provider.
 fn generate_config_toml(
     provider: &ProviderArg,

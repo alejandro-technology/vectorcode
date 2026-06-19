@@ -209,7 +209,7 @@ default_threshold = 0.3
 
 ## MCP Tools
 
-When running as an MCP server, VectorCode exposes three tools:
+When running as an MCP server, VectorCode exposes the following tools:
 
 ### `vec_search`
 
@@ -218,23 +218,49 @@ Semantic code search — find code by meaning, not just by name.
 Parameters:
 
 - `query` (required) — Natural language description of what you're looking for
-- `limit` (optional, default: 10) — Maximum results
+- `limit` (optional, default: 10) — Maximum results (max: 100)
 - `threshold` (optional, default: 0.3) — Minimum similarity score (0.0–1.0)
 - `language` (optional) — Filter by language
 - `path` (optional) — Filter by file path prefix
 
 ### `vec_status`
 
-Check the status of the VectorCode index.
+Check the status of the VectorCode index, including provider, dimensions, number of files indexed, and last sync time.
 
 ### `vec_reindex`
 
-Force re-indexing of the codebase or specific files.
+Trigger a background re-index of the project.
 
 Parameters:
 
-- `path` (optional) — Specific file or directory
-- `full` (optional, default: false) — Drop and rebuild from scratch
+- `full` (required) — Set to true to drop the index and start fresh
+
+### `vec_read_lines`
+
+Read a specific range of lines from a file. Use this instead of generic file reading when you only need to expand the context around a snippet found via vec_search.
+
+Parameters:
+
+- `file_path` (required) — The file path to read
+- `start_line` (required) — The starting line number (1-indexed, inclusive)
+- `end_line` (required) — The ending line number (1-indexed, inclusive)
+
+Notes:
+- Max 500 lines per call
+- Max file size: 2MB
+- Path must be within project bounds
+
+### `vec_outline`
+
+Get a structural outline of a source file — top-level functions, classes, structs, interfaces, and traits with their signatures. Useful for understanding file structure without reading the entire file.
+
+Parameters:
+
+- `file_path` (required) — The file path to outline (relative to project root)
+
+Notes:
+- Max file size: 2MB
+- Path must be within project bounds
 
 ## Benchmarks
 

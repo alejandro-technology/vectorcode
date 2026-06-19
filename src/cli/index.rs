@@ -60,6 +60,10 @@ pub async fn execute(args: &IndexArgs, project_path: &std::path::Path, quiet: bo
         );
     }
     let index_meta = index_meta.unwrap();
+
+    // Ensure schema is up to date (handles v2→v3 FTS5 migration)
+    db.init_schema(index_meta.dimensions)?;
+
     // Handle --full: drop all data and reinit schema
     if args.full {
         if !quiet {

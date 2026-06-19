@@ -14,6 +14,9 @@ use crate::store::db::Database;
 use crate::store::vectors;
 use crate::types::SearchResult;
 
+use super::fusion::HybridSearcher;
+use super::sparse_searcher::SparseSearcher;
+
 /// Search mode — determines which search strategy to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum SearchMode {
@@ -173,6 +176,28 @@ impl SearchStrategy for DenseSearcher {
     }
 }
 
+/// Build the appropriate search strategy based on the given mode.
+///
+/// Factory function that creates the right `SearchStrategy` implementation
+/// for the requested mode. Used by CLI/MCP to dispatch search requests.
+pub fn build_strategy(
+    mode: SearchMode,
+    db: Arc<tokio::sync::Mutex<Database>>,
+    embedder: Arc<dyn Embedder>,
+    config: SearchConfig,
+) -> Arc<dyn SearchStrategy> {
+    match mode {
+        SearchMode::Dense => Arc::new(DenseSearcher::new(db, embedder, config)),
+        SearchMode::Sparse => Arc::new(SparseSearcher::new(db, config)),
+        SearchMode::Hybrid => {
+            let dense: Arc<dyn SearchStrategy> =
+                Arc::new(DenseSearcher::new(db.clone(), embedder, config.clone()));
+            let sparse: Arc<dyn SearchStrategy> = Arc::new(SparseSearcher::new(db, config));
+            Arc::new(HybridSearcher::new(dense, sparse, 60))
+        }
+    }
+}
+
 /// Enrich a short query for better embedding (spec §10.1 step 2).
 ///
 /// If the query has fewer than 3 words, prepend "code that" to provide
@@ -303,6 +328,50 @@ mod tests {
             .await
             .unwrap();
         assert!(results.is_empty(), "Empty DB should return no results");
+    }
+
+    // ─── build_strategy tests ──────────────────────────────────────────
+
+    #[test]
+    fn build_strategy_dense_returns_dense_searcher() {
+        let db = setup_test_db();
+        let embedder = Arc::new(MockEmbedder::new(64));
+        let config = SearchConfig::default();
+        let strategy = build_strategy(
+            SearchMode::Dense,
+            Arc::new(tokio::sync::Mutex::new(db)),
+            embedder,
+            config,
+        );
+        assert_eq!(strategy.mode(), SearchMode::Dense);
+    }
+
+    #[test]
+    fn build_strategy_sparse_returns_sparse_searcher() {
+        let db = setup_test_db();
+        let embedder = Arc::new(MockEmbedder::new(64));
+        let config = SearchConfig::default();
+        let strategy = build_strategy(
+            SearchMode::Sparse,
+            Arc::new(tokio::sync::Mutex::new(db)),
+            embedder,
+            config,
+        );
+        assert_eq!(strategy.mode(), SearchMode::Sparse);
+    }
+
+    #[test]
+    fn build_strategy_hybrid_returns_hybrid_searcher() {
+        let db = setup_test_db();
+        let embedder = Arc::new(MockEmbedder::new(64));
+        let config = SearchConfig::default();
+        let strategy = build_strategy(
+            SearchMode::Hybrid,
+            Arc::new(tokio::sync::Mutex::new(db)),
+            embedder,
+            config,
+        );
+        assert_eq!(strategy.mode(), SearchMode::Hybrid);
     }
 
     // ─── SearchOptions tests ───────────────────────────────────────────

@@ -13,7 +13,6 @@ use crate::types::SearchResult;
 /// FTS5 interprets `*`, `^`, `"`, `(`, `)`, `:`, `;` as operators.
 /// If left in user queries, they cause MATCH syntax errors.
 /// After stripping, collapse whitespace and trim.
-#[allow(dead_code)] // Used by SparseSearcher in fase1-hybrid-search batch 3
 pub(crate) fn sanitize_fts_query(query: &str) -> String {
     let stripped: String = query
         .chars()
@@ -32,7 +31,6 @@ pub(crate) fn sanitize_fts_query(query: &str) -> String {
 /// bm25 returns negative values (lower = better). Normalization:
 /// `(-bm25) / (1 - bm25)` maps to [0, 1) where higher = better,
 /// matching the `SearchResult.score` contract.
-#[allow(dead_code)] // Used by SparseSearcher in fase1-hybrid-search batch 3
 pub(crate) fn search_sparse(
     conn: &Connection,
     query: &str,

@@ -1,0 +1,106 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  benchmark:
+    name: Benchmark (mini-corpus)
+    runs-on: macos-14  # ARM runner for ONNX performance
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache ONNX model
+        uses: actions/cache@v4
+        with:
+          path: ~/.vectorcode/models
+          key: onnx-model-all-MiniLM-L6-v2
+          restore-keys: |
+            onnx-model-
+
+      - name: Download ONNX model (if not cached)
+        run: |
+          if [ ! -d "$HOME/.vectorcode/models" ]; then
+            echo "ONNX model not cached, will download on first run"
+          fi
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Run mini-corpus benchmark
+        run: |
+          cargo run --release -- benchmark --corpus mini --output table
+        continue-on-error: true  # Fase 1.1-1.2: informational only, exit 0
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            benchmark-*.json
+            BASELINE.md
+          retention-days: 30
+
+      - name: Comment PR with results
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let body = '## Benchmark Results (mini-corpus)\n\n';
+            
+            try {
+              const results = fs.readFileSync('benchmark-mini.json', 'utf8');
+              const data = JSON.parse(results);
+              
+              body += `**Corpus**: ${data.corpus}\n`;
+              body += `**Files indexed**: ${data.files_indexed}\n`;
+              body += `**Queries executed**: ${data.queries_executed}\n`;
+              body += `**Duration**: ${data.duration_secs.toFixed(2)}s\n\n`;
+              
+              body += '### Aggregate Metrics\n\n';
+              body += '| Metric | Value |\n';
+              body += '|--------|-------|\n';
+              body += `| Recall@5 | ${data.aggregate.recall_at_5.toFixed(4)} |\n`;
+              body += `| Recall@10 | ${data.aggregate.recall_at_10.toFixed(4)} |\n`;
+              body += `| nDCG@10 | ${data.aggregate.ndcg_at_10.toFixed(4)} |\n`;
+              body += `| MRR | ${data.aggregate.mrr.toFixed(4)} |\n`;
+              
+              body += '\n<details><summary>Per-query results</summary>\n\n';
+              body += '| Query | R@5 | R@10 | nDCG | MRR |\n';
+              body += '|-------|-----|------|------|-----|\n';
+              
+              for (const qr of data.query_results.slice(0, 10)) {
+                const query = qr.query.substring(0, 40);
+                body += `| ${query} | ${qr.recall_at_5.toFixed(2)} | ${qr.recall_at_10.toFixed(2)} | ${qr.ndcg_at_10.toFixed(2)} | ${qr.mrr.toFixed(2)} |\n`;
+              }
+              
+              if (data.query_results.length > 10) {
+                body += `| ... and ${data.query_results.length - 10} more | | | | |\n`;
+              }
+              
+              body += '\n</details>\n';
+            } catch (err) {
+              body += '⚠️ Could not parse benchmark results\n';
+            }
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });

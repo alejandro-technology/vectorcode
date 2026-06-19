@@ -6,10 +6,10 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::Args;
 
-use crate::bench::corpus::{Corpus, GitCorpus, LocalCorpus};
+use crate::bench::corpus::{Corpus, GitCorpus, LocalCorpus, MultiCorpus};
 use crate::bench::report::{self, OutputFormat};
 use crate::bench::runner;
-use crate::bench::schema::{CorpusConfig, CorpusSource, QuerySet};
+use crate::bench::schema::{CorpusSource, QuerySet};
 use crate::embedder::mock::MockEmbedder;
 
 /// Corpus selection argument.
@@ -177,87 +177,70 @@ fn build_corpus(
         .get(name)
         .ok_or_else(|| anyhow::anyhow!("Corpus '{name}' not found in config"))?;
 
-    // Parse the corpus config
-    let config: CorpusConfig = parse_corpus_config(name, config_value, project_path)?;
-
-    match config.source {
-        CorpusSource::Local { path } => {
-            let full_path = if path.is_absolute() {
-                path
-            } else {
-                project_path.join(path)
-            };
-            Ok(Box::new(LocalCorpus::new(
-                name.to_string(),
-                full_path,
-                config.file_extensions,
-            )))
-        }
-        CorpusSource::Git { url } => Ok(Box::new(GitCorpus::new(
-            name.to_string(),
-            url,
-            config.sparse_paths,
-            config.file_extensions,
-        ))),
-    }
-}
-
-/// Parse a corpus config from TOML value.
-fn parse_corpus_config(
-    name: &str,
-    value: &toml::Value,
-    _project_path: &std::path::Path,
-) -> Result<CorpusConfig> {
-    // Try to parse as a single repo
-    if let Ok(repo) = value.clone().try_into::<crate::bench::schema::CorpusRepo>() {
-        let source = if repo.url.starts_with("http") || repo.url.starts_with("git@") {
-            CorpusSource::Git { url: repo.url }
-        } else {
-            CorpusSource::Local {
-                path: PathBuf::from(repo.url),
-            }
-        };
-
-        return Ok(CorpusConfig {
-            name: name.to_string(),
-            source,
-            file_extensions: repo.file_extensions,
-            sparse_paths: repo.sparse_paths,
-        });
-    }
-
-    // Try to parse as multi-repo (for mini-corpus)
-    if let Ok(multi) = value
+    // Try to parse as multi-repo first (for mini-corpus)
+    if let Ok(multi) = config_value
         .clone()
         .try_into::<crate::bench::schema::CorpusEntry>()
     {
         match multi {
             crate::bench::schema::CorpusEntry::Multi { repos } => {
-                // For multi-repo, use the first repo's config (simplified for now)
-                // In Fase 1.1-1.2, we'll use LocalCorpus with test fixtures
-                let first_repo = repos
-                    .first()
-                    .ok_or_else(|| anyhow::anyhow!("Multi-repo corpus '{name}' has no repos"))?;
+                if repos.is_empty() {
+                    anyhow::bail!("Multi-repo corpus '{name}' has no repos");
+                }
 
-                let source = if first_repo.url.starts_with("http") {
-                    CorpusSource::Git {
-                        url: first_repo.url.clone(),
-                    }
-                } else {
-                    CorpusSource::Local {
-                        path: PathBuf::from(&first_repo.url),
-                    }
-                };
+                let mut corpora: Vec<Box<dyn Corpus>> = Vec::new();
+                for (idx, repo) in repos.iter().enumerate() {
+                    let corpus_name = format!("{name}_{idx}");
+                    let corpus: Box<dyn Corpus> =
+                        if repo.url.starts_with("http") || repo.url.starts_with("git@") {
+                            Box::new(GitCorpus::new(
+                                corpus_name,
+                                repo.url.clone(),
+                                repo.sparse_paths.clone(),
+                                repo.file_extensions.clone(),
+                            ))
+                        } else {
+                            let full_path = if std::path::Path::new(&repo.url).is_absolute() {
+                                std::path::PathBuf::from(&repo.url)
+                            } else {
+                                project_path.join(&repo.url)
+                            };
+                            Box::new(LocalCorpus::new(
+                                corpus_name,
+                                full_path,
+                                repo.file_extensions.clone(),
+                            ))
+                        };
+                    corpora.push(corpus);
+                }
 
-                return Ok(CorpusConfig {
-                    name: name.to_string(),
-                    source,
-                    file_extensions: first_repo.file_extensions.clone(),
-                    sparse_paths: first_repo.sparse_paths.clone(),
-                });
+                return Ok(Box::new(MultiCorpus::new(name.to_string(), corpora)));
             }
             crate::bench::schema::CorpusEntry::Single(repo) => {
-                return parse_corpus_config(name, &toml::Value::try_from(repo)?, _project_path);
+                let source = if repo.url.starts_with("http") || repo.url.starts_with("git@") {
+                    CorpusSource::Git { url: repo.url }
+                } else {
+                    let full_path = if std::path::Path::new(&repo.url).is_absolute() {
+                        std::path::PathBuf::from(&repo.url)
+                    } else {
+                        project_path.join(&repo.url)
+                    };
+                    CorpusSource::Local { path: full_path }
+                };
+
+                return match source {
+                    CorpusSource::Local { path } => Ok(Box::new(LocalCorpus::new(
+                        name.to_string(),
+                        path,
+                        repo.file_extensions,
+                    ))),
+                    CorpusSource::Git { url } => Ok(Box::new(GitCorpus::new(
+                        name.to_string(),
+                        url,
+                        repo.sparse_paths,
+                        repo.file_extensions,
+                    ))),
+                };
             }
         }
     }

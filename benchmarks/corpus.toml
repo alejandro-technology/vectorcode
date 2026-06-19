@@ -2,9 +2,24 @@
 # Defines the source repositories and file filters for each corpus.
 
 [mini]
-# Local test fixtures for CI (no network required)
-url = "tests/fixtures/mini"
-file_extensions = [".rs", ".ts", ".py"]
+# Mini-corpus: 3 small, permissively-licensed repos
+# Rust: error handling patterns
+[[mini.repos]]
+url = "https://github.com/dtolnay/thiserror"
+sparse_paths = ["src"]
+file_extensions = [".rs"]
+
+# TypeScript: async concurrency limiter
+[[mini.repos]]
+url = "https://github.com/sindresorhus/p-limit"
+sparse_paths = ["."]
+file_extensions = [".ts"]
+
+# Python: signing utility
+[[mini.repos]]
+url = "https://github.com/pallets/itsdangerous"
+sparse_paths = ["src/itsdangerous"]
+file_extensions = [".py"]
 
 [vscode]
 # VSCode editor source (sparse checkout for scale benchmark)

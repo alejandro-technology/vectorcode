@@ -239,6 +239,50 @@ impl Corpus for GitCorpus {
     }
 }
 
+/// Multi-corpus — combines multiple corpora into one (for mini-corpus with multiple repos).
+pub struct MultiCorpus {
+    name: String,
+    corpora: Vec<Box<dyn Corpus>>,
+}
+
+impl MultiCorpus {
+    /// Create a new MultiCorpus.
+    pub fn new(name: String, corpora: Vec<Box<dyn Corpus>>) -> Self {
+        Self { name, corpora }
+    }
+}
+
+#[async_trait]
+impl Corpus for MultiCorpus {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn prepare(&self, dest: &Path) -> Result<Vec<PathBuf>> {
+        let mut all_files = Vec::new();
+
+        for (idx, corpus) in self.corpora.iter().enumerate() {
+            // Create a subdirectory for each corpus to avoid conflicts
+            let corpus_dest = dest.join(format!("corpus_{}", idx));
+            tokio::fs::create_dir_all(&corpus_dest).await?;
+
+            let files = corpus.prepare(&corpus_dest).await?;
+
+            // Convert paths to be relative to the main dest
+            for file in files {
+                let full_path = corpus_dest.join(&file);
+                let rel_to_dest = full_path
+                    .strip_prefix(dest)
+                    .map_err(|e| anyhow::anyhow!("Failed to strip prefix: {e}"))?
+                    .to_path_buf();
+                all_files.push(rel_to_dest);
+            }
+        }
+
+        Ok(all_files)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

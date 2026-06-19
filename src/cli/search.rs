@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::Args;
 
 use crate::embedder::mock::MockEmbedder;
-use crate::engine::searcher::SearchOptions;
+use crate::engine::searcher::{build_strategy, SearchMode, SearchOptions};
 use crate::store::db::Database;
 use crate::store::meta;
 use crate::types::SearchResult;
@@ -36,6 +36,10 @@ pub struct SearchArgs {
     /// Output results as JSON.
     #[arg(long)]
     pub json: bool,
+
+    /// Search mode: dense (semantic), sparse (lexical FTS5), hybrid (both).
+    #[arg(long, value_parser(["dense", "sparse", "hybrid"]), default_value = "dense")]
+    pub mode: String,
 }
 
 /// Execute the `search` command (spec §12.4).
@@ -59,8 +63,13 @@ pub async fn execute(args: &SearchArgs, project_path: &std::path::Path, quiet: b
     let index_meta = meta::read_index_meta(db.conn())?
         .ok_or_else(|| anyhow::anyhow!("Index metadata not found. Run `vectorcode init` first."))?;
 
-    // Create embedder
-    let embedder: Arc<dyn crate::embedder::Embedder> =
+    // Parse search mode from CLI arg (already validated by clap value_parser)
+    let mode: SearchMode = args.mode.parse().unwrap_or(SearchMode::Dense);
+
+    // Create embedder only when needed (sparse mode skips embedder entirely)
+    let embedder: Arc<dyn crate::embedder::Embedder> = if mode == SearchMode::Sparse {
+        Arc::new(MockEmbedder::new(index_meta.dimensions))
+    } else {
         match crate::cli::create_embedder_from_config(&config).await {
             Ok(e) => e,
             Err(err) => {
@@ -73,26 +82,30 @@ pub async fn execute(args: &SearchArgs, project_path: &std::path::Path, quiet: b
                 }
                 Arc::new(MockEmbedder::new(index_meta.dimensions))
             }
-        };
+        }
+    };
 
-    // Validate embedder configuration matches index metadata
-    if index_meta.dimensions != embedder.dimensions() {
-        anyhow::bail!(
-            "Index dimensions ({}) do not match current embedder dimensions ({})",
-            index_meta.dimensions,
-            embedder.dimensions()
-        );
-    }
-    if index_meta.provider != config.provider.name {
-        anyhow::bail!(
-            "Index provider ({}) does not match current configured provider ({})",
-            index_meta.provider,
-            config.provider.name
-        );
+    // Validate embedder configuration matches index metadata (only for dense/hybrid)
+    if mode != SearchMode::Sparse {
+        if index_meta.dimensions != embedder.dimensions() {
+            anyhow::bail!(
+                "Index dimensions ({}) do not match current embedder dimensions ({})",
+                index_meta.dimensions,
+                embedder.dimensions()
+            );
+        }
+        if index_meta.provider != config.provider.name {
+            anyhow::bail!(
+                "Index provider ({}) does not match current configured provider ({})",
+                index_meta.provider,
+                config.provider.name
+            );
+        }
     }
 
-    // Create searcher
-    let searcher = crate::engine::Searcher::new(
+    // Build the appropriate search strategy
+    let searcher = build_strategy(
+        mode,
         std::sync::Arc::new(tokio::sync::Mutex::new(Database::open(&db_path)?)),
         embedder,
         config.search.clone(),
@@ -104,7 +117,8 @@ pub async fn execute(args: &SearchArgs, project_path: &std::path::Path, quiet: b
         threshold: args.threshold,
         language: args.language.clone(),
         path: args.path.clone(),
-        ..Default::default()
+        mode,
+        rrf_k: config.search.rrf_k,
     };
 
     // Execute search
@@ -196,6 +210,7 @@ mod tests {
                 assert!(args.language.is_none());
                 assert!(args.path.is_none());
                 assert!(!args.json);
+                assert_eq!(args.mode, "dense");
             }
             _ => panic!("Expected Search command"),
         }
@@ -269,6 +284,45 @@ mod tests {
     }
 
     #[test]
+    fn search_args_parse_mode_sparse() {
+        let cli = Cli::parse_from(["vectorcode", "search", "--mode", "sparse", "query"]);
+        match cli.command {
+            crate::cli::Commands::Search(args) => {
+                assert_eq!(args.mode, "sparse");
+            }
+            _ => panic!("Expected Search command"),
+        }
+    }
+
+    #[test]
+    fn search_args_parse_mode_hybrid() {
+        let cli = Cli::parse_from(["vectorcode", "search", "--mode", "hybrid", "query"]);
+        match cli.command {
+            crate::cli::Commands::Search(args) => {
+                assert_eq!(args.mode, "hybrid");
+            }
+            _ => panic!("Expected Search command"),
+        }
+    }
+
+    #[test]
+    fn search_args_default_mode_is_dense() {
+        let cli = Cli::parse_from(["vectorcode", "search", "query"]);
+        match cli.command {
+            crate::cli::Commands::Search(args) => {
+                assert_eq!(args.mode, "dense");
+            }
+            _ => panic!("Expected Search command"),
+        }
+    }
+
+    #[test]
+    fn search_args_rejects_invalid_mode() {
+        let result = Cli::try_parse_from(["vectorcode", "search", "--mode", "invalid", "query"]);
+        assert!(result.is_err(), "Invalid mode should be rejected by clap");
+    }
+
+    #[test]
     fn search_fails_without_init() {
         let dir = tempfile::tempdir().unwrap();
         let args = SearchArgs {
@@ -278,6 +332,7 @@ mod tests {
             language: None,
             path: None,
             json: false,
+            mode: "dense".to_string(),
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(execute(&args, dir.path(), true));
@@ -310,6 +365,7 @@ mod tests {
             language: None,
             path: None,
             json: false,
+            mode: "dense".to_string(),
         };
         let result = rt.block_on(execute(&search_args, project_path, true));
         assert!(result.is_ok(), "Search should succeed: {:?}", result.err());

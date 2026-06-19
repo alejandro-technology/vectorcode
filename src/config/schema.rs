@@ -104,6 +104,14 @@ impl Config {
             ));
         }
 
+        let valid_modes = ["dense", "sparse", "hybrid"];
+        if !valid_modes.contains(&self.search.default_mode.as_str()) {
+            return Err(format!(
+                "search default_mode must be one of: dense, sparse, hybrid. Got: {}",
+                self.search.default_mode
+            ));
+        }
+
         // Validate active provider specific fields
         match self.provider.name.as_str() {
             "gemini" => {
@@ -382,6 +390,10 @@ pub struct SearchConfig {
     pub default_limit: usize,
     /// Default minimum similarity threshold (0.0–1.0).
     pub default_threshold: f32,
+    /// Default search mode: "dense", "sparse", or "hybrid".
+    pub default_mode: String,
+    /// RRF K parameter for reciprocal rank fusion (default: 60).
+    pub rrf_k: u32,
 }
 
 impl Default for SearchConfig {
@@ -389,6 +401,130 @@ impl Default for SearchConfig {
         Self {
             default_limit: 10,
             default_threshold: 0.3,
+            default_mode: "dense".to_string(),
+            rrf_k: 60,
+        }
+    }
+}
+
+impl SearchConfig {
+    /// Parse `default_mode` string into a `SearchMode` enum.
+    ///
+    /// Falls back to `SearchMode::Dense` if the string is invalid.
+    pub fn search_mode(&self) -> crate::engine::SearchMode {
+        self.default_mode
+            .parse()
+            .unwrap_or(crate::engine::SearchMode::Dense)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── SearchConfig default values ───────────────────────────────────
+
+    #[test]
+    fn search_config_default_mode_is_dense() {
+        let config = SearchConfig::default();
+        assert_eq!(config.default_mode, "dense");
+    }
+
+    #[test]
+    fn search_config_default_rrf_k_is_60() {
+        let config = SearchConfig::default();
+        assert_eq!(config.rrf_k, 60);
+    }
+
+    #[test]
+    fn search_config_default_preserves_existing_fields() {
+        let config = SearchConfig::default();
+        assert_eq!(config.default_limit, 10);
+        assert!((config.default_threshold - 0.3).abs() < f32::EPSILON);
+    }
+
+    // ─── SearchConfig::search_mode() ───────────────────────────────────
+
+    #[test]
+    fn search_config_search_mode_parses_dense() {
+        let config = SearchConfig::default();
+        assert_eq!(config.search_mode(), crate::engine::SearchMode::Dense);
+    }
+
+    #[test]
+    fn search_config_search_mode_parses_sparse() {
+        let config = SearchConfig {
+            default_mode: "sparse".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(config.search_mode(), crate::engine::SearchMode::Sparse);
+    }
+
+    #[test]
+    fn search_config_search_mode_parses_hybrid() {
+        let config = SearchConfig {
+            default_mode: "hybrid".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(config.search_mode(), crate::engine::SearchMode::Hybrid);
+    }
+
+    #[test]
+    fn search_config_search_mode_invalid_falls_back_to_dense() {
+        let config = SearchConfig {
+            default_mode: "invalid".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(config.search_mode(), crate::engine::SearchMode::Dense);
+    }
+
+    // ─── SearchConfig TOML deserialization ─────────────────────────────
+
+    #[test]
+    fn search_config_deserialize_with_new_fields() {
+        let toml_str = r#"
+            default_limit = 20
+            default_threshold = 0.5
+            default_mode = "hybrid"
+            rrf_k = 100
+        "#;
+        let config: SearchConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.default_limit, 20);
+        assert!((config.default_threshold - 0.5).abs() < f32::EPSILON);
+        assert_eq!(config.default_mode, "hybrid");
+        assert_eq!(config.rrf_k, 100);
+    }
+
+    #[test]
+    fn search_config_deserialize_defaults_when_missing() {
+        let toml_str = r#"
+            default_limit = 5
+            default_threshold = 0.1
+        "#;
+        let config: SearchConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.default_limit, 5);
+        assert!((config.default_threshold - 0.1).abs() < f32::EPSILON);
+        assert_eq!(config.default_mode, "dense");
+        assert_eq!(config.rrf_k, 60);
+    }
+
+    // ─── Config::validate() for default_mode ───────────────────────────
+
+    #[test]
+    fn validate_rejects_invalid_search_mode() {
+        let mut config = Config::default();
+        config.search.default_mode = "bogus".to_string();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("default_mode"));
+    }
+
+    #[test]
+    fn validate_accepts_valid_search_modes() {
+        for mode in &["dense", "sparse", "hybrid"] {
+            let mut config = Config::default();
+            config.search.default_mode = mode.to_string();
+            assert!(config.validate().is_ok(), "Mode '{mode}' should be valid");
         }
     }
 }

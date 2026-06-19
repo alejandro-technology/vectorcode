@@ -29,6 +29,21 @@ pub enum SearchMode {
     Hybrid,
 }
 
+impl std::str::FromStr for SearchMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "dense" => Ok(Self::Dense),
+            "sparse" => Ok(Self::Sparse),
+            "hybrid" => Ok(Self::Hybrid),
+            other => Err(format!(
+                "unknown search mode '{other}', expected: dense, sparse, hybrid"
+            )),
+        }
+    }
+}
+
 /// Strategy trait for search implementations (spec §10).
 ///
 /// Abstracts over Dense, Sparse, and Hybrid search modes.
@@ -106,8 +121,8 @@ impl DenseSearcher {
             threshold: self.config.default_threshold,
             language: None,
             path: None,
-            mode: SearchMode::Dense,
-            rrf_k: 60,
+            mode: self.config.search_mode(),
+            rrf_k: self.config.rrf_k,
         }
     }
 
@@ -192,8 +207,8 @@ pub fn build_strategy(
         SearchMode::Hybrid => {
             let dense: Arc<dyn SearchStrategy> =
                 Arc::new(DenseSearcher::new(db.clone(), embedder, config.clone()));
-            let sparse: Arc<dyn SearchStrategy> = Arc::new(SparseSearcher::new(db, config));
-            Arc::new(HybridSearcher::new(dense, sparse, 60))
+            let sparse: Arc<dyn SearchStrategy> = Arc::new(SparseSearcher::new(db, config.clone()));
+            Arc::new(HybridSearcher::new(dense, sparse, config.rrf_k))
         }
     }
 }
@@ -310,6 +325,32 @@ mod tests {
         assert_eq!(mode, SearchMode::Dense);
     }
 
+    #[test]
+    fn search_mode_from_str_dense() {
+        assert_eq!("dense".parse::<SearchMode>().unwrap(), SearchMode::Dense);
+    }
+
+    #[test]
+    fn search_mode_from_str_sparse() {
+        assert_eq!("sparse".parse::<SearchMode>().unwrap(), SearchMode::Sparse);
+    }
+
+    #[test]
+    fn search_mode_from_str_hybrid() {
+        assert_eq!("hybrid".parse::<SearchMode>().unwrap(), SearchMode::Hybrid);
+    }
+
+    #[test]
+    fn search_mode_from_str_invalid_returns_error() {
+        assert!("invalid".parse::<SearchMode>().is_err());
+    }
+
+    #[test]
+    fn search_mode_from_str_case_sensitive() {
+        assert!("Dense".parse::<SearchMode>().is_err());
+        assert!("HYBRID".parse::<SearchMode>().is_err());
+    }
+
     // ─── SearchStrategy trait tests ────────────────────────────────────
 
     #[test]
@@ -394,6 +435,8 @@ mod tests {
         let config = SearchConfig {
             default_limit: 25,
             default_threshold: 0.5,
+            default_mode: "sparse".to_string(),
+            rrf_k: 100,
         };
         let searcher = Searcher::new(
             std::sync::Arc::new(tokio::sync::Mutex::new(db)),
@@ -403,6 +446,8 @@ mod tests {
         let opts = searcher.default_search_options();
         assert_eq!(opts.limit, 25);
         assert!((opts.threshold - 0.5).abs() < f32::EPSILON);
+        assert_eq!(opts.mode, SearchMode::Sparse);
+        assert_eq!(opts.rrf_k, 100);
     }
 
     // ─── Searcher integration tests ────────────────────────────────────

@@ -22,6 +22,7 @@ impl Default for Config {
                 gemini: None,
                 ollama: None,
                 openai: None,
+                openrouter: None,
             },
             indexing: IndexingConfig::default(),
             watcher: WatcherConfig::default(),
@@ -51,6 +52,12 @@ impl Config {
                 .get_or_insert_with(OpenAiConfig::default)
                 .api_key = val;
         }
+        if let Ok(val) = std::env::var("OPENROUTER_API_KEY") {
+            self.provider
+                .openrouter
+                .get_or_insert_with(OpenRouterConfig::default)
+                .api_key = val;
+        }
         if let Ok(val) = std::env::var("VECTORCODE_NO_WATCH") {
             if val == "1" {
                 self.watcher.disabled = true;
@@ -65,7 +72,7 @@ impl Config {
 
     /// Validate configuration bounds and requirements.
     pub fn validate(&self) -> Result<(), String> {
-        let valid_providers = ["onnx", "gemini", "ollama", "openai", "mock"];
+        let valid_providers = ["onnx", "gemini", "ollama", "openai", "openrouter", "mock"];
         if !valid_providers.contains(&self.provider.name.as_str()) {
             return Err(format!("Unknown provider: {}", self.provider.name));
         }
@@ -101,8 +108,12 @@ impl Config {
         match self.provider.name.as_str() {
             "gemini" => {
                 if let Some(gemini) = &self.provider.gemini {
-                    if gemini.api_key.trim().is_empty() || gemini.api_key == "your-api-key" {
-                        return Err("Gemini API key is empty or not configured".to_string());
+                    if (gemini.api_key.trim().is_empty() || gemini.api_key == "your-api-key")
+                        && !gemini.api_key_from_env
+                    {
+                        return Err(
+                            "Gemini API key is empty or not configured. Set GEMINI_API_KEY env var or run `vectorcode init`.".to_string()
+                        );
                     }
                     if gemini.dimensions == 0 {
                         return Err("Gemini dimensions must be greater than 0".to_string());
@@ -113,11 +124,32 @@ impl Config {
             }
             "openai" => {
                 if let Some(openai) = &self.provider.openai {
-                    if openai.api_key.trim().is_empty() || openai.api_key == "your-api-key" {
-                        return Err("OpenAI API key is empty or not configured".to_string());
+                    if (openai.api_key.trim().is_empty() || openai.api_key == "your-api-key")
+                        && !openai.api_key_from_env
+                    {
+                        return Err(
+                            "OpenAI API key is empty or not configured. Set OPENAI_API_KEY env var or run `vectorcode init`.".to_string()
+                        );
                     }
                 } else {
                     return Err("OpenAI config section is missing".to_string());
+                }
+            }
+            "openrouter" => {
+                if let Some(openrouter) = &self.provider.openrouter {
+                    if (openrouter.api_key.trim().is_empty()
+                        || openrouter.api_key == "your-api-key")
+                        && !openrouter.api_key_from_env
+                    {
+                        return Err(
+                            "OpenRouter API key is empty or not configured. Set OPENROUTER_API_KEY env var or run `vectorcode init`.".to_string()
+                        );
+                    }
+                    if openrouter.dimensions == 0 {
+                        return Err("OpenRouter dimensions must be greater than 0".to_string());
+                    }
+                } else {
+                    return Err("OpenRouter config section is missing".to_string());
                 }
             }
             "ollama" => {
@@ -140,12 +172,13 @@ impl Config {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ProviderConfig {
-    /// Active provider: "onnx" | "gemini" | "ollama" | "openai"
+    /// Active provider: "onnx" | "gemini" | "ollama" | "openai" | "openrouter"
     pub name: String,
     pub onnx: Option<OnnxConfig>,
     pub gemini: Option<GeminiConfig>,
     pub ollama: Option<OllamaConfig>,
     pub openai: Option<OpenAiConfig>,
+    pub openrouter: Option<OpenRouterConfig>,
 }
 
 impl Default for ProviderConfig {
@@ -156,6 +189,7 @@ impl Default for ProviderConfig {
             gemini: None,
             ollama: None,
             openai: None,
+            openrouter: None,
         }
     }
 }
@@ -179,9 +213,13 @@ impl Default for OnnxConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct GeminiConfig {
+    #[serde(default)]
     pub api_key: String,
     pub model: String,
     pub dimensions: u32,
+    /// If true, the API key is loaded from `.vectorcode/.env` instead of this file.
+    #[serde(default)]
+    pub api_key_from_env: bool,
 }
 
 impl Default for GeminiConfig {
@@ -190,6 +228,7 @@ impl Default for GeminiConfig {
             api_key: String::new(),
             model: "gemini-embedding-001".to_string(),
             dimensions: 768,
+            api_key_from_env: false,
         }
     }
 }
@@ -215,8 +254,12 @@ impl Default for OllamaConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct OpenAiConfig {
+    #[serde(default)]
     pub api_key: String,
     pub model: String,
+    /// If true, the API key is loaded from `.vectorcode/.env` instead of this file.
+    #[serde(default)]
+    pub api_key_from_env: bool,
 }
 
 impl Default for OpenAiConfig {
@@ -224,6 +267,31 @@ impl Default for OpenAiConfig {
         Self {
             api_key: String::new(),
             model: "text-embedding-3-small".to_string(),
+            api_key_from_env: false,
+        }
+    }
+}
+
+/// OpenRouter provider settings.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct OpenRouterConfig {
+    #[serde(default)]
+    pub api_key: String,
+    pub model: String,
+    pub dimensions: u32,
+    /// If true, the API key is loaded from `.vectorcode/.env` instead of this file.
+    #[serde(default)]
+    pub api_key_from_env: bool,
+}
+
+impl Default for OpenRouterConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            model: "nvidia/llama-nemotron-embed-vl-1b-v2:free".to_string(),
+            dimensions: 768,
+            api_key_from_env: false,
         }
     }
 }

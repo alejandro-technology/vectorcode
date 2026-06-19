@@ -10,6 +10,7 @@ pub mod model_manager;
 pub mod ollama;
 pub mod onnx;
 pub mod openai;
+pub mod openrouter;
 
 use crate::error::VectorCodeError;
 use async_trait::async_trait;

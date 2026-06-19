@@ -80,6 +80,25 @@ pub async fn execute(args: &InitArgs, project_path: &std::path::Path, quiet: boo
     // Step 1: Create .vectorcode/ directory
     std::fs::create_dir_all(&vc_dir)?;
 
+    // Step 1b: Write .env file with API key if one was provided
+    if !api_key.is_empty() && provider_requires_api_key(&provider) {
+        let env_var = api_key_env_var(&provider);
+        let env_path = vc_dir.join(".env");
+        let existing = if env_path.exists() {
+            let content = std::fs::read_to_string(&env_path).unwrap_or_default();
+            // Remove existing line for this env var if present
+            let filtered: Vec<&str> = content
+                .lines()
+                .filter(|line| !line.starts_with(&format!("{env_var}=")))
+                .collect();
+            filtered.join("\n") + "\n"
+        } else {
+            String::new()
+        };
+        let env_content = format!("{existing}{env_var}={api_key}\n");
+        std::fs::write(&env_path, &env_content)?;
+    }
+
     // Resolve provider defaults
     let (model, dims) = resolve_provider_defaults(&provider, &args.model, &args.dims);
 
@@ -126,7 +145,10 @@ pub async fn execute(args: &InitArgs, project_path: &std::path::Path, quiet: boo
 
     // Step 4: Create .gitignore
     let gitignore_path = vc_dir.join(".gitignore");
-    std::fs::write(&gitignore_path, "index.db\nindex.db-wal\nindex.db-shm\n")?;
+    std::fs::write(
+        &gitignore_path,
+        ".env\nindex.db\nindex.db-wal\nindex.db-shm\n",
+    )?;
 
     // Step 5: Create config.toml
     let config_content = generate_config_toml(&provider, &model, dims, &api_key, &ollama_url);
@@ -203,22 +225,29 @@ fn resolve_provider_defaults(
                 .unwrap_or_else(|| "text-embedding-3-small".to_string()),
             dims.unwrap_or(1536),
         ),
+        ProviderArg::Openrouter => (
+            model
+                .clone()
+                .unwrap_or_else(|| "nvidia/llama-nemotron-embed-vl-1b-v2:free".to_string()),
+            dims.unwrap_or(768),
+        ),
     }
 }
 
 /// Return the interactive provider selection prompt text.
 fn provider_prompt_text() -> &'static str {
     "Select embedding provider:\n\
-     [1] onnx    — Local, offline, no API key needed (~23MB download)\n\
-     [2] gemini  — Google API, requires GEMINI_API_KEY\n\
-     [3] ollama  — Local Ollama server, requires ollama serve\n\
-     [4] openai  — OpenAI API, requires OPENAI_API_KEY\n\
-     Enter number (1-4): "
+     [1] onnx       — Local, offline, no API key needed (~23MB download)\n\
+     [2] gemini     — Google API, requires GEMINI_API_KEY\n\
+     [3] ollama     — Local Ollama server, requires ollama serve\n\
+     [4] openai     — OpenAI API, requires OPENAI_API_KEY\n\
+     [5] openrouter — OpenRouter API, requires OPENROUTER_API_KEY\n\
+     Enter number (1-5): "
 }
 
 /// Parse a user's numbered input into a `ProviderArg`.
 ///
-/// Accepts "1"–"4" with optional surrounding whitespace.
+/// Accepts "1"–"5" with optional surrounding whitespace.
 /// Returns `None` for invalid input.
 fn parse_provider_choice(input: &str) -> Option<ProviderArg> {
     match input.trim() {
@@ -226,6 +255,7 @@ fn parse_provider_choice(input: &str) -> Option<ProviderArg> {
         "2" => Some(ProviderArg::Gemini),
         "3" => Some(ProviderArg::Ollama),
         "4" => Some(ProviderArg::Openai),
+        "5" => Some(ProviderArg::Openrouter),
         _ => None,
     }
 }
@@ -237,6 +267,7 @@ fn api_key_env_var(provider: &ProviderArg) -> &'static str {
     match provider {
         ProviderArg::Gemini => "GEMINI_API_KEY",
         ProviderArg::Openai => "OPENAI_API_KEY",
+        ProviderArg::Openrouter => "OPENROUTER_API_KEY",
         ProviderArg::Onnx | ProviderArg::Ollama => "",
     }
 }
@@ -321,11 +352,14 @@ fn prompt_ollama_url_if_needed(provider: &ProviderArg, quiet: bool) -> String {
 }
 
 /// Generate the config.toml content for the chosen provider.
+///
+/// API keys are NOT embedded in config.toml — they are stored in `.vectorcode/.env`
+/// and read from environment variables at runtime.
 fn generate_config_toml(
     provider: &ProviderArg,
     model: &str,
     dims: u32,
-    api_key: &str,
+    _api_key: &str,
     ollama_url: &str,
 ) -> String {
     let provider_section = match provider {
@@ -342,7 +376,7 @@ model = "{model}"
 name = "gemini"
 
 [provider.gemini]
-api_key = "{api_key}"
+api_key_from_env = true
 model = "{model}"
 dimensions = {dims}
 "#
@@ -361,8 +395,18 @@ model = "{model}"
 name = "openai"
 
 [provider.openai]
-api_key = "{api_key}"
+api_key_from_env = true
 model = "{model}"
+"#
+        ),
+        ProviderArg::Openrouter => format!(
+            r#"[provider]
+name = "openrouter"
+
+[provider.openrouter]
+api_key_from_env = true
+model = "{model}"
+dimensions = {dims}
 "#
         ),
     };
@@ -435,6 +479,13 @@ mod tests {
     }
 
     #[test]
+    fn resolve_provider_defaults_openrouter() {
+        let (model, dims) = resolve_provider_defaults(&ProviderArg::Openrouter, &None, &None);
+        assert_eq!(model, "nvidia/llama-nemotron-embed-vl-1b-v2:free");
+        assert_eq!(dims, 768);
+    }
+
+    #[test]
     fn resolve_provider_defaults_with_overrides() {
         let (model, dims) = resolve_provider_defaults(
             &ProviderArg::Gemini,
@@ -455,10 +506,10 @@ mod tests {
     }
 
     #[test]
-    fn generate_config_toml_gemini_contains_api_key() {
+    fn generate_config_toml_gemini_contains_api_key_from_env() {
         let toml = generate_config_toml(&ProviderArg::Gemini, "gemini-embedding-001", 768, "", "");
         assert!(toml.contains("name = \"gemini\""));
-        assert!(toml.contains("api_key = \"\""));
+        assert!(toml.contains("api_key_from_env = true"));
         assert!(toml.contains("dimensions = 768"));
     }
 
@@ -476,11 +527,26 @@ mod tests {
     }
 
     #[test]
-    fn generate_config_toml_openai_contains_api_key() {
+    fn generate_config_toml_openrouter_contains_provider() {
+        let toml = generate_config_toml(
+            &ProviderArg::Openrouter,
+            "nvidia/llama-nemotron-embed-vl-1b-v2:free",
+            768,
+            "",
+            "",
+        );
+        assert!(toml.contains("name = \"openrouter\""));
+        assert!(toml.contains("api_key_from_env = true"));
+        assert!(toml.contains("dimensions = 768"));
+        assert!(toml.contains("model = \"nvidia/llama-nemotron-embed-vl-1b-v2:free\""));
+    }
+
+    #[test]
+    fn generate_config_toml_openai_contains_api_key_from_env() {
         let toml =
             generate_config_toml(&ProviderArg::Openai, "text-embedding-3-small", 1536, "", "");
         assert!(toml.contains("name = \"openai\""));
-        assert!(toml.contains("api_key = \"\""));
+        assert!(toml.contains("api_key_from_env = true"));
     }
 
     #[test]
@@ -490,6 +556,7 @@ mod tests {
             ProviderArg::Gemini,
             ProviderArg::Ollama,
             ProviderArg::Openai,
+            ProviderArg::Openrouter,
         ] {
             let toml =
                 generate_config_toml(&provider, "test-model", 128, "", "http://localhost:11434");
@@ -588,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn init_gitignore_contains_db() {
+    fn init_gitignore_contains_db_and_env() {
         let dir = tempfile::tempdir().unwrap();
         let project_path = dir.path();
 
@@ -608,6 +675,7 @@ mod tests {
             gitignore.contains("index.db"),
             ".gitignore must contain index.db"
         );
+        assert!(gitignore.contains(".env"), ".gitignore must contain .env");
     }
 
     #[test]
@@ -658,6 +726,10 @@ mod tests {
             parse_provider_choice("4"),
             Some(ProviderArg::Openai)
         ));
+        assert!(matches!(
+            parse_provider_choice("5"),
+            Some(ProviderArg::Openrouter)
+        ));
     }
 
     #[test]
@@ -671,7 +743,7 @@ mod tests {
     #[test]
     fn parse_provider_choice_rejects_invalid_input() {
         assert!(parse_provider_choice("0").is_none());
-        assert!(parse_provider_choice("5").is_none());
+        assert!(parse_provider_choice("6").is_none());
         assert!(parse_provider_choice("abc").is_none());
         assert!(parse_provider_choice("").is_none());
     }
@@ -683,6 +755,7 @@ mod tests {
         assert!(text.contains("gemini"), "Must list gemini: {text}");
         assert!(text.contains("ollama"), "Must list ollama: {text}");
         assert!(text.contains("openai"), "Must list openai: {text}");
+        assert!(text.contains("openrouter"), "Must list openrouter: {text}");
         assert!(text.contains("1"), "Must show option numbers: {text}");
     }
 
@@ -690,6 +763,10 @@ mod tests {
     fn api_key_env_var_returns_correct_var_for_provider() {
         assert_eq!(api_key_env_var(&ProviderArg::Gemini), "GEMINI_API_KEY");
         assert_eq!(api_key_env_var(&ProviderArg::Openai), "OPENAI_API_KEY");
+        assert_eq!(
+            api_key_env_var(&ProviderArg::Openrouter),
+            "OPENROUTER_API_KEY"
+        );
         assert_eq!(api_key_env_var(&ProviderArg::Onnx), "");
         assert_eq!(api_key_env_var(&ProviderArg::Ollama), "");
     }
@@ -700,5 +777,6 @@ mod tests {
         assert!(provider_requires_api_key(&ProviderArg::Gemini));
         assert!(!provider_requires_api_key(&ProviderArg::Ollama));
         assert!(provider_requires_api_key(&ProviderArg::Openai));
+        assert!(provider_requires_api_key(&ProviderArg::Openrouter));
     }
 }

@@ -3,7 +3,7 @@ pub mod schema;
 use anyhow::Result;
 use schema::Config;
 
-/// Load configuration with priority: env vars → config file → defaults.
+/// Load configuration with priority: env vars → .env file → config file → defaults.
 ///
 /// `project_path` is the root of the project (where `.vectorcode/` lives).
 pub fn load_config(project_path: &std::path::Path) -> Result<Config> {
@@ -17,16 +17,64 @@ pub fn load_config(project_path: &std::path::Path) -> Result<Config> {
         Config::default()
     };
 
+    // Load API keys from .vectorcode/.env if api_key_from_env is true
+    let env_path = project_path.join(".vectorcode").join(".env");
+    if env_path.exists() {
+        if let Ok(env_content) = std::fs::read_to_string(&env_path) {
+            for line in env_content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some((key, value)) = line.split_once('=') {
+                    let key = key.trim();
+                    let value = value.trim();
+                    match key {
+                        "GEMINI_API_KEY" => {
+                            if let Some(gemini) = &mut config.provider.gemini {
+                                if gemini.api_key_from_env && gemini.api_key.is_empty() {
+                                    gemini.api_key = value.to_string();
+                                }
+                            }
+                        }
+                        "OPENAI_API_KEY" => {
+                            if let Some(openai) = &mut config.provider.openai {
+                                if openai.api_key_from_env && openai.api_key.is_empty() {
+                                    openai.api_key = value.to_string();
+                                }
+                            }
+                        }
+                        "OPENROUTER_API_KEY" => {
+                            if let Some(openrouter) = &mut config.provider.openrouter {
+                                if openrouter.api_key_from_env && openrouter.api_key.is_empty() {
+                                    openrouter.api_key = value.to_string();
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    // Warn about API keys in config file (security best practice)
     if let Some(gemini) = &config.provider.gemini {
         let key = gemini.api_key.trim();
-        if !key.is_empty() && key != "your-api-key" {
-            eprintln!("Warning: Gemini API key is configured in the config file. For security reasons, please use the GEMINI_API_KEY environment variable instead.");
+        if !key.is_empty() && key != "your-api-key" && !gemini.api_key_from_env {
+            eprintln!("Warning: Gemini API key is configured in the config file. For security reasons, please use GEMINI_API_KEY environment variable or .vectorcode/.env instead.");
         }
     }
     if let Some(openai) = &config.provider.openai {
         let key = openai.api_key.trim();
-        if !key.is_empty() && key != "your-api-key" {
-            eprintln!("Warning: OpenAI API key is configured in the config file. For security reasons, please use the OPENAI_API_KEY environment variable instead.");
+        if !key.is_empty() && key != "your-api-key" && !openai.api_key_from_env {
+            eprintln!("Warning: OpenAI API key is configured in the config file. For security reasons, please use OPENAI_API_KEY environment variable or .vectorcode/.env instead.");
+        }
+    }
+    if let Some(openrouter) = &config.provider.openrouter {
+        let key = openrouter.api_key.trim();
+        if !key.is_empty() && key != "your-api-key" && !openrouter.api_key_from_env {
+            eprintln!("Warning: OpenRouter API key is configured in the config file. For security reasons, please use OPENROUTER_API_KEY environment variable or .vectorcode/.env instead.");
         }
     }
 
@@ -142,6 +190,44 @@ model = "text-embedding-3-large"
     }
 
     #[test]
+    fn openrouter_provider_config_parses() {
+        let toml_str = r#"
+[provider]
+name = "openrouter"
+
+[provider.openrouter]
+api_key_from_env = true
+model = "nvidia/llama-nemotron-embed-vl-1b-v2:free"
+dimensions = 768
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        let openrouter = cfg.provider.openrouter.as_ref().unwrap();
+        assert!(openrouter.api_key_from_env);
+        assert_eq!(
+            openrouter.model,
+            "nvidia/llama-nemotron-embed-vl-1b-v2:free"
+        );
+        assert_eq!(openrouter.dimensions, 768);
+    }
+
+    #[test]
+    fn config_with_api_key_from_env_parses() {
+        let toml_str = r#"
+[provider]
+name = "gemini"
+
+[provider.gemini]
+api_key_from_env = true
+model = "gemini-embedding-001"
+dimensions = 768
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        let gemini = cfg.provider.gemini.as_ref().unwrap();
+        assert!(gemini.api_key_from_env);
+        assert!(gemini.api_key.is_empty());
+    }
+
+    #[test]
     #[serial]
     fn env_var_overrides_provider_name() {
         std::env::set_var("VECTORCODE_PROVIDER", "gemini");
@@ -149,6 +235,17 @@ model = "text-embedding-3-large"
         cfg.apply_env_overrides();
         assert_eq!(cfg.provider.name, "gemini");
         std::env::remove_var("VECTORCODE_PROVIDER");
+    }
+
+    #[test]
+    #[serial]
+    fn env_var_overrides_openrouter_api_key() {
+        std::env::set_var("OPENROUTER_API_KEY", "sk-or-test-key");
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        let openrouter = cfg.provider.openrouter.as_ref().unwrap();
+        assert_eq!(openrouter.api_key, "sk-or-test-key");
+        std::env::remove_var("OPENROUTER_API_KEY");
     }
 
     #[test]
@@ -202,6 +299,32 @@ default_limit = 25
         let cfg = load_config(dir.path()).unwrap();
         assert_eq!(cfg.provider.name, "openai");
         assert_eq!(cfg.search.default_limit, 25);
+    }
+
+    #[test]
+    #[serial]
+    fn load_config_reads_dotenv_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let vc_dir = dir.path().join(".vectorcode");
+        std::fs::create_dir_all(&vc_dir).unwrap();
+        std::fs::write(
+            vc_dir.join("config.toml"),
+            r#"
+[provider]
+name = "openrouter"
+
+[provider.openrouter]
+api_key_from_env = true
+model = "nvidia/llama-nemotron-embed-vl-1b-v2:free"
+dimensions = 768
+"#,
+        )
+        .unwrap();
+        std::fs::write(vc_dir.join(".env"), "OPENROUTER_API_KEY=sk-or-dotenv-key\n").unwrap();
+
+        let cfg = load_config(dir.path()).unwrap();
+        let openrouter = cfg.provider.openrouter.as_ref().unwrap();
+        assert_eq!(openrouter.api_key, "sk-or-dotenv-key");
     }
 
     /// Regression test: load_config must not be affected by concurrent env var mutations.
@@ -258,27 +381,39 @@ default_limit = 25
         cfg.provider.gemini = None;
         assert!(cfg.validate().is_err());
 
-        // Empty key
+        // Empty key, no api_key_from_env
         cfg.provider.gemini = Some(GeminiConfig {
             api_key: "".to_string(),
             model: "gemini-embedding-001".to_string(),
             dimensions: 768,
+            api_key_from_env: false,
         });
         assert!(cfg.validate().is_err());
 
-        // Placeholder key
+        // Placeholder key, no api_key_from_env
         cfg.provider.gemini = Some(GeminiConfig {
             api_key: "your-api-key".to_string(),
             model: "gemini-embedding-001".to_string(),
             dimensions: 768,
+            api_key_from_env: false,
         });
         assert!(cfg.validate().is_err());
+
+        // Valid: api_key_from_env = true with empty key
+        cfg.provider.gemini = Some(GeminiConfig {
+            api_key: "".to_string(),
+            model: "gemini-embedding-001".to_string(),
+            dimensions: 768,
+            api_key_from_env: true,
+        });
+        assert!(cfg.validate().is_ok());
 
         // Valid key
         cfg.provider.gemini = Some(GeminiConfig {
             api_key: "real-key".to_string(),
             model: "gemini-embedding-001".to_string(),
             dimensions: 768,
+            api_key_from_env: false,
         });
         assert!(cfg.validate().is_ok());
     }

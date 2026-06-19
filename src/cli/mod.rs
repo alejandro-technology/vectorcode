@@ -76,6 +76,7 @@ pub enum ProviderArg {
     Gemini,
     Ollama,
     Openai,
+    Openrouter,
 }
 
 impl ProviderArg {
@@ -86,6 +87,7 @@ impl ProviderArg {
             Self::Gemini => "gemini",
             Self::Ollama => "ollama",
             Self::Openai => "openai",
+            Self::Openrouter => "openrouter",
         }
     }
 }
@@ -172,6 +174,18 @@ pub async fn create_embedder_from_config(config: &Config) -> Result<Arc<dyn Embe
             })?;
             let embedder =
                 crate::embedder::openai::OpenAiEmbedder::new(openai_cfg.api_key.clone())?;
+            Ok(Arc::new(embedder))
+        }
+        "openrouter" => {
+            let openrouter_cfg = config.provider.openrouter.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "OpenRouter provider selected but no [provider.openrouter] in config"
+                )
+            })?;
+            let embedder = crate::embedder::openrouter::OpenRouterEmbedder::with_model(
+                openrouter_cfg.api_key.clone(),
+                openrouter_cfg.model.clone(),
+            )?;
             Ok(Arc::new(embedder))
         }
         "mock" => {
@@ -344,6 +358,7 @@ mod tests {
         assert_eq!(ProviderArg::Gemini.as_str(), "gemini");
         assert_eq!(ProviderArg::Ollama.as_str(), "ollama");
         assert_eq!(ProviderArg::Openai.as_str(), "openai");
+        assert_eq!(ProviderArg::Openrouter.as_str(), "openrouter");
     }
 
     #[test]
@@ -419,6 +434,7 @@ mod tests {
             api_key: "".to_string(),
             model: "gemini-embedding-001".to_string(),
             dimensions: 768,
+            api_key_from_env: false,
         });
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(create_embedder_from_config(&config));
@@ -429,6 +445,15 @@ mod tests {
     fn create_embedder_openai_without_config_errors() {
         let mut config = Config::default();
         config.provider.name = "openai".to_string();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(create_embedder_from_config(&config));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn create_embedder_openrouter_without_config_errors() {
+        let mut config = Config::default();
+        config.provider.name = "openrouter".to_string();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(create_embedder_from_config(&config));
         assert!(result.is_err());

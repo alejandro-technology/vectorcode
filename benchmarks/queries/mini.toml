@@ -1,69 +1,138 @@
 # Golden query set for mini-corpus benchmark
 # Each query has hand-labeled relevance judgments (0-3 scale).
 # 0 = irrelevant, 1 = marginally relevant, 2 = relevant, 3 = highly relevant
+# File paths include the corpus_N/ prefix from MultiCorpus.
 
 name = "mini"
 
-[[queries]]
-text = "error handling and custom error types"
-[[queries.judgments]]
-file = "error.rs"
-grade = 3
+# === Rust: dtolnay/thiserror ===
 
+[[queries]]
+text = "derive macro for custom error types with display messages"
 [[queries.judgments]]
-file = "signing.py"
+file = "corpus_0/src/lib.rs"
+grade = 3
+[[queries.judgments]]
+file = "corpus_0/src/display.rs"
+grade = 2
+
+[[queries]]
+text = "error downcasting to dyn Error trait object"
+[[queries.judgments]]
+file = "corpus_0/src/aserror.rs"
+grade = 3
+[[queries.judgments]]
+file = "corpus_0/src/lib.rs"
 grade = 1
 
 [[queries]]
-text = "async retry logic with exponential backoff"
+text = "Display implementation generation from error attributes"
 [[queries.judgments]]
-file = "search.rs"
+file = "corpus_0/src/display.rs"
 grade = 3
+[[queries.judgments]]
+file = "corpus_0/src/lib.rs"
+grade = 2
 
 [[queries]]
-text = "rate limiting concurrent async operations"
+text = "Sealed trait pattern for internal API boundaries"
 [[queries.judgments]]
-file = "rate_limiter.ts"
+file = "corpus_0/src/aserror.rs"
 grade = 3
-
-[[queries]]
-text = "cryptographic signing and token verification"
 [[queries.judgments]]
-file = "signing.py"
-grade = 3
-
-[[queries]]
-text = "HMAC signature generation"
-[[queries.judgments]]
-file = "signing.py"
-grade = 3
-
-[[queries]]
-text = "search functionality with scoring"
-[[queries.judgments]]
-file = "search.rs"
-grade = 3
-
-[[queries]]
-text = "concurrency control and queue management"
-[[queries.judgments]]
-file = "rate_limiter.ts"
-grade = 3
-
-[[queries]]
-text = "timeout handling for async operations"
-[[queries.judgments]]
-file = "rate_limiter.ts"
+file = "corpus_0/src/private.rs"
 grade = 2
 
 [[queries]]
 text = "error conversion from io::Error"
 [[queries.judgments]]
-file = "error.rs"
+file = "corpus_0/src/lib.rs"
+grade = 2
+
+# === TypeScript: unjs/defu ===
+
+[[queries]]
+text = "deep merge objects preserving nested structure"
+[[queries.judgments]]
+file = "corpus_1/src/defu.ts"
+grade = 3
+[[queries.judgments]]
+file = "corpus_1/src/types.ts"
+grade = 1
+
+[[queries]]
+text = "plain object detection and validation"
+[[queries.judgments]]
+file = "corpus_1/src/_utils.ts"
+grade = 3
+[[queries.judgments]]
+file = "corpus_1/src/defu.ts"
+grade = 2
+
+[[queries]]
+text = "array concatenation during object merging"
+[[queries.judgments]]
+file = "corpus_1/src/defu.ts"
 grade = 3
 
 [[queries]]
-text = "TypeScript class with private methods"
+text = "TypeScript generic types for deep merge functions"
 [[queries.judgments]]
-file = "rate_limiter.ts"
+file = "corpus_1/src/types.ts"
+grade = 3
+[[queries.judgments]]
+file = "corpus_1/src/defu.ts"
+grade = 2
+
+[[queries]]
+text = "custom merger function with key-based override"
+[[queries.judgments]]
+file = "corpus_1/src/defu.ts"
+grade = 3
+[[queries.judgments]]
+file = "corpus_1/src/types.ts"
+grade = 2
+
+# === Python: pallets/itsdangerous ===
+
+[[queries]]
+text = "HMAC signature generation for signed tokens"
+[[queries.judgments]]
+file = "corpus_2/src/itsdangerous/signer.py"
+grade = 3
+[[queries.judgments]]
+file = "corpus_2/src/itsdangerous/encoding.py"
+grade = 1
+
+[[queries]]
+text = "serialize and sign data with secret key rotation"
+[[queries.judgments]]
+file = "corpus_2/src/itsdangerous/serializer.py"
+grade = 3
+[[queries.judgments]]
+file = "corpus_2/src/itsdangerous/signer.py"
+grade = 2
+
+[[queries]]
+text = "key derivation using HMAC and salt"
+[[queries.judgments]]
+file = "corpus_2/src/itsdangerous/signer.py"
+grade = 3
+
+[[queries]]
+text = "timestamped signatures with expiry validation"
+[[queries.judgments]]
+file = "corpus_2/src/itsdangerous/timed.py"
+grade = 3
+[[queries.judgments]]
+file = "corpus_2/src/itsdangerous/signer.py"
+grade = 2
+
+[[queries]]
+text = "BadSignature exception and error handling"
+[[queries.judgments]]
+file = "corpus_2/src/itsdangerous/exc.py"
+grade = 3
+[[queries.judgments]]
+file = "corpus_2/src/itsdangerous/signer.py"
 grade = 2

@@ -9,10 +9,10 @@ url = "https://github.com/dtolnay/thiserror"
 sparse_paths = ["src"]
 file_extensions = [".rs"]
 
-# TypeScript: async concurrency limiter
+# TypeScript: deep merge utility
 [[mini.repos]]
-url = "https://github.com/sindresorhus/p-limit"
-sparse_paths = ["."]
+url = "https://github.com/unjs/defu"
+sparse_paths = ["src"]
 file_extensions = [".ts"]
 
 # Python: signing utility

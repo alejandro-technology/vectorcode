@@ -1,51 +1,52 @@
-# Benchmark Baseline
+# Baseline — Fase 1.2
 
-**Corpus**: mini
-**Date**: Pending first run
-**VectorCode Version**: 0.1.0
+VectorCode dense-only search quality baseline. Run against the curated
+mini-corpus (3 repos: thiserror Rust, defu TypeScript, itsdangerous Python)
+using the embeddinggemma:latest embedding model via Ollama on ARM (Apple Silicon).
 
-## Status
+## Run Info
 
-⚠️ **Baseline not yet established**
+| Field | Value |
+|-------|-------|
+| Date | 2026-06-19 |
+| Embedder | Ollama / embeddinggemma:latest (768d) |
+| Platform | ARM (Apple Silicon) |
+| Corpus | mini (thiserror + defu + itsdangerous) |
+| Files indexed | 18 |
+| Chunks | 83 |
+| Queries | 15 |
+| Duration | ~13.4s |
 
-This file will be populated after running the benchmark with the ONNX embedder on an ARM runner.
+## Aggregate Metrics
 
-## How to Generate Baseline
+| Metric | Value |
+|--------|-------|
+| Recall@5 | 0.3000 |
+| Recall@10 | 0.3000 |
+| nDCG@10 | 0.2415 |
+| MRR | 0.3500 |
 
-```bash
-# Build release binary
-cargo build --release
+## Per-Language Breakdown
 
-# Run benchmark with baseline output
-cargo run --release -- benchmark --corpus mini --output baseline
-```
+| Language | Queries | R@5 > 0 | Best R@5 |
+|----------|---------|---------|-----------|
+| Rust (thiserror) | 5 | 5/5 | 1.0000 |
+| TypeScript (defu) | 5 | 0/5 | 0.0000 |
+| Python (itsdangerous) | 5 | 1/5 | 0.5000 |
 
-This will:
-1. Clone the mini-corpus repos (thiserror, p-limit, itsdangerous)
-2. Index files with OnnxEmbedder
-3. Execute golden queries
-4. Write results to `BASELINE.md` and `results.json`
+## Notes
 
-## Expected Metrics (Fase 1.2)
-
-After establishing the baseline, we expect:
-- **Recall@5**: 0.5-0.7 (dense embeddings on small corpus)
-- **Recall@10**: 0.7-0.9
-- **nDCG@10**: 0.6-0.8
-- **MRR**: 0.5-0.8
-
-These are initial estimates. Actual values depend on:
-- ONNX model quality (all-MiniLM-L6-v2)
-- Query set composition
-- Corpus file diversity
+- Dense search with embeddinggemma performs well on Rust code (100% hit rate
+  on thiserror queries) but poorly on TypeScript (0%) and mixed on Python (20%).
+- The zero TypeScript results suggest the embedding model struggles with TS
+  semantic search or the defu corpus is too small (3 files).
+- This baseline will be used to measure improvement in Fase 1.3-1.6
+  (sparse search, RRF fusion, reranker).
 
 ## Reproducibility
 
-Per REQ-BENCH-005, running the benchmark 3 times on the same ARM runner should yield metrics within ±0.01 variance.
-
-## Next Steps
-
-- [ ] Run baseline on `macos-14` (ARM) runner
-- [ ] Record metrics in this file
-- [ ] Save to engram for historical tracking
-- [ ] Set tolerance thresholds for regression detection (Fase 1.6)
+```bash
+# Requires: Ollama running with embeddinggemma:latest
+ollama pull embeddinggemma:latest
+cargo run -- benchmark --corpus mini
+```

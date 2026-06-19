@@ -1,10 +1,9 @@
 [provider]
-name = "openrouter"
+name = "ollama"
 
-[provider.openrouter]
-api_key_from_env = true
-model = "nvidia/llama-nemotron-embed-vl-1b-v2:free"
-dimensions = 768
+[provider.ollama]
+url = "http://localhost:11434"
+model = "embeddinggemma:latest"
 
 [indexing]
 max_file_size = 1_048_576
@@ -18,3 +17,6 @@ disabled = false
 [search]
 default_limit = 10
 default_threshold = 0.3
+
+[search.rerank]
+enabled = true

@@ -20,11 +20,15 @@ use tokenizers::Tokenizer;
 /// Timeout for ONNX session creation (macOS CoreML EP can hang).
 const SESSION_CREATION_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// HuggingFace CDN base URL for BGE-Reranker-v2-m3 (Xenova ONNX export).
-const HF_BASE_URL: &str = "https://huggingface.co/Xenova/bge-reranker-v2-m3/resolve/main";
+/// HuggingFace CDN base URL for BGE-Reranker-v2-m3 (onnx-community ONNX export).
+const HF_BASE_URL: &str = "https://huggingface.co/onnx-community/bge-reranker-v2-m3-ONNX/resolve/main";
 
 /// ONNX model path within the HuggingFace repo.
-const ONNX_MODEL_PATH: &str = "onnx/model.onnx";
+///
+/// Uses the self-contained quantized variant. The unquantized `model.onnx`
+/// relies on external data (`model.onnx_data`) which `commit_from_memory`
+/// cannot resolve — it must be loaded from disk files.
+const ONNX_MODEL_PATH: &str = "onnx/model_quantized.onnx";
 
 /// Filename for the tokenizer within the model directory.
 const TOKENIZER_FILENAME: &str = "tokenizer.json";

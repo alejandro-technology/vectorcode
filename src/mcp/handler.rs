@@ -9,7 +9,7 @@ use tracing::error;
 use crate::engine::indexer::Indexer;
 use crate::engine::languages::SupportedLanguage;
 use crate::engine::outliner;
-use crate::engine::searcher::{SearchOptions, Searcher};
+use crate::engine::searcher::{build_strategy, SearchMode, SearchOptions};
 use crate::mcp::{AppInnerState, AppState};
 use crate::store::meta;
 use crate::watcher::PendingFile;
@@ -64,6 +64,8 @@ pub struct VecSearchParams {
     pub language: Option<String>,
     /// Filter results by file path prefix
     pub path: Option<String>,
+    /// Search mode: "dense" (default), "sparse", "hybrid", or "hybrid-rerank"
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -98,9 +100,12 @@ pub struct VecOutlineParams {
 impl McpHandler {
     #[tool(
         name = "vec_search",
-        description = "Perform a semantic search over the codebase. \
-                       Use this to find code conceptually related to the query, \
-                       even if exact keywords don't match. Results are ordered by relevance.",
+        description = "Semantic code search with configurable retrieval mode. \
+                       Use 'dense' for pure semantic search (default), \
+                       'sparse' for keyword/lexical search, \
+                       'hybrid' for combined dense+sparse with RRF fusion, \
+                       or 'hybrid-rerank' for hybrid with cross-encoder reranking (highest quality, slower). \
+                       Results are ordered by relevance.",
         annotations(read_only_hint = true)
     )]
     async fn vec_search(&self, params: Parameters<VecSearchParams>) -> Result<String, String> {
@@ -111,11 +116,29 @@ impl McpHandler {
 
         let inner_state = self.get_inner_state().await?;
 
-        let searcher = Searcher::new(
+        // Parse search mode (default: dense for backward compatibility)
+        let mode: SearchMode =
+            p.mode
+                .as_deref()
+                .unwrap_or("dense")
+                .parse()
+                .map_err(|e: String| {
+                    format!("Invalid search mode: {e}. Valid: dense, sparse, hybrid, hybrid-rerank")
+                })?;
+
+        // For hybrid-rerank mode, enable the reranker in the search config
+        let mut search_config = inner_state.config.search.clone();
+        if mode == SearchMode::HybridRerank {
+            search_config.rerank.enabled = true;
+        }
+
+        let searcher = build_strategy(
+            mode,
             inner_state.db.clone(),
             inner_state.embedder.clone(),
-            inner_state.config.search.clone(),
-        );
+            search_config,
+        )
+        .await;
 
         let options = SearchOptions {
             limit: p.limit.unwrap_or(10).min(100),

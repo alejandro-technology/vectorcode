@@ -179,11 +179,13 @@ impl OnnxReranker {
 
     /// Encode a query-document pair for cross-encoder input.
     ///
-    /// Uses the tokenizer's pair encoding to produce `[CLS] query [SEP] doc [SEP]`
-    /// with proper token_type_ids. Truncates to `MAX_TOKENS` if necessary.
+    /// Uses the tokenizer's pair encoding to produce `[CLS] query [SEP] doc [SEP]`.
+    /// Truncates to `MAX_TOKENS` if necessary.
     ///
-    /// Returns `(input_ids, attention_mask, token_type_ids)`.
-    fn encode_pair(&self, query: &str, doc: &str) -> RerankResult<(Vec<i64>, Vec<i64>, Vec<i64>)> {
+    /// Returns `(input_ids, attention_mask)`.
+    /// XLM-RoBERTa (BGE-Reranker base) does NOT use `token_type_ids` —
+    /// passing them would cause "Invalid input name" at inference time.
+    fn encode_pair(&self, query: &str, doc: &str) -> RerankResult<(Vec<i64>, Vec<i64>)> {
         let encoding = self.tokenizer.encode((query, doc), true).map_err(|e| {
             VectorCodeError::RerankerError {
                 message: format!("Reranker tokenization failed: {e}"),
@@ -203,14 +205,8 @@ impl OnnxReranker {
             .take(max_len)
             .map(|&x| x as i64)
             .collect();
-        let type_ids: Vec<i64> = encoding
-            .get_type_ids()
-            .iter()
-            .take(max_len)
-            .map(|&x| x as i64)
-            .collect();
 
-        Ok((ids, mask, type_ids))
+        Ok((ids, mask))
     }
 
     /// Apply the sigmoid function to map a logit to [0, 1].
@@ -323,21 +319,18 @@ impl Reranker for OnnxReranker {
         // Encode all query-document pairs
         let mut all_ids = Vec::with_capacity(batch_size);
         let mut all_masks = Vec::with_capacity(batch_size);
-        let mut all_type_ids = Vec::with_capacity(batch_size);
         let mut max_len = 0usize;
 
         for doc in documents {
-            let (ids, mask, type_ids) = self.encode_pair(query, &doc.content)?;
+            let (ids, mask) = self.encode_pair(query, &doc.content)?;
             max_len = max_len.max(ids.len());
             all_ids.push(ids);
             all_masks.push(mask);
-            all_type_ids.push(type_ids);
         }
 
         // Pad all sequences to max_len and flatten into contiguous buffers
         let mut flat_ids = Vec::with_capacity(batch_size * max_len);
         let mut flat_masks = Vec::with_capacity(batch_size * max_len);
-        let mut flat_type_ids = Vec::with_capacity(batch_size * max_len);
 
         for i in 0..batch_size {
             let pad_len = max_len - all_ids[i].len();
@@ -347,9 +340,6 @@ impl Reranker for OnnxReranker {
 
             flat_masks.extend_from_slice(&all_masks[i]);
             flat_masks.extend(std::iter::repeat(0i64).take(pad_len));
-
-            flat_type_ids.extend_from_slice(&all_type_ids[i]);
-            flat_type_ids.extend(std::iter::repeat(0i64).take(pad_len));
         }
 
         // Create input tensors: shape [batch_size, max_len]
@@ -367,13 +357,6 @@ impl Reranker for OnnxReranker {
                 },
             )?;
 
-        let token_type_ids_tensor =
-            Tensor::from_array(([batch_size, max_len], flat_type_ids.into_boxed_slice())).map_err(
-                |e| VectorCodeError::RerankerError {
-                    message: format!("Failed to create token_type_ids tensor: {e}"),
-                },
-            )?;
-
         // Run inference — scoped so lock is released promptly
         let scores: Vec<f32> = {
             let mut session = self.session.lock().await;
@@ -381,7 +364,6 @@ impl Reranker for OnnxReranker {
                 .run(ort::inputs![
                     "input_ids" => input_ids_tensor,
                     "attention_mask" => attention_mask_tensor,
-                    "token_type_ids" => token_type_ids_tensor,
                 ])
                 .map_err(|e| VectorCodeError::RerankerError {
                     message: format!("ONNX reranker session run failed: {e}"),

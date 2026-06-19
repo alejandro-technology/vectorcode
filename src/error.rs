@@ -40,6 +40,9 @@ pub enum VectorCodeError {
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
 
+    #[error("FTS5 error: {message}")]
+    Fts5Error { message: String },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -156,6 +159,22 @@ mod tests {
         assert!(
             msg.contains("Database error"),
             "Expected 'Database error' prefix, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn fts5_error_display_message() {
+        let err = VectorCodeError::Fts5Error {
+            message: "FTS5 query syntax error".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("FTS5 error"),
+            "Expected 'FTS5 error' prefix, got: {msg}"
+        );
+        assert!(
+            msg.contains("FTS5 query syntax error"),
+            "Expected detail message, got: {msg}"
         );
     }
 

@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use crate::VectorCodeError;
 
 /// Current schema version — bump when migrating.
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 /// Normalize a vector to the target dimension by padding with zeros or truncating.
 ///
@@ -145,6 +145,37 @@ impl Database {
                 vec_rowid INTEGER NOT NULL,
                 FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
             );
+
+            -- FTS5 virtual table for sparse (lexical) search.
+            -- External content mode: backed by the chunks table.
+            -- Column order matters for bm25 weights: symbol(10), content(5), file_path(2), language(1).
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+                symbol,
+                content,
+                file_path,
+                language,
+                content='chunks',
+                content_rowid='rowid',
+                tokenize='unicode61 remove_diacritics 1'
+            );
+
+            -- FTS5 sync triggers: keep chunks_fts in sync with chunks automatically.
+            CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+                INSERT INTO chunks_fts(rowid, symbol, content, file_path, language)
+                VALUES (new.rowid, COALESCE(new.symbol, ''), new.content, new.file_path, new.language);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+                INSERT INTO chunks_fts(chunks_fts, rowid, symbol, content, file_path, language)
+                VALUES ('delete', old.rowid, COALESCE(old.symbol, ''), old.content, old.file_path, old.language);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+                INSERT INTO chunks_fts(chunks_fts, rowid, symbol, content, file_path, language)
+                VALUES ('delete', old.rowid, COALESCE(old.symbol, ''), old.content, old.file_path, old.language);
+                INSERT INTO chunks_fts(rowid, symbol, content, file_path, language)
+                VALUES (new.rowid, COALESCE(new.symbol, ''), new.content, new.file_path, new.language);
+            END;
             ",
         )?;
 
@@ -167,6 +198,15 @@ impl Database {
         // v1 → v2 migration: migrate vectors_data JSON embeddings to vec_chunks binary.
         if current_version == 1 && self.has_vec_extension() {
             self.migrate_v1_to_v2(dims)?;
+        }
+
+        // v2 → v3 migration: backfill existing chunks into FTS5 index.
+        // Uses the canonical FTS5 'rebuild' command which repopulates from the
+        // external content table (chunks). Wrapped in transaction for atomicity.
+        if current_version == 1 || current_version == 2 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")?;
+            tx.commit()?;
         }
 
         // Set schema version
@@ -273,6 +313,9 @@ impl Database {
             tx.execute("DELETE FROM vectors_data", [])?;
         }
         tx.execute("DELETE FROM chunks", [])?;
+        // Safety net: rebuild FTS5 index after chunks are deleted.
+        // Triggers handle individual row cleanup, but rebuild ensures consistency.
+        tx.execute_batch("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")?;
         tx.execute("DELETE FROM files", [])?;
         tx.execute("DELETE FROM meta", [])?;
         tx.commit()?;
@@ -361,7 +404,7 @@ mod tests {
             .conn()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2, "Schema version must be 2 after init");
+        assert_eq!(version, 3, "Schema version must be 3 after init");
     }
 
     #[test]
@@ -375,7 +418,7 @@ mod tests {
             .conn()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     #[test]
@@ -565,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn init_schema_v2_sets_user_version_to_2() {
+    fn init_schema_v3_sets_user_version_to_3() {
         let db = Database::open_in_memory().unwrap();
         db.init_schema(4).unwrap();
 
@@ -574,8 +617,8 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(
-            version, 2,
-            "Schema version must be 2 after init with vec_chunks support"
+            version, 3,
+            "Schema version must be 3 after init with FTS5 support"
         );
     }
 
@@ -641,15 +684,15 @@ mod tests {
             )
             .unwrap();
 
-        // Now run init_schema — should migrate v1 → v2
+        // Now run init_schema — should migrate v1 → v2 → v3
         db.init_schema(4).unwrap();
 
-        // Verify user_version is now 2
+        // Verify user_version is now 3
         let version: u32 = db
             .conn()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2, "Schema version must be 2 after migration");
+        assert_eq!(version, 3, "Schema version must be 3 after migration");
 
         // Verify vec_chunks exists
         let vec_count: i64 = db
@@ -782,6 +825,17 @@ mod tests {
             .unwrap();
         assert_eq!(chunk_count, 1);
 
+        // Verify FTS5 has the data (via trigger)
+        let fts_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'content'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_count, 1, "FTS5 must have the chunk before clear");
+
         // Clear database
         db.clear_database().unwrap();
 
@@ -797,5 +851,276 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM meta", [], |row| row.get(0))
             .unwrap();
         assert_eq!(meta_count, 0);
+
+        // Verify FTS5 is also empty after clear
+        let fts_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'content'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_count, 0, "FTS5 must be empty after clear_database");
+    }
+
+    // ─── T2: FTS5 virtual table tests ───────────────────────────────────
+
+    #[test]
+    fn init_schema_creates_chunks_fts() {
+        let db = Database::open_in_memory().unwrap();
+        db.init_schema(4).unwrap();
+
+        // FTS5 virtual table should appear in sqlite_master as type='table'
+        let count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='chunks_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "chunks_fts FTS5 virtual table must be created by init_schema"
+        );
+    }
+
+    // ─── T3: FTS5 triggers + migration tests ────────────────────────────
+
+    #[test]
+    fn fts_trigger_fires_on_insert() {
+        let db = Database::open_in_memory().unwrap();
+        db.init_schema(4).unwrap();
+
+        // Insert a chunk
+        db.conn()
+            .execute(
+                "INSERT INTO chunks (id, file_path, start_line, end_line, byte_start, byte_end, \
+                 symbol, kind, content, language, file_mtime, content_hash) \
+                 VALUES ('c1', 'src/lib.rs', 1, 10, 0, 50, 'my_func', 'function', \
+                 'fn my_func() {}', 'rust', 0, 'hash1')",
+                [],
+            )
+            .unwrap();
+
+        // FTS5 should have the row
+        let count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'my_func'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "FTS5 must contain the inserted chunk via trigger");
+    }
+
+    #[test]
+    fn fts_trigger_fires_on_delete() {
+        let db = Database::open_in_memory().unwrap();
+        db.init_schema(4).unwrap();
+
+        db.conn()
+            .execute(
+                "INSERT INTO chunks (id, file_path, start_line, end_line, byte_start, byte_end, \
+                 symbol, kind, content, language, file_mtime, content_hash) \
+                 VALUES ('c2', 'src/lib.rs', 1, 10, 0, 50, 'delete_me', 'function', \
+                 'fn delete_me() {}', 'rust', 0, 'hash2')",
+                [],
+            )
+            .unwrap();
+
+        // Verify it's in FTS5
+        let count_before: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'delete_me'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_before, 1);
+
+        // Delete the chunk
+        db.conn()
+            .execute("DELETE FROM chunks WHERE id = 'c2'", [])
+            .unwrap();
+
+        // FTS5 should no longer have it
+        let count_after: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'delete_me'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_after, 0, "FTS5 must be cleaned after chunk delete");
+    }
+
+    #[test]
+    fn fts_trigger_fires_on_update() {
+        let db = Database::open_in_memory().unwrap();
+        db.init_schema(4).unwrap();
+
+        db.conn()
+            .execute(
+                "INSERT INTO chunks (id, file_path, start_line, end_line, byte_start, byte_end, \
+                 symbol, kind, content, language, file_mtime, content_hash) \
+                 VALUES ('c3', 'src/lib.rs', 1, 10, 0, 50, 'old_name', 'function', \
+                 'fn old_name() {}', 'rust', 0, 'hash3')",
+                [],
+            )
+            .unwrap();
+
+        // Update the symbol
+        db.conn()
+            .execute(
+                "UPDATE chunks SET symbol = 'new_name', content = 'fn new_name() {}' WHERE id = 'c3'",
+                [],
+            )
+            .unwrap();
+
+        // Old name should be gone from FTS5
+        let old_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'old_name'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            old_count, 0,
+            "Old symbol must be removed from FTS5 after update"
+        );
+
+        // New name should be present
+        let new_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'new_name'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_count, 1, "New symbol must be in FTS5 after update");
+    }
+
+    #[test]
+    fn init_schema_v2_to_v3_migration_backfills_chunks() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Create v2 schema manually (without FTS5)
+        db.conn()
+            .execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS meta (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS chunks (
+                    id             TEXT PRIMARY KEY,
+                    file_path      TEXT NOT NULL,
+                    start_line     INTEGER NOT NULL,
+                    end_line       INTEGER NOT NULL,
+                    byte_start     INTEGER NOT NULL,
+                    byte_end       INTEGER NOT NULL,
+                    symbol         TEXT,
+                    kind           TEXT NOT NULL,
+                    content        TEXT NOT NULL,
+                    parent_context TEXT,
+                    language       TEXT NOT NULL,
+                    file_mtime     INTEGER NOT NULL,
+                    content_hash   TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS files (
+                    path       TEXT PRIMARY KEY,
+                    mtime      INTEGER NOT NULL,
+                    size       INTEGER NOT NULL,
+                    hash       TEXT NOT NULL,
+                    indexed_at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS vectors_data (
+                    chunk_id  TEXT PRIMARY KEY,
+                    embedding TEXT NOT NULL,
+                    FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS chunk_vec_map (
+                    chunk_id  TEXT PRIMARY KEY,
+                    vec_rowid INTEGER NOT NULL,
+                    FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+                );
+                ",
+            )
+            .unwrap();
+
+        // Set user_version to 2 (v2 schema, pre-FTS5)
+        db.conn().pragma_update(None, "user_version", 2).unwrap();
+
+        // Insert a test chunk (simulating existing data before migration)
+        db.conn()
+            .execute(
+                "INSERT INTO chunks (id, file_path, start_line, end_line, byte_start, byte_end, \
+                 symbol, kind, content, language, file_mtime, content_hash) \
+                 VALUES ('migrate_chunk', 'src/main.rs', 1, 20, 0, 100, 'main_fn', 'function', \
+                 'fn main_fn() { println!(\"hello\"); }', 'rust', 0, 'hash_m')",
+                [],
+            )
+            .unwrap();
+
+        // Run init_schema — should migrate v2 → v3, creating FTS5 + backfilling
+        db.init_schema(4).unwrap();
+
+        // Verify user_version is now 3
+        let version: u32 = db
+            .conn()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 3, "Schema version must be 3 after v2→v3 migration");
+
+        // Verify the existing chunk is findable via FTS5 (backfilled)
+        let count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'main_fn'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "Existing chunk must be backfilled into FTS5 during migration"
+        );
+    }
+
+    #[test]
+    fn init_schema_v3_is_idempotent() {
+        let db = Database::open_in_memory().unwrap();
+        db.init_schema(4).unwrap();
+
+        // Run init_schema again — must not error
+        db.init_schema(4).unwrap();
+
+        let version: u32 = db
+            .conn()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 3, "Schema version must remain 3 after re-run");
+
+        // FTS5 table must still exist
+        let count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='chunks_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "chunks_fts must still exist after idempotent re-run"
+        );
     }
 }

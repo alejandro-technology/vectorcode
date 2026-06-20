@@ -48,6 +48,9 @@ pub enum VectorCodeError {
 
     #[error("Reranker error: {message}")]
     RerankerError { message: String },
+
+    #[error("Graph query failed: {message}")]
+    GraphQueryFailed { message: String },
 }
 
 #[cfg(test)]
@@ -204,6 +207,22 @@ mod tests {
         );
         assert!(
             msg.contains("model load failed"),
+            "Expected detail message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn graph_query_failed_display_message() {
+        let err = VectorCodeError::GraphQueryFailed {
+            message: "connection timeout".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Graph query failed"),
+            "Expected 'Graph query failed' prefix, got: {msg}"
+        );
+        assert!(
+            msg.contains("connection timeout"),
             "Expected detail message, got: {msg}"
         );
     }

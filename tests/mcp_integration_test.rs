@@ -116,7 +116,7 @@ fn mcp_initialize_returns_server_info() {
 }
 
 #[test]
-fn mcp_tools_list_returns_five_tools() {
+fn mcp_tools_list_returns_eight_tools() {
     let dir = tempfile::tempdir().unwrap();
     init_project(dir.path());
     let mut child = spawn_mcp_server(dir.path());
@@ -130,7 +130,7 @@ fn mcp_tools_list_returns_five_tools() {
     assert_eq!(parsed["id"], 2);
 
     let tools = parsed["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 5);
+    assert_eq!(tools.len(), 8);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"vec_search"));
@@ -138,6 +138,9 @@ fn mcp_tools_list_returns_five_tools() {
     assert!(names.contains(&"vec_reindex"));
     assert!(names.contains(&"vec_read_lines"));
     assert!(names.contains(&"vec_outline"));
+    assert!(names.contains(&"vec_find_callers"));
+    assert!(names.contains(&"vec_find_dependents"));
+    assert!(names.contains(&"vec_trace_imports"));
 
     child.stdin.take().unwrap();
     let _ = child.wait();
@@ -264,6 +267,206 @@ fn mcp_vec_outline_file_not_found() {
     assert!(
         text.contains("not found") || text.contains("File not found"),
         "Should return file not found error, got: {text}"
+    );
+
+    child.stdin.take().unwrap();
+    let _ = child.wait();
+}
+
+// ─── Graph tools integration tests ────────────────────────────────────────
+
+/// Helper: insert graph nodes and edges into the project's database.
+fn insert_graph_data(dir: &std::path::Path) {
+    let db_path = dir.join(".vectorcode").join("index.db");
+    let db = vectorcode::Database::open(&db_path).unwrap();
+
+    use vectorcode::types::{EdgeType, GraphEdge, GraphNode};
+    use vectorcode::GraphStore;
+
+    let nodes = vec![
+        GraphNode {
+            id: "main".into(),
+            symbol: "main".into(),
+            kind: "function".into(),
+            file_path: "src/main.rs".into(),
+        },
+        GraphNode {
+            id: "search".into(),
+            symbol: "search".into(),
+            kind: "function".into(),
+            file_path: "src/search.rs".into(),
+        },
+        GraphNode {
+            id: "base".into(),
+            symbol: "Base".into(),
+            kind: "class".into(),
+            file_path: "src/base.rs".into(),
+        },
+        GraphNode {
+            id: "derived".into(),
+            symbol: "Derived".into(),
+            kind: "class".into(),
+            file_path: "src/derived.rs".into(),
+        },
+        GraphNode {
+            id: "module".into(),
+            symbol: "my_module".into(),
+            kind: "module".into(),
+            file_path: "src/module.rs".into(),
+        },
+        GraphNode {
+            id: "serde".into(),
+            symbol: "serde".into(),
+            kind: "external".into(),
+            file_path: "".into(),
+        },
+    ];
+
+    let edges = vec![
+        // main calls search
+        GraphEdge {
+            source_id: "main".into(),
+            target_symbol: "search".into(),
+            edge_type: EdgeType::Call,
+        },
+        // Derived extends Base
+        GraphEdge {
+            source_id: "derived".into(),
+            target_symbol: "Base".into(),
+            edge_type: EdgeType::Extends,
+        },
+        // my_module imports serde
+        GraphEdge {
+            source_id: "module".into(),
+            target_symbol: "serde".into(),
+            edge_type: EdgeType::Import,
+        },
+    ];
+
+    db.insert_nodes(&nodes).unwrap();
+    db.insert_edges(&edges).unwrap();
+}
+
+#[test]
+fn mcp_tools_list_includes_graph_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path());
+    let mut child = spawn_mcp_server(dir.path());
+    initialize_mcp(&mut child, dir.path());
+
+    let request = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#;
+    let response = send_and_receive(&mut child, request);
+
+    let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+    let tools = parsed["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 8, "Should have 8 tools (5 original + 3 graph)");
+
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"vec_find_callers"));
+    assert!(names.contains(&"vec_find_dependents"));
+    assert!(names.contains(&"vec_trace_imports"));
+
+    child.stdin.take().unwrap();
+    let _ = child.wait();
+}
+
+#[test]
+fn mcp_vec_find_callers_returns_callers() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path());
+    insert_graph_data(dir.path());
+    let mut child = spawn_mcp_server(dir.path());
+    initialize_mcp(&mut child, dir.path());
+
+    let parsed = call_mcp_tool(&mut child, "vec_find_callers", r#"{"symbol":"search"}"#, 20);
+
+    let content = parsed["result"]["content"].as_array().unwrap();
+    let text = content[0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("main"),
+        "Should find main as caller of search, got: {text}"
+    );
+    assert!(
+        text.contains("Found"),
+        "Should have 'Found' header, got: {text}"
+    );
+
+    child.stdin.take().unwrap();
+    let _ = child.wait();
+}
+
+#[test]
+fn mcp_vec_find_dependents_returns_dependents() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path());
+    insert_graph_data(dir.path());
+    let mut child = spawn_mcp_server(dir.path());
+    initialize_mcp(&mut child, dir.path());
+
+    let parsed = call_mcp_tool(
+        &mut child,
+        "vec_find_dependents",
+        r#"{"symbol":"Base"}"#,
+        21,
+    );
+
+    let content = parsed["result"]["content"].as_array().unwrap();
+    let text = content[0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("Derived"),
+        "Should find Derived as dependent of Base, got: {text}"
+    );
+
+    child.stdin.take().unwrap();
+    let _ = child.wait();
+}
+
+#[test]
+fn mcp_vec_trace_imports_returns_imports() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path());
+    insert_graph_data(dir.path());
+    let mut child = spawn_mcp_server(dir.path());
+    initialize_mcp(&mut child, dir.path());
+
+    let parsed = call_mcp_tool(
+        &mut child,
+        "vec_trace_imports",
+        r#"{"symbol":"my_module"}"#,
+        22,
+    );
+
+    let content = parsed["result"]["content"].as_array().unwrap();
+    let text = content[0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("serde"),
+        "Should find serde as import of my_module, got: {text}"
+    );
+
+    child.stdin.take().unwrap();
+    let _ = child.wait();
+}
+
+#[test]
+fn mcp_vec_find_callers_empty_graph_message() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path());
+    // No graph data inserted
+    let mut child = spawn_mcp_server(dir.path());
+    initialize_mcp(&mut child, dir.path());
+
+    let parsed = call_mcp_tool(
+        &mut child,
+        "vec_find_callers",
+        r#"{"symbol":"nonexistent"}"#,
+        23,
+    );
+
+    let content = parsed["result"]["content"].as_array().unwrap();
+    let text = content[0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("No graph data") || text.contains("reindex"),
+        "Should return empty graph message, got: {text}"
     );
 
     child.stdin.take().unwrap();

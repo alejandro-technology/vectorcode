@@ -96,6 +96,36 @@ pub struct VecOutlineParams {
     pub file_path: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct VecFindCallersParams {
+    /// Symbol name to find callers of.
+    pub symbol: String,
+    /// Optional file path to disambiguate overloaded symbols (which file defines the target).
+    pub file_path: Option<String>,
+    /// Max results (default 10, max 100).
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct VecFindDependentsParams {
+    /// Symbol name to find dependents of (importers, inheritors, referencers).
+    pub symbol: String,
+    /// Optional file path to disambiguate overloaded symbols.
+    pub file_path: Option<String>,
+    /// Max results (default 10, max 100).
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct VecTraceImportsParams {
+    /// Symbol name to trace imports for (what does this symbol import?).
+    pub symbol: String,
+    /// Optional file path to disambiguate overloaded symbols.
+    pub file_path: Option<String>,
+    /// Max results (default 10, max 100).
+    pub limit: Option<usize>,
+}
+
 #[tool_router]
 impl McpHandler {
     #[tool(
@@ -372,6 +402,103 @@ impl McpHandler {
         Ok(output)
     }
 
+    #[tool(
+        name = "vec_find_callers",
+        description = "Find all functions/methods that call a given symbol. \
+                       Returns a human-readable list of callers with file paths. \
+                       Use file_path to disambiguate when the same symbol name exists in multiple files.",
+        annotations(read_only_hint = true)
+    )]
+    async fn vec_find_callers(
+        &self,
+        params: Parameters<VecFindCallersParams>,
+    ) -> Result<String, String> {
+        let p = params.0;
+        let inner_state = self.get_inner_state().await?;
+        let db = inner_state.db.lock().await;
+
+        let nodes = if let Some(ref fp) = p.file_path {
+            crate::store::graph::get_callers_filtered(db.conn(), &p.symbol, Some(fp))
+        } else {
+            use crate::store::graph::GraphStore;
+            db.get_callers(&p.symbol)
+        };
+
+        match nodes {
+            Ok(nodes) => {
+                let limit = p.limit.unwrap_or(10).min(100);
+                let truncated = &nodes[..nodes.len().min(limit)];
+                Ok(format_graph_results_text("callers", &p.symbol, truncated))
+            }
+            Err(e) => {
+                error!("vec_find_callers failed: {e}");
+                Err(format!("Failed to query graph: {e}"))
+            }
+        }
+    }
+
+    #[tool(
+        name = "vec_find_dependents",
+        description = "Find all symbols that depend on a given symbol (importers, inheritors, referencers). \
+                       Returns a human-readable list of dependents with file paths. \
+                       Use file_path to disambiguate when the same symbol name exists in multiple files.",
+        annotations(read_only_hint = true)
+    )]
+    async fn vec_find_dependents(
+        &self,
+        params: Parameters<VecFindDependentsParams>,
+    ) -> Result<String, String> {
+        let p = params.0;
+        let inner_state = self.get_inner_state().await?;
+        let db = inner_state.db.lock().await;
+
+        use crate::store::graph::GraphStore;
+        match db.get_dependents(&p.symbol, p.file_path.as_deref()) {
+            Ok(nodes) => {
+                let limit = p.limit.unwrap_or(10).min(100);
+                let truncated = &nodes[..nodes.len().min(limit)];
+                Ok(format_graph_results_text(
+                    "dependents",
+                    &p.symbol,
+                    truncated,
+                ))
+            }
+            Err(e) => {
+                error!("vec_find_dependents failed: {e}");
+                Err(format!("Failed to query graph: {e}"))
+            }
+        }
+    }
+
+    #[tool(
+        name = "vec_trace_imports",
+        description = "Trace what a symbol imports (outgoing Import edges). \
+                       Returns a human-readable list of imported symbols with file paths. \
+                       Use file_path to disambiguate when the same symbol name exists in multiple files.",
+        annotations(read_only_hint = true)
+    )]
+    async fn vec_trace_imports(
+        &self,
+        params: Parameters<VecTraceImportsParams>,
+    ) -> Result<String, String> {
+        let p = params.0;
+        let inner_state = self.get_inner_state().await?;
+        let db = inner_state.db.lock().await;
+
+        use crate::store::graph::GraphStore;
+        match db.get_imports(&p.symbol, p.file_path.as_deref()) {
+            Ok(nodes) => {
+                let limit = p.limit.unwrap_or(10).min(100);
+                let truncated = &nodes[..nodes.len().min(limit)];
+                Ok(format_graph_results_text("imports", &p.symbol, truncated))
+            }
+            Err(e) => {
+                error!("vec_trace_imports failed: {e}");
+                Err(format!("Failed to query graph: {e}"))
+            }
+        }
+    }
+
     pub fn new(state: AppState) -> Self {
         Self {
             state,
@@ -617,4 +744,27 @@ fn format_status_text(meta: &crate::types::IndexMeta) -> String {
         meta.last_sync_at.as_deref().unwrap_or("Never"),
         meta.vectorcode_version
     )
+}
+
+fn format_graph_results_text(
+    kind: &str,
+    symbol: &str,
+    nodes: &[crate::types::GraphNode],
+) -> String {
+    if nodes.is_empty() {
+        return format!("No graph data for '{symbol}'. Run 'vectorcode reindex' to populate.");
+    }
+
+    let mut out = format!("Found {} {} for '{}':\n\n", nodes.len(), kind, symbol);
+    for (i, node) in nodes.iter().enumerate() {
+        out.push_str(&format!(
+            "{}. {}::{} ({})\n",
+            i + 1,
+            node.file_path,
+            node.symbol,
+            node.kind
+        ));
+    }
+    out.push_str("\nUse vec_read_lines to inspect.");
+    out
 }

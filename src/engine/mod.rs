@@ -1,6 +1,7 @@
 /// Engine module — AST-aware chunking and indexing.
 pub mod chunker;
 pub mod fusion;
+pub mod graph_extractor;
 pub mod indexer;
 pub mod languages;
 pub mod outliner;

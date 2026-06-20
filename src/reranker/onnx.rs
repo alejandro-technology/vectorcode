@@ -21,7 +21,8 @@ use tokenizers::Tokenizer;
 const SESSION_CREATION_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// HuggingFace CDN base URL for BGE-Reranker-v2-m3 (onnx-community ONNX export).
-const HF_BASE_URL: &str = "https://huggingface.co/onnx-community/bge-reranker-v2-m3-ONNX/resolve/main";
+const HF_BASE_URL: &str =
+    "https://huggingface.co/onnx-community/bge-reranker-v2-m3-ONNX/resolve/main";
 
 /// ONNX model path within the HuggingFace repo.
 ///

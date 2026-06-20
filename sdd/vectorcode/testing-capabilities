@@ -1,0 +1,6 @@
+testing:
+  strict_tdd: true
+  runner: "cargo test"
+  coverage: "cargo llvm-cov"
+  linter: "cargo clippy --all-targets -- -D warnings"
+  formatter: "cargo fmt --check"

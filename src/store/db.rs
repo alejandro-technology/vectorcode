@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use crate::VectorCodeError;
 
 /// Current schema version — bump when migrating.
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 /// Normalize a vector to the target dimension by padding with zeros or truncating.
 ///
@@ -176,6 +176,24 @@ impl Database {
                 INSERT INTO chunks_fts(rowid, symbol, content, file_path, language)
                 VALUES (new.rowid, COALESCE(new.symbol, ''), new.content, new.file_path, new.language);
             END;
+
+            -- Phase 2 Knowledge Graph tables
+            CREATE TABLE IF NOT EXISTS graph_nodes (
+                id         TEXT PRIMARY KEY,
+                symbol     TEXT NOT NULL,
+                kind       TEXT NOT NULL,
+                file_path  TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_graph_nodes_symbol ON graph_nodes(symbol);
+
+            CREATE TABLE IF NOT EXISTS graph_edges (
+                source_id     TEXT NOT NULL,
+                target_symbol TEXT NOT NULL,
+                edge_type     TEXT NOT NULL,
+                FOREIGN KEY (source_id) REFERENCES graph_nodes(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_graph_edges_source_id ON graph_edges(source_id);
+            CREATE INDEX IF NOT EXISTS idx_graph_edges_target_symbol ON graph_edges(target_symbol);
             ",
         )?;
 
@@ -318,6 +336,8 @@ impl Database {
         tx.execute_batch("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")?;
         tx.execute("DELETE FROM files", [])?;
         tx.execute("DELETE FROM meta", [])?;
+        tx.execute("DELETE FROM graph_edges", [])?;
+        tx.execute("DELETE FROM graph_nodes", [])?;
         tx.commit()?;
         Ok(())
     }
@@ -404,7 +424,7 @@ mod tests {
             .conn()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3, "Schema version must be 3 after init");
+        assert_eq!(version, 4, "Schema version must be 4 after init");
     }
 
     #[test]
@@ -418,7 +438,7 @@ mod tests {
             .conn()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     #[test]
@@ -617,8 +637,8 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(
-            version, 3,
-            "Schema version must be 3 after init with FTS5 support"
+            version, 4,
+            "Schema version must be 4 after init with FTS5 support"
         );
     }
 
@@ -687,12 +707,12 @@ mod tests {
         // Now run init_schema — should migrate v1 → v2 → v3
         db.init_schema(4).unwrap();
 
-        // Verify user_version is now 3
+        // Verify user_version is now 4
         let version: u32 = db
             .conn()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3, "Schema version must be 3 after migration");
+        assert_eq!(version, 4, "Schema version must be 4 after migration");
 
         // Verify vec_chunks exists
         let vec_count: i64 = db
@@ -1073,12 +1093,12 @@ mod tests {
         // Run init_schema — should migrate v2 → v3, creating FTS5 + backfilling
         db.init_schema(4).unwrap();
 
-        // Verify user_version is now 3
+        // Verify user_version is now 4
         let version: u32 = db
             .conn()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3, "Schema version must be 3 after v2→v3 migration");
+        assert_eq!(version, 4, "Schema version must be 4 after v2→v3 migration");
 
         // Verify the existing chunk is findable via FTS5 (backfilled)
         let count: i64 = db
@@ -1107,7 +1127,7 @@ mod tests {
             .conn()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3, "Schema version must remain 3 after re-run");
+        assert_eq!(version, 4, "Schema version must remain 4 after re-run");
 
         // FTS5 table must still exist
         let count: i64 = db

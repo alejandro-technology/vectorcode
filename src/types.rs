@@ -1,5 +1,28 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GraphNode {
+    pub id: String,     // Hash of file_path + symbol
+    pub symbol: String, // e.g., "calculateSum"
+    pub kind: String,   // e.g., "function", "class"
+    pub file_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GraphEdge {
+    pub source_id: String,     // FK to GraphNode.id
+    pub target_symbol: String, // Symbolic target
+    pub edge_type: EdgeType,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EdgeType {
+    Call,
+    Import,
+    Reference,
+    Extends,
+}
+
 /// Atomic unit of indexed code — spec §5.1.
 ///
 /// Each chunk maps to one semantically meaningful block of source code

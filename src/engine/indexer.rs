@@ -408,13 +408,27 @@ impl Indexer {
                 let content_clone = content.clone();
                 let relative_path_clone = relative_path.clone();
                 let overlap = config.chunk_overlap;
-                let file_chunks = tokio::task::spawn_blocking(move || {
-                    chunk_file_with_overlap(&content_clone, &relative_path_clone, language, overlap)
+                let file_chunks_and_graph = tokio::task::spawn_blocking(move || {
+                    let chunks = chunk_file_with_overlap(
+                        &content_clone,
+                        &relative_path_clone,
+                        language,
+                        overlap,
+                    );
+                    let graph = crate::engine::graph_extractor::extract_graph(
+                        &content_clone,
+                        &relative_path_clone,
+                        language,
+                    );
+                    (chunks, graph)
                 })
                 .await
                 .map_err(|e| crate::error::VectorCodeError::EmbedderError {
                     message: format!("Task panic: {}", e),
                 })?;
+
+                let file_chunks = file_chunks_and_graph.0;
+                let (graph_nodes, graph_edges) = file_chunks_and_graph.1;
 
                 // Collect new chunk IDs to detect removed chunks
                 let new_chunk_ids: HashSet<String> =
@@ -449,16 +463,26 @@ impl Indexer {
                     }
 
                     if !file_new_chunks.is_empty() {
-                        files_indexed = 1;
+                        // We will increment files_indexed when we commit
                     }
 
+                    // Update graph: drop old for this file, insert new
+                    let _ = crate::store::graph::delete_nodes_by_file(&tx, &relative_path);
+                    let _ = crate::store::graph::insert_nodes(&tx, &graph_nodes);
+                    let _ = crate::store::graph::insert_edges(&tx, &graph_edges);
+
                     // Update file record
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as i64;
-                    files::upsert_file(&tx, &relative_path, mtime, size, &content_hash, now)?;
+                    files::upsert_file(
+                        &tx,
+                        &relative_path,
+                        mtime,
+                        size,
+                        &content_hash,
+                        chrono::Utc::now().timestamp(),
+                    )?;
+
                     tx.commit()?;
+                    files_indexed += 1;
                 }
 
                 Ok((file_new_chunks, files_indexed, chunks_skipped))
@@ -976,5 +1000,39 @@ def filter_active_users(users: list) -> list:
             let found = results.iter().any(|r| r.file_path == chunk.file_path);
             assert!(found, "Chunk {} should have a stored vector", chunk.id);
         }
+    }
+
+    #[tokio::test]
+    async fn index_project_stores_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let code = r#"
+            fn caller() {
+                callee();
+            }
+            fn callee() {}
+        "#;
+        std::fs::write(dir.path().join("main.rs"), code).unwrap();
+
+        let indexer = setup_indexer();
+        indexer.index_project(dir.path()).await.unwrap();
+
+        let db = indexer.db.lock().await;
+
+        let mut stmt = db
+            .conn()
+            .prepare("SELECT COUNT(*) FROM graph_nodes")
+            .unwrap();
+        let node_count: i64 = stmt.query_row([], |row| row.get(0)).unwrap();
+        assert!(
+            node_count >= 2,
+            "Should extract at least module and caller and callee nodes"
+        );
+
+        let mut stmt = db
+            .conn()
+            .prepare("SELECT COUNT(*) FROM graph_edges")
+            .unwrap();
+        let edge_count: i64 = stmt.query_row([], |row| row.get(0)).unwrap();
+        assert!(edge_count >= 1, "Should extract call edge");
     }
 }

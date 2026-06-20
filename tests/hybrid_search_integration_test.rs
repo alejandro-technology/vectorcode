@@ -957,12 +957,12 @@ async fn migration_v2_to_v3_creates_fts5_table() {
     // Run migration
     db.init_schema(64).unwrap();
 
-    // Verify schema version is now 3
+    // Verify schema version is now 4
     let version: u32 = db
         .conn()
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 3, "Schema should be v3 after migration");
+    assert_eq!(version, 4, "Schema should be v4 after migration");
 
     // Verify FTS5 table exists
     let fts_exists: bool = db
@@ -1043,7 +1043,7 @@ async fn migration_v2_to_v3_is_idempotent() {
         .conn()
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
 
     // Second migration should be a no-op
     db.init_schema(64).unwrap();
@@ -1053,7 +1053,7 @@ async fn migration_v2_to_v3_is_idempotent() {
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
     assert_eq!(
-        version, 3,
+        version, 4,
         "Re-running init_schema should not change version"
     );
 

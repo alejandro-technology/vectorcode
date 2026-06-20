@@ -20,6 +20,47 @@ pub struct Query {
     /// Relevance judgments: file path → grade (0-3).
     /// 0 = irrelevant, 1 = marginally relevant, 2 = relevant, 3 = highly relevant.
     pub judgments: Vec<RelevanceJudgment>,
+
+    /// Query kind: Semantic (default) or Structural.
+    #[serde(default)]
+    pub kind: QueryKind,
+
+    /// Expected symbols for structural queries (required when kind=Structural).
+    #[serde(default)]
+    pub expected_symbols: Vec<SymbolJudgment>,
+
+    /// Target symbol for structural queries (e.g., "search" for "who calls search").
+    #[serde(default)]
+    pub target_symbol: Option<String>,
+
+    /// Target tool for structural queries: "callers", "dependents", or "imports".
+    #[serde(default)]
+    pub target_tool: Option<String>,
+}
+
+/// Kind of benchmark query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum QueryKind {
+    /// Semantic query (file-level relevance judgments).
+    #[default]
+    Semantic,
+    /// Structural query (symbol-level expectations).
+    Structural,
+}
+
+/// Symbol-level judgment for structural queries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolJudgment {
+    /// Symbol name (e.g., "main", "search").
+    pub symbol: String,
+
+    /// Optional file path for disambiguation.
+    #[serde(default)]
+    pub file: Option<String>,
+
+    /// Relevance grade: 0 (irrelevant) to 3 (highly relevant).
+    pub grade: u8,
 }
 
 /// File-level relevance judgment for a query.
@@ -112,6 +153,14 @@ pub struct QueryResult {
     pub recall_at_10: f64,
     pub ndcg_at_10: f64,
     pub mrr: f64,
+
+    /// Symbol-level metrics for structural queries (0.0 for semantic).
+    #[serde(default)]
+    pub symbol_recall_at_5: f64,
+    #[serde(default)]
+    pub symbol_recall_at_10: f64,
+    #[serde(default)]
+    pub symbol_precision_at_5: f64,
 }
 
 /// Aggregate metrics across all queries.
@@ -121,6 +170,14 @@ pub struct AggregateMetrics {
     pub recall_at_10: f64,
     pub ndcg_at_10: f64,
     pub mrr: f64,
+
+    /// Symbol-level aggregates for structural queries (0.0 for semantic-only).
+    #[serde(default)]
+    pub symbol_recall_at_5: f64,
+    #[serde(default)]
+    pub symbol_recall_at_10: f64,
+    #[serde(default)]
+    pub symbol_precision_at_5: f64,
 }
 
 /// Top-level corpus configuration file (benchmarks/corpus.toml).
@@ -156,6 +213,23 @@ pub struct CorpusRepo {
     pub file_extensions: Vec<String>,
 }
 
+/// Validate a structural query has required fields.
+pub fn validate_structural(query: &Query) -> Result<(), String> {
+    if query.kind != QueryKind::Structural {
+        return Ok(());
+    }
+    if query.expected_symbols.is_empty() {
+        return Err("Structural query must have expected_symbols".to_string());
+    }
+    if query.target_symbol.is_none() {
+        return Err("Structural query must have target_symbol".to_string());
+    }
+    if query.target_tool.is_none() {
+        return Err("Structural query must have target_tool".to_string());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +248,10 @@ mod tests {
                     grade: 1,
                 },
             ],
+            kind: QueryKind::Semantic,
+            expected_symbols: vec![],
+            target_symbol: None,
+            target_tool: None,
         };
 
         let toml_str = toml::to_string(&query).unwrap();
@@ -227,6 +305,9 @@ mod tests {
                 recall_at_10: 0.80,
                 ndcg_at_10: 0.72,
                 mrr: 0.55,
+                symbol_recall_at_5: 0.0,
+                symbol_recall_at_10: 0.0,
+                symbol_precision_at_5: 0.0,
             },
             duration_secs: 12.5,
         };
@@ -235,5 +316,47 @@ mod tests {
         assert!(json.contains("mini"));
         assert!(json.contains("0.65"));
         assert!(json.contains("dense"));
+    }
+
+    #[test]
+    fn kind_defaults_semantic() {
+        let toml_str = r#"
+            text = "test query"
+            judgments = []
+        "#;
+        let query: Query = toml::from_str(toml_str).unwrap();
+        assert_eq!(query.kind, QueryKind::Semantic);
+    }
+
+    #[test]
+    fn structural_parses_expected_symbols() {
+        let toml_str = r#"
+            text = "who calls search"
+            kind = "structural"
+            target_symbol = "search"
+            target_tool = "callers"
+            judgments = []
+            expected_symbols = [{ symbol = "main", file = "main.rs", grade = 3 }]
+        "#;
+        let query: Query = toml::from_str(toml_str).unwrap();
+        assert_eq!(query.kind, QueryKind::Structural);
+        assert_eq!(query.target_symbol.as_deref(), Some("search"));
+        assert_eq!(query.target_tool.as_deref(), Some("callers"));
+        assert_eq!(query.expected_symbols.len(), 1);
+        assert_eq!(query.expected_symbols[0].symbol, "main");
+    }
+
+    #[test]
+    fn structural_without_expected_symbols_errors() {
+        let toml_str = r#"
+            text = "who calls search"
+            kind = "structural"
+            judgments = []
+        "#;
+        let query: Query = toml::from_str(toml_str).unwrap();
+        assert_eq!(query.kind, QueryKind::Structural);
+        assert!(query.expected_symbols.is_empty());
+        // Validation should catch this
+        assert!(validate_structural(&query).is_err());
     }
 }

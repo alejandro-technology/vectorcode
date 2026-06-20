@@ -200,3 +200,53 @@ cargo run -- search "test" --mode hybrid-rerank
 # Run multi-mode benchmark
 cargo run -- benchmark --corpus mini --output table --mode all
 ```
+
+---
+
+## Phase 2 Graph Benchmark
+
+Structural query benchmark using the knowledge graph. Measures symbol-level
+recall and precision for graph-based retrieval (callers, dependents, imports).
+
+### Run Info
+
+| Field | Value |
+|-------|-------|
+| Date | 2026-06-20 |
+| Query Set | mini-structural (12 queries) |
+| Query Types | 5 callers, 4 imports, 3 dependents |
+| Corpus | mini (thiserror + defu + itsdangerous) |
+| Graph Nodes | Populated via tree-sitter extraction |
+
+### Aggregate Metrics
+
+| Metric | Value |
+|--------|-------|
+| Symbol Recall@5 | _pending_ |
+| Symbol Recall@10 | _pending_ |
+| Symbol Precision@5 | _pending_ |
+
+### Per-Tool Breakdown
+
+| Tool | Queries | R@5 | P@5 | R@10 |
+|------|---------|-----|-----|------|
+| callers | 5 | _pending_ | _pending_ | _pending_ |
+| imports | 4 | _pending_ | _pending_ | _pending_ |
+| dependents | 3 | _pending_ | _pending_ | _pending_ |
+
+### Notes
+
+- Structural queries use `routing=graph` or `routing=auto` with heuristic classification.
+- Symbol-level metrics measure exact symbol matches (file::symbol keys).
+- External imports (e.g., std::fmt) are surfaced via LEFT JOIN in get_imports.
+- This benchmark complements the semantic retrieval metrics above.
+
+### Reproducibility
+
+```bash
+# Run structural benchmark
+cargo run -- benchmark --corpus mini --query-set mini-structural --mode graph
+
+# Or via MCP tool with routing
+vec_search("who calls search", routing="graph")
+```

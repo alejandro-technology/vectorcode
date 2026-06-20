@@ -98,6 +98,42 @@ pub fn mrr(predicted: &[String], relevant: &HashSet<String>) -> f64 {
     0.0
 }
 
+/// Symbol recall@k — fraction of expected symbols found in top-k predicted symbols.
+///
+/// `predicted`: ordered list of symbol keys (e.g., "file.rs::symbol")
+/// `expected`: set of expected symbol keys (grade >= 1)
+/// `k`: cutoff position
+///
+/// Returns 0.0 if `expected` is empty or `predicted` is empty.
+pub fn symbol_recall_at_k(predicted: &[String], expected: &HashSet<String>, k: usize) -> f64 {
+    if expected.is_empty() || predicted.is_empty() {
+        return 0.0;
+    }
+
+    let top_k = &predicted[..predicted.len().min(k)];
+    let found = top_k.iter().filter(|p| expected.contains(*p)).count();
+
+    found as f64 / expected.len() as f64
+}
+
+/// Symbol precision@k — fraction of top-k predicted symbols that are expected.
+///
+/// `predicted`: ordered list of symbol keys (e.g., "file.rs::symbol")
+/// `expected`: set of expected symbol keys (grade >= 1)
+/// `k`: cutoff position
+///
+/// Returns 0.0 if `predicted` is empty.
+pub fn symbol_precision_at_k(predicted: &[String], expected: &HashSet<String>, k: usize) -> f64 {
+    if predicted.is_empty() {
+        return 0.0;
+    }
+
+    let top_k = &predicted[..predicted.len().min(k)];
+    let found = top_k.iter().filter(|p| expected.contains(*p)).count();
+
+    found as f64 / k as f64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,5 +292,82 @@ mod tests {
         let relevant: HashSet<String> = HashSet::new();
 
         assert_eq!(mrr(&predicted, &relevant), 0.0);
+    }
+
+    // ─── symbol_recall_at_k tests ────────────────────────────────────────
+
+    #[test]
+    fn symbol_recall_perfect() {
+        let predicted = vec![
+            "a.rs::foo".to_string(),
+            "b.rs::bar".to_string(),
+            "c.rs::baz".to_string(),
+        ];
+        let expected: HashSet<String> =
+            ["a.rs::foo".into(), "b.rs::bar".into(), "c.rs::baz".into()]
+                .into_iter()
+                .collect();
+
+        assert_eq!(symbol_recall_at_k(&predicted, &expected, 5), 1.0);
+    }
+
+    #[test]
+    fn symbol_recall_partial() {
+        let predicted = vec![
+            "a.rs::foo".to_string(),
+            "x.rs::noise".to_string(),
+            "b.rs::bar".to_string(),
+        ];
+        let expected: HashSet<String> =
+            ["a.rs::foo".into(), "b.rs::bar".into(), "c.rs::baz".into()]
+                .into_iter()
+                .collect();
+
+        // Found 2 out of 3 expected in top-3
+        assert!((symbol_recall_at_k(&predicted, &expected, 3) - 2.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn symbol_recall_empty() {
+        let predicted: Vec<String> = vec![];
+        let expected: HashSet<String> = ["a.rs::foo".into()].into_iter().collect();
+
+        assert_eq!(symbol_recall_at_k(&predicted, &expected, 5), 0.0);
+    }
+
+    // ─── symbol_precision_at_k tests ─────────────────────────────────────
+
+    #[test]
+    fn symbol_precision_perfect() {
+        let predicted = vec!["a.rs::foo".to_string(), "b.rs::bar".to_string()];
+        let expected: HashSet<String> = ["a.rs::foo".into(), "b.rs::bar".into()]
+            .into_iter()
+            .collect();
+
+        // Both in top-2 are expected
+        assert_eq!(symbol_precision_at_k(&predicted, &expected, 2), 1.0);
+    }
+
+    #[test]
+    fn symbol_precision_with_noise() {
+        let predicted = vec![
+            "a.rs::foo".to_string(),
+            "x.rs::noise".to_string(),
+            "b.rs::bar".to_string(),
+        ];
+        let expected: HashSet<String> = ["a.rs::foo".into(), "b.rs::bar".into()]
+            .into_iter()
+            .collect();
+
+        // 2 out of 3 in top-3 are expected
+        assert!((symbol_precision_at_k(&predicted, &expected, 3) - 2.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn symbol_precision_empty() {
+        let predicted: Vec<String> = vec![];
+        let expected: HashSet<String> = ["a.rs::foo".into()].into_iter().collect();
+
+        assert_eq!(symbol_precision_at_k(&predicted, &expected, 5), 0.0);
     }
 }

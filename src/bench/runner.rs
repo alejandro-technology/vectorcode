@@ -81,7 +81,14 @@ pub async fn run_benchmark(
     let mut query_results = Vec::new();
 
     for query in &queries.queries {
-        let result = execute_query(query, strategy.as_ref(), corpus_path).await?;
+        let result = match query.kind {
+            crate::bench::schema::QueryKind::Semantic => {
+                execute_query(query, strategy.as_ref(), corpus_path).await?
+            }
+            crate::bench::schema::QueryKind::Structural => {
+                execute_structural_query(query, &db, corpus_path).await?
+            }
+        };
         query_results.push(result);
     }
 
@@ -149,6 +156,77 @@ async fn execute_query(
         recall_at_10,
         ndcg_at_10,
         mrr,
+        symbol_recall_at_5: 0.0,
+        symbol_recall_at_10: 0.0,
+        symbol_precision_at_5: 0.0,
+    })
+}
+
+/// Execute a structural query and compute symbol-level metrics.
+async fn execute_structural_query(
+    query: &Query,
+    db: &Arc<tokio::sync::Mutex<Database>>,
+    _corpus_path: &Path,
+) -> Result<QueryResult> {
+    use crate::bench::schema::validate_structural;
+    use crate::store::graph::GraphStore;
+
+    // Validate structural query
+    validate_structural(query).map_err(|e| anyhow::anyhow!(e))?;
+
+    let target_symbol = query.target_symbol.as_ref().unwrap();
+    let target_tool = query.target_tool.as_ref().unwrap();
+
+    // Call the appropriate GraphStore method
+    let db_guard = db.lock().await;
+    let nodes = match target_tool.as_str() {
+        "callers" => db_guard.get_callers(target_symbol)?,
+        "dependents" => db_guard.get_dependents(target_symbol, None)?,
+        "imports" => db_guard.get_imports(target_symbol, None)?,
+        other => anyhow::bail!("Unknown target_tool: {other}"),
+    };
+
+    // Convert GraphNode[] to predicted symbol keys
+    let predicted: Vec<String> = nodes
+        .iter()
+        .map(|n| {
+            if n.file_path.is_empty() {
+                format!("::{}", n.symbol)
+            } else {
+                format!("{}::{}", n.file_path, n.symbol)
+            }
+        })
+        .collect();
+
+    // Build expected set from expected_symbols (grade >= 1)
+    let expected: HashSet<String> = query
+        .expected_symbols
+        .iter()
+        .filter(|s| s.grade >= 1)
+        .map(|s| {
+            if let Some(ref file) = s.file {
+                format!("{file}::{}", s.symbol)
+            } else {
+                format!("::{}", s.symbol)
+            }
+        })
+        .collect();
+
+    // Compute symbol metrics
+    let symbol_recall_at_5 = metrics::symbol_recall_at_k(&predicted, &expected, 5);
+    let symbol_recall_at_10 = metrics::symbol_recall_at_k(&predicted, &expected, 10);
+    let symbol_precision_at_5 = metrics::symbol_precision_at_k(&predicted, &expected, 5);
+
+    Ok(QueryResult {
+        query: query.text.clone(),
+        predicted,
+        recall_at_5: 0.0,
+        recall_at_10: 0.0,
+        ndcg_at_10: 0.0,
+        mrr: 0.0,
+        symbol_recall_at_5,
+        symbol_recall_at_10,
+        symbol_precision_at_5,
     })
 }
 
@@ -189,6 +267,9 @@ fn compute_aggregate_metrics(query_results: &[QueryResult]) -> AggregateMetrics 
             recall_at_10: 0.0,
             ndcg_at_10: 0.0,
             mrr: 0.0,
+            symbol_recall_at_5: 0.0,
+            symbol_recall_at_10: 0.0,
+            symbol_precision_at_5: 0.0,
         };
     }
 
@@ -197,12 +278,30 @@ fn compute_aggregate_metrics(query_results: &[QueryResult]) -> AggregateMetrics 
     let recall_at_10 = query_results.iter().map(|r| r.recall_at_10).sum::<f64>() / n;
     let ndcg_at_10 = query_results.iter().map(|r| r.ndcg_at_10).sum::<f64>() / n;
     let mrr = query_results.iter().map(|r| r.mrr).sum::<f64>() / n;
+    let symbol_recall_at_5 = query_results
+        .iter()
+        .map(|r| r.symbol_recall_at_5)
+        .sum::<f64>()
+        / n;
+    let symbol_recall_at_10 = query_results
+        .iter()
+        .map(|r| r.symbol_recall_at_10)
+        .sum::<f64>()
+        / n;
+    let symbol_precision_at_5 = query_results
+        .iter()
+        .map(|r| r.symbol_precision_at_5)
+        .sum::<f64>()
+        / n;
 
     AggregateMetrics {
         recall_at_5,
         recall_at_10,
         ndcg_at_10,
         mrr,
+        symbol_recall_at_5,
+        symbol_recall_at_10,
+        symbol_precision_at_5,
     }
 }
 
@@ -287,6 +386,10 @@ pub fn search(query: &str) -> Vec<String> {
                     file: "error.rs".to_string(),
                     grade: 3,
                 }],
+                kind: crate::bench::schema::QueryKind::Semantic,
+                expected_symbols: vec![],
+                target_symbol: None,
+                target_tool: None,
             }],
         };
 
@@ -361,6 +464,9 @@ pub fn search(query: &str) -> Vec<String> {
                 recall_at_10: 0.8,
                 ndcg_at_10: 0.6,
                 mrr: 0.5,
+                symbol_recall_at_5: 0.0,
+                symbol_recall_at_10: 0.0,
+                symbol_precision_at_5: 0.0,
             },
             QueryResult {
                 query: "q2".to_string(),
@@ -369,6 +475,9 @@ pub fn search(query: &str) -> Vec<String> {
                 recall_at_10: 0.9,
                 ndcg_at_10: 0.8,
                 mrr: 1.0,
+                symbol_recall_at_5: 0.0,
+                symbol_recall_at_10: 0.0,
+                symbol_precision_at_5: 0.0,
             },
         ];
 
@@ -424,6 +533,10 @@ pub fn search(query: &str) -> Vec<String> {
                     file: "error.rs".to_string(),
                     grade: 3,
                 }],
+                kind: crate::bench::schema::QueryKind::Semantic,
+                expected_symbols: vec![],
+                target_symbol: None,
+                target_tool: None,
             }],
         }
     }
@@ -459,5 +572,34 @@ pub fn search(query: &str) -> Vec<String> {
         // Both should have indexed the same number of files
         assert_eq!(results[0].files_indexed, 2);
         assert_eq!(results[1].files_indexed, 2);
+    }
+
+    #[test]
+    fn mini_structural_toml_loads_10_plus() {
+        let toml_str = std::fs::read_to_string("benchmarks/queries/mini_structural.toml")
+            .expect("mini_structural.toml should exist");
+        let query_set: QuerySet = toml::from_str(&toml_str).expect("should parse as QuerySet");
+
+        let structural_count = query_set
+            .queries
+            .iter()
+            .filter(|q| q.kind == crate::bench::schema::QueryKind::Structural)
+            .count();
+
+        assert!(
+            structural_count >= 10,
+            "mini_structural.toml should have at least 10 structural queries, got {structural_count}"
+        );
+
+        // Verify all structural queries have expected_symbols
+        for query in &query_set.queries {
+            if query.kind == crate::bench::schema::QueryKind::Structural {
+                assert!(
+                    !query.expected_symbols.is_empty() || query.target_symbol.is_some(),
+                    "Structural query '{}' should have expected_symbols or target_symbol",
+                    query.text
+                );
+            }
+        }
     }
 }

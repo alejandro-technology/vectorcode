@@ -1,0 +1,118 @@
+# Structural benchmark queries for mini corpus
+# Each query has hand-labeled symbol expectations for graph-based retrieval.
+# 5 callers, 4 imports, 3 dependents = 12 queries total
+
+name = "mini-structural"
+
+# === Callers (5 queries) ===
+
+[[queries]]
+text = "who calls search"
+kind = "structural"
+target_tool = "callers"
+target_symbol = "search"
+judgments = []
+expected_symbols = [{ symbol = "main", file = "src/main.rs", grade = 3 }]
+
+[[queries]]
+text = "callers of execute_search"
+kind = "structural"
+target_tool = "callers"
+target_symbol = "execute_search"
+judgments = []
+expected_symbols = [{ symbol = "search_with_retry", file = "tests/fixtures/mini/search.rs", grade = 3 }]
+
+[[queries]]
+text = "what calls waitForSlot"
+kind = "structural"
+target_tool = "callers"
+target_symbol = "waitForSlot"
+judgments = []
+expected_symbols = [{ symbol = "run", file = "tests/fixtures/mini/rate_limiter.ts", grade = 3 }]
+
+[[queries]]
+text = "who calls sign"
+kind = "structural"
+target_tool = "callers"
+target_symbol = "sign"
+judgments = []
+expected_symbols = []  # No internal callers in the fixture
+
+[[queries]]
+text = "callers of unsign"
+kind = "structural"
+target_tool = "callers"
+target_symbol = "unsign"
+judgments = []
+expected_symbols = []  # No internal callers in the fixture
+
+# === Imports (4 queries) ===
+
+[[queries]]
+text = "what does error import"
+kind = "structural"
+target_tool = "imports"
+target_symbol = "error"
+judgments = []
+expected_symbols = [
+    { symbol = "fmt", grade = 3 },
+    { symbol = "Display", grade = 3 },
+    { symbol = "Error", grade = 3 },
+]
+
+[[queries]]
+text = "imports of search"
+kind = "structural"
+target_tool = "imports"
+target_symbol = "search"
+judgments = []
+expected_symbols = [{ symbol = "Duration", grade = 3 }]
+
+[[queries]]
+text = "what does rate_limiter import"
+kind = "structural"
+target_tool = "imports"
+target_symbol = "rate_limiter"
+judgments = []
+expected_symbols = []  # TypeScript imports not fully captured in fixture
+
+[[queries]]
+text = "imports of signing"
+kind = "structural"
+target_tool = "imports"
+target_symbol = "signing"
+judgments = []
+expected_symbols = [
+    { symbol = "hashlib", grade = 3 },
+    { symbol = "hmac", grade = 3 },
+    { symbol = "time", grade = 3 },
+]
+
+# === Dependents (3 queries) ===
+
+[[queries]]
+text = "dependents of AppError"
+kind = "structural"
+target_tool = "dependents"
+target_symbol = "AppError"
+judgments = []
+expected_symbols = [
+    { symbol = "ErrorKind", file = "tests/fixtures/mini/error.rs", grade = 3 },
+    { symbol = "Result", file = "tests/fixtures/mini/error.rs", grade = 2 },
+]
+
+[[queries]]
+text = "what depends on Base"
+kind = "structural"
+target_tool = "dependents"
+target_symbol = "Base"
+judgments = []
+expected_symbols = []  # No Base class in fixture
+
+[[queries]]
+text = "dependents of SearchResult"
+kind = "structural"
+target_tool = "dependents"
+target_symbol = "SearchResult"
+judgments = []
+expected_symbols = [{ symbol = "search_with_retry", file = "tests/fixtures/mini/search.rs", grade = 3 }]

@@ -213,6 +213,9 @@ mod tests {
                     recall_at_10: 1.0,
                     ndcg_at_10: 0.9,
                     mrr: 1.0,
+                    symbol_recall_at_5: 0.0,
+                    symbol_recall_at_10: 0.0,
+                    symbol_precision_at_5: 0.0,
                 },
                 QueryResult {
                     query: "search function".to_string(),
@@ -221,6 +224,9 @@ mod tests {
                     recall_at_10: 0.8,
                     ndcg_at_10: 0.7,
                     mrr: 0.5,
+                    symbol_recall_at_5: 0.0,
+                    symbol_recall_at_10: 0.0,
+                    symbol_precision_at_5: 0.0,
                 },
             ],
             aggregate: AggregateMetrics {
@@ -228,6 +234,9 @@ mod tests {
                 recall_at_10: 0.9,
                 ndcg_at_10: 0.8,
                 mrr: 0.75,
+                symbol_recall_at_5: 0.0,
+                symbol_recall_at_10: 0.0,
+                symbol_precision_at_5: 0.0,
             },
             duration_secs: 5.5,
         }
@@ -284,6 +293,9 @@ mod tests {
                 recall_at_10: 0.95,
                 ndcg_at_10: 0.85,
                 mrr: 0.8,
+                symbol_recall_at_5: 0.0,
+                symbol_recall_at_10: 0.0,
+                symbol_precision_at_5: 0.0,
             },
             ..sample_result()
         };

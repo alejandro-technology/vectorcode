@@ -214,12 +214,13 @@ pub struct CorpusRepo {
 }
 
 /// Validate a structural query has required fields.
+///
+/// `expected_symbols` may be empty when the query legitimately expects no results
+/// (e.g., "who calls sign" when no internal callers exist in the corpus).
+/// In that case, symbol metrics will correctly compute as 0.0.
 pub fn validate_structural(query: &Query) -> Result<(), String> {
     if query.kind != QueryKind::Structural {
         return Ok(());
-    }
-    if query.expected_symbols.is_empty() {
-        return Err("Structural query must have expected_symbols".to_string());
     }
     if query.target_symbol.is_none() {
         return Err("Structural query must have target_symbol".to_string());

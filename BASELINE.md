@@ -222,17 +222,17 @@ recall and precision for graph-based retrieval (callers, dependents, imports).
 
 | Metric | Value |
 |--------|-------|
-| Symbol Recall@5 | _pending_ |
-| Symbol Recall@10 | _pending_ |
-| Symbol Precision@5 | _pending_ |
+| Symbol Recall@5 | 0.0000 |
+| Symbol Recall@10 | 0.0000 |
+| Symbol Precision@5 | 0.0000 |
 
 ### Per-Tool Breakdown
 
 | Tool | Queries | R@5 | P@5 | R@10 |
 |------|---------|-----|-----|------|
-| callers | 5 | _pending_ | _pending_ | _pending_ |
-| imports | 4 | _pending_ | _pending_ | _pending_ |
-| dependents | 3 | _pending_ | _pending_ | _pending_ |
+| callers | 5 | 0.0000 | 0.0000 | 0.0000 |
+| imports | 4 | 0.0000 | 0.0000 | 0.0000 |
+| dependents | 3 | 0.0000 | 0.0000 | 0.0000 |
 
 ### Notes
 
@@ -240,12 +240,17 @@ recall and precision for graph-based retrieval (callers, dependents, imports).
 - Symbol-level metrics measure exact symbol matches (file::symbol keys).
 - External imports (e.g., std::fmt) are surfaced via LEFT JOIN in get_imports.
 - This benchmark complements the semantic retrieval metrics above.
+- **Known issue**: The structural queries reference paths from `tests/fixtures/mini/`
+  but the benchmark indexes the actual mini corpus (thiserror + defu + itsdangerous).
+  The query/corpus mismatch produces 0.0 metrics. The queries need to be updated to
+  reference symbols from the actual mini corpus repos, or a dedicated structural corpus
+  config should be created for the test fixtures.
 
 ### Reproducibility
 
 ```bash
 # Run structural benchmark
-cargo run -- benchmark --corpus mini --query-set mini-structural --mode graph
+cargo run -- benchmark --corpus mini --queries benchmarks/queries/mini_structural.toml --mode graph
 
 # Or via MCP tool with routing
 vec_search("who calls search", routing="graph")

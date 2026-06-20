@@ -166,7 +166,7 @@ async fn execute_query(
 async fn execute_structural_query(
     query: &Query,
     db: &Arc<tokio::sync::Mutex<Database>>,
-    _corpus_path: &Path,
+    corpus_path: &Path,
 ) -> Result<QueryResult> {
     use crate::bench::schema::validate_structural;
     use crate::store::graph::GraphStore;
@@ -186,14 +186,20 @@ async fn execute_structural_query(
         other => anyhow::bail!("Unknown target_tool: {other}"),
     };
 
-    // Convert GraphNode[] to predicted symbol keys
+    // Convert GraphNode[] to predicted symbol keys, stripping corpus prefix
     let predicted: Vec<String> = nodes
         .iter()
         .map(|n| {
             if n.file_path.is_empty() {
                 format!("::{}", n.symbol)
             } else {
-                format!("{}::{}", n.file_path, n.symbol)
+                // Strip corpus temp-dir prefix to get corpus-relative path
+                let rel_path = Path::new(&n.file_path)
+                    .strip_prefix(corpus_path)
+                    .unwrap_or(Path::new(&n.file_path))
+                    .to_string_lossy()
+                    .to_string();
+                format!("{rel_path}::{}", n.symbol)
             }
         })
         .collect();

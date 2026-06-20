@@ -1,118 +1,161 @@
 # Structural benchmark queries for mini corpus
 # Each query has hand-labeled symbol expectations for graph-based retrieval.
 # 5 callers, 4 imports, 3 dependents = 12 queries total
+#
+# Corpus: thiserror (Rust, corpus_0), defu (TypeScript, corpus_1), itsdangerous (Python, corpus_2)
+# Graph data populated via tree-sitter extraction during indexing.
 
 name = "mini-structural"
 
 # === Callers (5 queries) ===
 
 [[queries]]
-text = "who calls search"
-kind = "structural"
-target_tool = "callers"
-target_symbol = "search"
-judgments = []
-expected_symbols = [{ symbol = "main", file = "src/main.rs", grade = 3 }]
-
-[[queries]]
-text = "callers of execute_search"
-kind = "structural"
-target_tool = "callers"
-target_symbol = "execute_search"
-judgments = []
-expected_symbols = [{ symbol = "search_with_retry", file = "tests/fixtures/mini/search.rs", grade = 3 }]
-
-[[queries]]
-text = "what calls waitForSlot"
-kind = "structural"
-target_tool = "callers"
-target_symbol = "waitForSlot"
-judgments = []
-expected_symbols = [{ symbol = "run", file = "tests/fixtures/mini/rate_limiter.ts", grade = 3 }]
-
-[[queries]]
-text = "who calls sign"
-kind = "structural"
-target_tool = "callers"
-target_symbol = "sign"
-judgments = []
-expected_symbols = []  # No internal callers in the fixture
-
-[[queries]]
-text = "callers of unsign"
+text = "who calls unsign"
 kind = "structural"
 target_tool = "callers"
 target_symbol = "unsign"
 judgments = []
-expected_symbols = []  # No internal callers in the fixture
+expected_symbols = [
+    { symbol = "unsign", file = "corpus_2/src/itsdangerous/timed.py", grade = 3 },
+    { symbol = "validate", file = "corpus_2/src/itsdangerous/timed.py", grade = 3 },
+    { symbol = "loads", file = "corpus_2/src/itsdangerous/timed.py", grade = 3 },
+    { symbol = "validate", file = "corpus_2/src/itsdangerous/signer.py", grade = 3 },
+    { symbol = "loads", file = "corpus_2/src/itsdangerous/serializer.py", grade = 3 },
+]
+
+[[queries]]
+text = "who calls get_signature"
+kind = "structural"
+target_tool = "callers"
+target_symbol = "get_signature"
+judgments = []
+expected_symbols = [
+    { symbol = "sign", file = "corpus_2/src/itsdangerous/timed.py", grade = 3 },
+    { symbol = "verify_signature", file = "corpus_2/src/itsdangerous/signer.py", grade = 3 },
+    { symbol = "get_signature", file = "corpus_2/src/itsdangerous/signer.py", grade = 3 },
+    { symbol = "sign", file = "corpus_2/src/itsdangerous/signer.py", grade = 3 },
+]
+
+[[queries]]
+text = "who calls base64_decode"
+kind = "structural"
+target_tool = "callers"
+target_symbol = "base64_decode"
+judgments = []
+expected_symbols = [
+    { symbol = "unsign", file = "corpus_2/src/itsdangerous/timed.py", grade = 3 },
+    { symbol = "load_payload", file = "corpus_2/src/itsdangerous/url_safe.py", grade = 3 },
+    { symbol = "verify_signature", file = "corpus_2/src/itsdangerous/signer.py", grade = 3 },
+]
+
+[[queries]]
+text = "who calls load_payload"
+kind = "structural"
+target_tool = "callers"
+target_symbol = "load_payload"
+judgments = []
+expected_symbols = [
+    { symbol = "loads", file = "corpus_2/src/itsdangerous/timed.py", grade = 3 },
+    { symbol = "load_payload", file = "corpus_2/src/itsdangerous/url_safe.py", grade = 3 },
+    { symbol = "loads", file = "corpus_2/src/itsdangerous/serializer.py", grade = 3 },
+    { symbol = "_loads_unsafe_impl", file = "corpus_2/src/itsdangerous/serializer.py", grade = 3 },
+]
+
+[[queries]]
+text = "who calls derive_key"
+kind = "structural"
+target_tool = "callers"
+target_symbol = "derive_key"
+judgments = []
+expected_symbols = [
+    { symbol = "get_signature", file = "corpus_2/src/itsdangerous/signer.py", grade = 3 },
+    { symbol = "verify_signature", file = "corpus_2/src/itsdangerous/signer.py", grade = 3 },
+]
 
 # === Imports (4 queries) ===
 
 [[queries]]
-text = "what does error import"
+text = "what does encoding import"
 kind = "structural"
 target_tool = "imports"
-target_symbol = "error"
+target_symbol = "encoding"
 judgments = []
 expected_symbols = [
-    { symbol = "fmt", grade = 3 },
-    { symbol = "Display", grade = 3 },
-    { symbol = "Error", grade = 3 },
+    { symbol = "base64", grade = 3 },
+    { symbol = "string", grade = 3 },
+    { symbol = "struct", grade = 3 },
+    { symbol = "typing", grade = 3 },
+    { symbol = "BadData", file = "corpus_2/src/itsdangerous/exc.py", grade = 3 },
 ]
 
 [[queries]]
-text = "imports of search"
+text = "imports of _json"
 kind = "structural"
 target_tool = "imports"
-target_symbol = "search"
-judgments = []
-expected_symbols = [{ symbol = "Duration", grade = 3 }]
-
-[[queries]]
-text = "what does rate_limiter import"
-kind = "structural"
-target_tool = "imports"
-target_symbol = "rate_limiter"
-judgments = []
-expected_symbols = []  # TypeScript imports not fully captured in fixture
-
-[[queries]]
-text = "imports of signing"
-kind = "structural"
-target_tool = "imports"
-target_symbol = "signing"
+target_symbol = "_json"
 judgments = []
 expected_symbols = [
-    { symbol = "hashlib", grade = 3 },
-    { symbol = "hmac", grade = 3 },
-    { symbol = "time", grade = 3 },
+    { symbol = "json", grade = 3 },
+    { symbol = "typing", grade = 3 },
+]
+
+[[queries]]
+text = "what does exc import"
+kind = "structural"
+target_tool = "imports"
+target_symbol = "exc"
+judgments = []
+expected_symbols = [
+    { symbol = "typing", grade = 3 },
+    { symbol = "datetime", grade = 3 },
+]
+
+[[queries]]
+text = "imports of aserror"
+kind = "structural"
+target_tool = "imports"
+target_symbol = "aserror"
+judgments = []
+expected_symbols = [
+    { symbol = "Error", grade = 3 },
+    { symbol = "UnwindSafe", grade = 3 },
 ]
 
 # === Dependents (3 queries) ===
 
 [[queries]]
-text = "dependents of AppError"
+text = "dependents of BadSignature"
 kind = "structural"
 target_tool = "dependents"
-target_symbol = "AppError"
+target_symbol = "BadSignature"
 judgments = []
 expected_symbols = [
-    { symbol = "ErrorKind", file = "tests/fixtures/mini/error.rs", grade = 3 },
-    { symbol = "Result", file = "tests/fixtures/mini/error.rs", grade = 2 },
+    { symbol = "timed", file = "corpus_2/src/itsdangerous/timed.py", grade = 3 },
+    { symbol = "__init__", file = "corpus_2/src/itsdangerous/__init__.py", grade = 3 },
+    { symbol = "signer", file = "corpus_2/src/itsdangerous/signer.py", grade = 3 },
+    { symbol = "serializer", file = "corpus_2/src/itsdangerous/serializer.py", grade = 3 },
 ]
 
 [[queries]]
-text = "what depends on Base"
+text = "dependents of Signer"
 kind = "structural"
 target_tool = "dependents"
-target_symbol = "Base"
+target_symbol = "Signer"
 judgments = []
-expected_symbols = []  # No Base class in fixture
+expected_symbols = [
+    { symbol = "timed", file = "corpus_2/src/itsdangerous/timed.py", grade = 3 },
+    { symbol = "__init__", file = "corpus_2/src/itsdangerous/__init__.py", grade = 3 },
+    { symbol = "serializer", file = "corpus_2/src/itsdangerous/serializer.py", grade = 3 },
+]
 
 [[queries]]
-text = "dependents of SearchResult"
+text = "dependents of Serializer"
 kind = "structural"
 target_tool = "dependents"
-target_symbol = "SearchResult"
+target_symbol = "Serializer"
 judgments = []
-expected_symbols = [{ symbol = "search_with_retry", file = "tests/fixtures/mini/search.rs", grade = 3 }]
+expected_symbols = [
+    { symbol = "timed", file = "corpus_2/src/itsdangerous/timed.py", grade = 3 },
+    { symbol = "__init__", file = "corpus_2/src/itsdangerous/__init__.py", grade = 3 },
+    { symbol = "url_safe", file = "corpus_2/src/itsdangerous/url_safe.py", grade = 3 },
+]

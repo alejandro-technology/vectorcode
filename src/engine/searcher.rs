@@ -30,6 +30,8 @@ pub enum SearchMode {
     Hybrid,
     /// Hybrid search with cross-encoder reranking of top candidates.
     HybridRerank,
+    /// Graph-based structural search using the knowledge graph.
+    Graph,
 }
 
 impl std::fmt::Display for SearchMode {
@@ -39,6 +41,7 @@ impl std::fmt::Display for SearchMode {
             Self::Sparse => write!(f, "sparse"),
             Self::Hybrid => write!(f, "hybrid"),
             Self::HybridRerank => write!(f, "hybrid-rerank"),
+            Self::Graph => write!(f, "graph"),
         }
     }
 }
@@ -52,8 +55,9 @@ impl std::str::FromStr for SearchMode {
             "sparse" => Ok(Self::Sparse),
             "hybrid" => Ok(Self::Hybrid),
             "hybrid-rerank" => Ok(Self::HybridRerank),
+            "graph" => Ok(Self::Graph),
             other => Err(format!(
-                "unknown search mode '{other}', expected: dense, sparse, hybrid, hybrid-rerank"
+                "unknown search mode '{other}', expected: dense, sparse, hybrid, hybrid-rerank, graph"
             )),
         }
     }
@@ -256,6 +260,7 @@ pub async fn build_strategy(
                 timeout,
             ))
         }
+        SearchMode::Graph => Arc::new(super::graph_retriever::GraphRetriever::new(db)),
     }
 }
 
@@ -395,6 +400,11 @@ mod tests {
     }
 
     #[test]
+    fn search_mode_from_str_graph() {
+        assert_eq!("graph".parse::<SearchMode>().unwrap(), SearchMode::Graph);
+    }
+
+    #[test]
     fn search_mode_from_str_invalid_returns_error() {
         assert!("invalid".parse::<SearchMode>().is_err());
     }
@@ -487,6 +497,21 @@ mod tests {
         )
         .await;
         assert_eq!(strategy.mode(), SearchMode::HybridRerank);
+    }
+
+    #[tokio::test]
+    async fn build_strategy_graph_returns_graph_retriever() {
+        let db = setup_test_db();
+        let embedder = Arc::new(MockEmbedder::new(64));
+        let config = SearchConfig::default();
+        let strategy = build_strategy(
+            SearchMode::Graph,
+            Arc::new(tokio::sync::Mutex::new(db)),
+            embedder,
+            config,
+        )
+        .await;
+        assert_eq!(strategy.mode(), SearchMode::Graph);
     }
 
     // ─── SearchOptions tests ───────────────────────────────────────────

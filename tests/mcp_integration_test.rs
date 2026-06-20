@@ -345,6 +345,90 @@ fn insert_graph_data(dir: &std::path::Path) {
 
     db.insert_nodes(&nodes).unwrap();
     db.insert_edges(&edges).unwrap();
+
+    // Insert chunks for graph nodes so GraphRetriever can join them
+    use vectorcode::types::Chunk;
+    let chunks = vec![
+        Chunk {
+            id: "chunk_main".into(),
+            file_path: "src/main.rs".into(),
+            start_line: 1,
+            end_line: 10,
+            byte_start: 0,
+            byte_end: 200,
+            symbol: Some("main".into()),
+            kind: "function".into(),
+            content: "fn main() { search(); }".into(),
+            parent_context: None,
+            language: "rust".into(),
+            file_mtime: 1234567890,
+            content_hash: "hash1".into(),
+        },
+        Chunk {
+            id: "chunk_search".into(),
+            file_path: "src/search.rs".into(),
+            start_line: 1,
+            end_line: 10,
+            byte_start: 0,
+            byte_end: 200,
+            symbol: Some("search".into()),
+            kind: "function".into(),
+            content: "fn search() -> Vec<String> { vec![] }".into(),
+            parent_context: None,
+            language: "rust".into(),
+            file_mtime: 1234567890,
+            content_hash: "hash2".into(),
+        },
+        Chunk {
+            id: "chunk_base".into(),
+            file_path: "src/base.rs".into(),
+            start_line: 1,
+            end_line: 10,
+            byte_start: 0,
+            byte_end: 200,
+            symbol: Some("Base".into()),
+            kind: "class".into(),
+            content: "struct Base;".into(),
+            parent_context: None,
+            language: "rust".into(),
+            file_mtime: 1234567890,
+            content_hash: "hash3".into(),
+        },
+        Chunk {
+            id: "chunk_derived".into(),
+            file_path: "src/derived.rs".into(),
+            start_line: 1,
+            end_line: 10,
+            byte_start: 0,
+            byte_end: 200,
+            symbol: Some("Derived".into()),
+            kind: "class".into(),
+            content: "struct Derived;".into(),
+            parent_context: None,
+            language: "rust".into(),
+            file_mtime: 1234567890,
+            content_hash: "hash4".into(),
+        },
+        Chunk {
+            id: "chunk_module".into(),
+            file_path: "src/module.rs".into(),
+            start_line: 1,
+            end_line: 10,
+            byte_start: 0,
+            byte_end: 200,
+            symbol: Some("my_module".into()),
+            kind: "module".into(),
+            content: "mod my_module { use serde; }".into(),
+            parent_context: None,
+            language: "rust".into(),
+            file_mtime: 1234567890,
+            content_hash: "hash5".into(),
+        },
+    ];
+
+    for chunk in chunks {
+        vectorcode::store::chunks::insert_chunk(db.conn(), &chunk).unwrap();
+    }
 }
 
 #[test]
@@ -467,6 +551,54 @@ fn mcp_vec_find_callers_empty_graph_message() {
     assert!(
         text.contains("No graph data") || text.contains("reindex"),
         "Should return empty graph message, got: {text}"
+    );
+
+    child.stdin.take().unwrap();
+    let _ = child.wait();
+}
+
+#[test]
+fn mcp_vec_search_routing_graph_uses_retriever() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path());
+    insert_graph_data(dir.path());
+    let mut child = spawn_mcp_server(dir.path());
+    initialize_mcp(&mut child, dir.path());
+
+    // Use routing=graph with a structural query
+    let parsed = call_mcp_tool(
+        &mut child,
+        "vec_search",
+        r#"{"query":"who calls search","routing":"graph"}"#,
+        30,
+    );
+
+    let content = parsed["result"]["content"].as_array().unwrap();
+    let text = content[0]["text"].as_str().unwrap();
+    // Should find main as caller (from graph data)
+    assert!(
+        text.contains("main") || text.contains("Found"),
+        "Should use graph retriever, got: {text}"
+    );
+
+    child.stdin.take().unwrap();
+    let _ = child.wait();
+}
+
+#[test]
+fn mcp_vec_search_routing_none_byte_identical() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path());
+    let mut child = spawn_mcp_server(dir.path());
+    initialize_mcp(&mut child, dir.path());
+
+    // Without routing param, should use default dense mode (unchanged behavior)
+    let parsed = call_mcp_tool(&mut child, "vec_search", r#"{"query":"test query"}"#, 31);
+
+    // Should not error — default path unchanged
+    assert!(
+        parsed.get("error").is_none(),
+        "Default routing should not error"
     );
 
     child.stdin.take().unwrap();

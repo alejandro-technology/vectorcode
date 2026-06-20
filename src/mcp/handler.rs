@@ -64,8 +64,10 @@ pub struct VecSearchParams {
     pub language: Option<String>,
     /// Filter results by file path prefix
     pub path: Option<String>,
-    /// Search mode: "dense" (default), "sparse", "hybrid", or "hybrid-rerank"
+    /// Search mode: "dense" (default), "sparse", "hybrid", "hybrid-rerank", or "graph"
     pub mode: Option<String>,
+    /// Routing strategy: "auto" (heuristic), "graph" (force graph), "hybrid" (force hybrid), or None (default)
+    pub routing: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -134,7 +136,9 @@ impl McpHandler {
                        Use 'dense' for pure semantic search (default), \
                        'sparse' for keyword/lexical search, \
                        'hybrid' for combined dense+sparse with RRF fusion, \
-                       or 'hybrid-rerank' for hybrid with cross-encoder reranking (highest quality, slower). \
+                       'hybrid-rerank' for hybrid with cross-encoder reranking (highest quality, slower), \
+                       or 'graph' for structural graph queries. \
+                       Use 'routing' param to control routing: 'auto' (heuristic), 'graph' (force), 'hybrid' (force). \
                        Results are ordered by relevance.",
         annotations(read_only_hint = true)
     )]
@@ -146,15 +150,43 @@ impl McpHandler {
 
         let inner_state = self.get_inner_state().await?;
 
-        // Parse search mode (default: dense for backward compatibility)
-        let mode: SearchMode =
+        // Determine effective mode based on routing param
+        let mode: SearchMode = if let Some(ref routing) = p.routing {
+            match routing.as_str() {
+                "graph" => SearchMode::Graph,
+                "hybrid" => SearchMode::Hybrid,
+                "auto" => {
+                    // Use heuristic classifier
+                    match crate::engine::classify_query(&p.query) {
+                        crate::engine::RoutingDecision::Graph(_) => SearchMode::Graph,
+                        crate::engine::RoutingDecision::Hybrid => {
+                            // Fall back to mode param or default
+                            p.mode
+                                .as_deref()
+                                .unwrap_or("dense")
+                                .parse()
+                                .map_err(|e: String| {
+                                    format!("Invalid search mode: {e}. Valid: dense, sparse, hybrid, hybrid-rerank, graph")
+                                })?
+                        }
+                    }
+                }
+                other => {
+                    return Err(format!(
+                        "Invalid routing: '{other}'. Valid: auto, graph, hybrid"
+                    ));
+                }
+            }
+        } else {
+            // No routing param — use mode param (default: dense)
             p.mode
                 .as_deref()
                 .unwrap_or("dense")
                 .parse()
                 .map_err(|e: String| {
-                    format!("Invalid search mode: {e}. Valid: dense, sparse, hybrid, hybrid-rerank")
-                })?;
+                    format!("Invalid search mode: {e}. Valid: dense, sparse, hybrid, hybrid-rerank, graph")
+                })?
+        };
 
         // For hybrid-rerank mode, enable the reranker in the search config
         let mut search_config = inner_state.config.search.clone();

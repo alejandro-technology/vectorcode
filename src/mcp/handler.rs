@@ -504,16 +504,24 @@ impl McpHandler {
             return Err("Requested line range exceeds the maximum limit of 500 lines.".to_string());
         }
 
-        let metadata = tokio::fs::metadata(&canonical)
-            .await
-            .map_err(|e| format!("Failed to get file metadata: {e}"))?;
+        let metadata = tokio::fs::metadata(&canonical).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!("File not found: {}", p.file_path)
+            } else {
+                format!("Failed to get file metadata: {e}")
+            }
+        })?;
         if metadata.len() > 2 * 1024 * 1024 {
             return Err("Access denied: File size exceeds the maximum limit of 2MB.".to_string());
         }
 
-        let content = tokio::fs::read_to_string(&canonical)
-            .await
-            .map_err(|e| format!("Failed to read file: {e}"))?;
+        let content = tokio::fs::read_to_string(&canonical).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!("File not found: {}", p.file_path)
+            } else {
+                format!("Failed to read file: {e}")
+            }
+        })?;
 
         let lines: Vec<&str> = content.lines().collect();
         if p.start_line > lines.len() {
@@ -549,16 +557,24 @@ impl McpHandler {
                 .map_err(|e| format!("Access denied: {e}"))?;
         drop(workspaces);
 
-        let metadata = tokio::fs::metadata(&canonical)
-            .await
-            .map_err(|e| format!("Failed to get file metadata: {e}"))?;
+        let metadata = tokio::fs::metadata(&canonical).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!("File not found: {}", p.file_path)
+            } else {
+                format!("Failed to get file metadata: {e}")
+            }
+        })?;
         if metadata.len() > 2 * 1024 * 1024 {
             return Err("Access denied: File size exceeds the maximum limit of 2MB.".to_string());
         }
 
-        let source = tokio::fs::read_to_string(&canonical)
-            .await
-            .map_err(|e| format!("Failed to read file: {e}"))?;
+        let source = tokio::fs::read_to_string(&canonical).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!("File not found: {}", p.file_path)
+            } else {
+                format!("Failed to read file: {e}")
+            }
+        })?;
 
         let ext = canonical.extension().and_then(|e| e.to_str()).unwrap_or("");
         let language = SupportedLanguage::from_extension(ext);

@@ -67,14 +67,38 @@ fn resolve_within_workspace_rejects_traversal() {
     assert!(result.is_err(), "Traversal must be rejected");
 }
 
-/// Path that does not exist in any workspace must return
-/// `PathOutsideAnyWorkspace` (not a generic Io error).
+/// A relative path that does not exist but stays inside a workspace root
+/// must return `Ok` — the helper is a boundary guard, not an existence
+/// check. Callers (vec_outline, vec_read_lines) decide how to surface the
+/// later "File not found" error from `read_to_string`. This contract
+/// preserves the `mcp_vec_outline_file_not_found` integration behavior.
 #[test]
-fn resolve_within_workspace_rejects_nonexistent() {
+fn resolve_within_workspace_accepts_relative_nonexistent_inside() {
     let project = tempfile::tempdir().unwrap();
     let workspaces = make_workspaces(&[project.path()]);
     let result = resolve_within_workspace("does/not/exist.rs", &workspaces);
-    assert!(result.is_err(), "Nonexistent file must be rejected");
+    assert!(
+        result.is_ok(),
+        "Relative nonexistent path inside workspace must resolve"
+    );
+    let (resolved, _) = result.unwrap();
+    assert!(
+        resolved.to_string_lossy().contains("does/not/exist.rs"),
+        "Resolved path must preserve the relative components"
+    );
+}
+
+/// A *truly* escaped nonexistent path (relative traversal resolving to a
+/// path outside every workspace root) must return `PathOutsideAnyWorkspace`.
+#[test]
+fn resolve_within_workspace_rejects_nonexistent_traversal() {
+    let project = tempfile::tempdir().unwrap();
+    let workspaces = make_workspaces(&[project.path()]);
+    let result = resolve_within_workspace("../../../etc/passwd", &workspaces);
+    assert!(
+        result.is_err(),
+        "Nonexistent path that escapes workspace must be rejected"
+    );
 }
 
 /// R7 determinism: when two workspaces both own the same file, the

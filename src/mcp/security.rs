@@ -47,20 +47,71 @@ pub fn resolve_within_workspace<'a>(
 
     for (canonical_root, state) in &canonical_roots {
         let candidate = canonical_root.join(raw_path);
-        // Try to canonicalize the candidate. If the file does not exist
-        // we skip this root (the file might exist under a different root).
-        let canonical_candidate = match canonicalize_within(&candidate) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        if boundary_check(&canonical_candidate, canonical_root) {
-            return Ok((canonical_candidate, state));
+
+        // Fast path: the file exists, so canonicalize it and verify it falls
+        // inside the workspace. This catches symlinks pointing outside.
+        if let Ok(canonical_candidate) = canonicalize_within(&candidate) {
+            if boundary_check(&canonical_candidate, canonical_root) {
+                return Ok((canonical_candidate, state));
+            }
+            continue;
+        }
+
+        // Slow path: the file does not exist yet (e.g. a relative path like
+        // "nonexistent_file.rs"). We cannot canonicalize, so we verify the
+        // *unresolved* candidate does not escape the workspace via `..`
+        // segments. We normalize the candidate lexically (no symlink
+        // resolution) and require the result to stay inside the root.
+        // Symlink safety is irrelevant here because reads will fail later
+        // with a `File not found` error from the caller.
+        //
+        // We MUST NOT call `boundary_check` here: that helper canonicalizes
+        // both arguments, and canonicalize fails for nonexistent paths.
+        // Compare against the canonical root using `starts_with` on the
+        // normalized (lexical) candidate instead.
+        if !Path::new(raw_path).is_absolute() {
+            let normalized = normalize_lexically(&candidate);
+            if normalized.starts_with(canonical_root) {
+                return Ok((normalized, state));
+            }
         }
     }
 
     Err(VectorCodeError::PathOutsideAnyWorkspace {
         path: raw_path.to_string(),
     })
+}
+
+/// Normalize a path lexically (without touching the filesystem).
+///
+/// Collapses `.` and `..` segments so a subsequent `starts_with` check is
+/// meaningful without requiring the path to exist. This does NOT resolve
+/// symlinks; use `canonicalize_within` when the file exists on disk.
+fn normalize_lexically(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut stack: Vec<std::path::Component> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Only pop when the previous segment is a Normal (i.e. we
+                // don't undo the root or a `..` we already kept).
+                match stack.last() {
+                    Some(Component::Normal(_)) => {
+                        stack.pop();
+                    }
+                    _ => stack.push(component), // keep leading `..` so escapes
+                }
+            }
+            other => stack.push(other),
+        }
+    }
+    let mut out = PathBuf::new();
+    for component in stack {
+        out.push(component.as_os_str());
+    }
+    out
 }
 
 /// Resolve a user-supplied path against a single project root (CLI variant).

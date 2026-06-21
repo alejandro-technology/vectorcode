@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Default batch size for Ollama requests.
 /// Limited to avoid large payloads that can overwhelm slower Ollama instances.
 /// Each chunk is typically 500-4000 chars; 10 chunks ≈ 8-20KB per request.
-const OLLAMA_BATCH_SIZE: usize = 10;
+const OLLAMA_BATCH_SIZE: usize = 100;
 
 /// Ollama embedding provider.
 ///
@@ -191,7 +191,17 @@ impl OllamaEmbedder {
 
 impl Default for OllamaEmbedder {
     fn default() -> Self {
-        Self::new().expect("Default Ollama config should always be valid")
+        // Default constructor must not fail at the type level. If the
+        // HTTP client build fails (very rare — system TLS missing), fall
+        // back to a no-op embedder with the canonical default URL/model.
+        match Self::new() {
+            Ok(me) => me,
+            Err(_) => Self {
+                base_url: Self::DEFAULT_URL.to_string(),
+                model: Self::DEFAULT_MODEL.to_string(),
+                client: reqwest::Client::new(),
+            },
+        }
     }
 }
 
@@ -405,22 +415,19 @@ mod tests {
     }
 
     #[test]
-    fn ollama_chunk_size_is_10() {
-        assert_eq!(
-            OLLAMA_BATCH_SIZE, 10,
-            "Chunk size should be 10 to avoid large payloads"
-        );
+    fn ollama_chunk_size_is_100() {
+        assert_eq!(OLLAMA_BATCH_SIZE, 100, "Chunk size should be 100");
     }
 
     #[test]
-    fn ollama_chunk_count_for_25_texts() {
-        // 25 texts with chunk size 10 → 3 chunks (10 + 10 + 5)
-        let texts: Vec<&str> = (0..25).map(|_| "test").collect();
+    fn ollama_chunk_count_for_250_texts() {
+        // 250 texts with chunk size 100 → 3 chunks (100 + 100 + 50)
+        let texts: Vec<&str> = (0..250).map(|_| "test").collect();
         let chunks: Vec<&[&str]> = texts.chunks(OLLAMA_BATCH_SIZE).collect();
-        assert_eq!(chunks.len(), 3, "25 texts should split into 3 chunks");
-        assert_eq!(chunks[0].len(), 10);
-        assert_eq!(chunks[1].len(), 10);
-        assert_eq!(chunks[2].len(), 5);
+        assert_eq!(chunks.len(), 3, "250 texts should split into 3 chunks");
+        assert_eq!(chunks[0].len(), 100);
+        assert_eq!(chunks[1].len(), 100);
+        assert_eq!(chunks[2].len(), 50);
     }
 
     #[test]

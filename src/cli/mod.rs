@@ -211,9 +211,18 @@ pub fn init_tracing(verbose: bool, quiet: bool) {
         tracing::Level::INFO
     };
 
+    // Parse the hard-coded "ort=warn" directive. If parsing ever fails
+    // (it shouldn't — the literal is valid), fall back to a LevelFilter
+    // that the tracing-subscriber's From impl can convert.
+    let ort_directive = match "ort=warn".parse() {
+        Ok(d) => d,
+        Err(_) => tracing::level_filters::LevelFilter::WARN.into(),
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env().add_directive(level.into()),
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(level.into())
+                .add_directive(ort_directive),
         )
         .with_writer(std::io::stderr)
         .init();

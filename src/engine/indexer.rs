@@ -62,6 +62,7 @@ pub struct Indexer {
     db: Arc<tokio::sync::Mutex<Database>>,
     embedder: Arc<dyn Embedder>,
     config: IndexingConfig,
+    batch_size: usize,
     progress: Option<ProgressCallback>,
 }
 
@@ -76,8 +77,15 @@ impl Indexer {
             db,
             embedder,
             config,
+            batch_size: 100,
             progress: None,
         }
+    }
+
+    /// Set a custom batch size for embeddings.
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size;
+        self
     }
 
     /// Set a progress callback for visual progress reporting (e.g. indicatif).
@@ -128,7 +136,7 @@ impl Indexer {
             .collect();
 
         // Step 2: Process files — chunk and detect changes
-        let (new_chunks, files_indexed, chunks_skipped) =
+        let (new_chunks, files_indexed, chunks_skipped, file_records) =
             self.process_file_entries(&file_paths, project_path).await?;
 
         let chunks_new = new_chunks.len();
@@ -141,12 +149,12 @@ impl Indexer {
         self.report_progress(ProgressEvent::EmbeddingStart(chunks_new));
         if !new_chunks.is_empty() {
             let texts: Vec<String> = new_chunks.iter().map(enrich_chunk_content).collect();
-            let batch_size = 100;
+            let batch_size = self.batch_size;
             let chunks_batches: Vec<_> = texts
                 .chunks(batch_size)
                 .map(|chunk| chunk.to_vec())
                 .collect();
-            let num_batches = chunks_batches.len();
+            let _num_batches = chunks_batches.len();
 
             let semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.concurrency));
             let mut join_set = tokio::task::JoinSet::new();
@@ -163,41 +171,66 @@ impl Indexer {
                 });
             }
 
-            let mut batch_results = vec![None; num_batches];
+            // Process results as they come in, commit per batch
+            let mut embeddings_count = 0;
             while let Some(res) = join_set.join_next().await {
                 let (batch_idx, batch_embeddings) = res??;
                 self.report_progress(ProgressEvent::EmbeddedBatch(batch_embeddings.len()));
-                batch_results[batch_idx] = Some(batch_embeddings);
-            }
 
-            let mut embeddings = Vec::with_capacity(new_chunks.len());
-            for opt in batch_results {
-                if let Some(batch_embs) = opt {
-                    embeddings.extend(batch_embs);
-                } else {
+                // Get the corresponding chunks for this batch
+                let start_idx = batch_idx * batch_size;
+                let end_idx = (start_idx + batch_embeddings.len()).min(new_chunks.len());
+                let batch_chunks = &new_chunks[start_idx..end_idx];
+
+                if batch_chunks.len() != batch_embeddings.len() {
                     return Err(crate::VectorCodeError::EmbedderError {
-                        message: "Missing batch embeddings result".to_string(),
+                        message: format!(
+                            "Embedding count mismatch in batch {}: expected {} chunks, got {} embeddings",
+                            batch_idx,
+                            batch_chunks.len(),
+                            batch_embeddings.len()
+                        ),
                     }
                     .into());
                 }
+
+                // Commit this batch immediately
+                let mut db = self.db.lock().await;
+                let tx = db.conn_mut().transaction()?;
+                for (chunk, embedding) in batch_chunks.iter().zip(batch_embeddings.iter()) {
+                    chunks::insert_chunk(&tx, chunk)?;
+                    vectors::insert_vector(&tx, &chunk.id, embedding)?;
+                }
+                tx.commit()?;
+
+                embeddings_count += batch_embeddings.len();
             }
 
-            if new_chunks.len() != embeddings.len() {
+            if new_chunks.len() != embeddings_count {
                 return Err(crate::VectorCodeError::EmbedderError {
                     message: format!(
-                        "Embedding count mismatch: expected {} chunks, got {} embeddings",
+                        "Total embedding count mismatch: expected {} chunks, got {}",
                         new_chunks.len(),
-                        embeddings.len()
+                        embeddings_count
                     ),
                 }
                 .into());
             }
+        }
 
+        // Now that all embeddings are safely stored, upsert the file records to mark them as fully processed.
+        {
             let mut db = self.db.lock().await;
             let tx = db.conn_mut().transaction()?;
-            for (chunk, embedding) in new_chunks.iter().zip(embeddings.iter()) {
-                chunks::insert_chunk(&tx, chunk)?;
-                vectors::insert_vector(&tx, &chunk.id, embedding)?;
+            for file_record in file_records {
+                files::upsert_file(
+                    &tx,
+                    &file_record.0, // relative_path
+                    file_record.1,  // mtime
+                    file_record.2,  // size
+                    &file_record.3, // content_hash
+                    chrono::Utc::now().timestamp(),
+                )?;
             }
             tx.commit()?;
         }
@@ -242,7 +275,7 @@ impl Indexer {
         let start = Instant::now();
         let files_scanned = file_paths.len();
 
-        let (new_chunks, files_indexed, chunks_skipped) =
+        let (new_chunks, files_indexed, chunks_skipped, file_records) =
             self.process_file_entries(file_paths, project_path).await?;
 
         let chunks_new = new_chunks.len();
@@ -250,12 +283,12 @@ impl Indexer {
         if !new_chunks.is_empty() {
             self.report_progress(ProgressEvent::EmbeddingStart(chunks_new));
             let texts: Vec<String> = new_chunks.iter().map(enrich_chunk_content).collect();
-            let batch_size = 100;
+            let batch_size = self.batch_size;
             let chunks_batches: Vec<_> = texts
                 .chunks(batch_size)
                 .map(|chunk| chunk.to_vec())
                 .collect();
-            let num_batches = chunks_batches.len();
+            let _num_batches = chunks_batches.len();
 
             let semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.concurrency));
             let mut join_set = tokio::task::JoinSet::new();
@@ -272,41 +305,63 @@ impl Indexer {
                 });
             }
 
-            let mut batch_results = vec![None; num_batches];
+            // Process results as they come in, commit per batch
+            let mut embeddings_count = 0;
             while let Some(res) = join_set.join_next().await {
                 let (batch_idx, batch_embeddings) = res??;
                 self.report_progress(ProgressEvent::EmbeddedBatch(batch_embeddings.len()));
-                batch_results[batch_idx] = Some(batch_embeddings);
-            }
 
-            let mut embeddings = Vec::with_capacity(new_chunks.len());
-            for opt in batch_results {
-                if let Some(batch_embs) = opt {
-                    embeddings.extend(batch_embs);
-                } else {
+                let start_idx = batch_idx * batch_size;
+                let end_idx = (start_idx + batch_embeddings.len()).min(new_chunks.len());
+                let batch_chunks = &new_chunks[start_idx..end_idx];
+
+                if batch_chunks.len() != batch_embeddings.len() {
                     return Err(crate::VectorCodeError::EmbedderError {
-                        message: "Missing batch embeddings result".to_string(),
+                        message: format!(
+                            "Embedding count mismatch in batch {}: expected {} chunks, got {} embeddings",
+                            batch_idx,
+                            batch_chunks.len(),
+                            batch_embeddings.len()
+                        ),
                     }
                     .into());
                 }
+
+                let mut db = self.db.lock().await;
+                let tx = db.conn_mut().transaction()?;
+                for (chunk, embedding) in batch_chunks.iter().zip(batch_embeddings.iter()) {
+                    chunks::insert_chunk(&tx, chunk)?;
+                    vectors::insert_vector(&tx, &chunk.id, embedding)?;
+                }
+                tx.commit()?;
+
+                embeddings_count += batch_embeddings.len();
             }
 
-            if new_chunks.len() != embeddings.len() {
+            if new_chunks.len() != embeddings_count {
                 return Err(crate::VectorCodeError::EmbedderError {
                     message: format!(
-                        "Embedding count mismatch: expected {} chunks, got {} embeddings",
+                        "Total embedding count mismatch: expected {} chunks, got {}",
                         new_chunks.len(),
-                        embeddings.len()
+                        embeddings_count
                     ),
                 }
                 .into());
             }
+        }
 
+        {
             let mut db = self.db.lock().await;
             let tx = db.conn_mut().transaction()?;
-            for (chunk, embedding) in new_chunks.iter().zip(embeddings.iter()) {
-                chunks::insert_chunk(&tx, chunk)?;
-                vectors::insert_vector(&tx, &chunk.id, embedding)?;
+            for file_record in file_records {
+                files::upsert_file(
+                    &tx,
+                    &file_record.0,
+                    file_record.1,
+                    file_record.2,
+                    &file_record.3,
+                    chrono::Utc::now().timestamp(),
+                )?;
             }
             tx.commit()?;
         }
@@ -330,14 +385,12 @@ impl Indexer {
         })
     }
 
-    /// Process a list of files: read, chunk, detect changes, collect new chunks.
-    ///
-    /// Returns (new_chunks, files_indexed, chunks_skipped).
+    /// Returns (new_chunks, files_indexed, chunks_skipped, file_records_to_upsert).
     async fn process_file_entries(
         &self,
         file_paths: &[PathBuf],
         project_path: &Path,
-    ) -> Result<(Vec<Chunk>, usize, usize)> {
+    ) -> Result<(Vec<Chunk>, usize, usize, Vec<(String, i64, i64, String)>)> {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.concurrency));
         let mut join_set = tokio::task::JoinSet::new();
 
@@ -360,28 +413,58 @@ impl Indexer {
                 // Get file metadata
                 let metadata = match tokio::fs::metadata(&file_path).await {
                     Ok(m) => m,
-                    Err(_) => return Ok::<_, anyhow::Error>((Vec::new(), 0, 0)),
+                    Err(_) => return Ok::<_, anyhow::Error>((Vec::new(), 0, 0, Vec::new())),
                 };
 
                 // Skip files > max_file_size
                 if metadata.len() > config.max_file_size {
-                    return Ok((Vec::new(), 0, 0));
+                    return Ok((Vec::new(), 0, 0, Vec::new()));
                 }
 
                 let mtime = metadata
                     .modified()
                     .map(|t| {
                         t.duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() as i64
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0)
                     })
                     .unwrap_or(0);
                 let size = metadata.len() as i64;
 
+                // REQ-SEC-01: canonicalize the candidate path and verify it
+                // falls under the canonical project root. This closes the
+                // symlink escape vector — a symlink that points outside the
+                // workspace is skipped with a warning rather than indexed.
+                let canonical_root = match tokio::task::spawn_blocking({
+                    let root = project_path.clone();
+                    move || std::fs::canonicalize(&root)
+                })
+                .await
+                {
+                    Ok(Ok(c)) => c,
+                    _ => project_path.clone(),
+                };
+                let canonical_file = match tokio::task::spawn_blocking({
+                    let fp = file_path.clone();
+                    move || std::fs::canonicalize(&fp)
+                })
+                .await
+                {
+                    Ok(Ok(c)) => c,
+                    _ => file_path.clone(),
+                };
+                if !canonical_file.starts_with(&canonical_root) {
+                    tracing::warn!(
+                        "Skipping file outside project root (symlink escape?): {}",
+                        file_path.display()
+                    );
+                    return Ok((Vec::new(), 0, 0, Vec::new()));
+                }
+
                 // Read file content (skip binary/unreadable files)
                 let content = match tokio::fs::read_to_string(&file_path).await {
                     Ok(c) => c,
-                    Err(_) => return Ok((Vec::new(), 0, 0)),
+                    Err(_) => return Ok((Vec::new(), 0, 0, Vec::new())),
                 };
                 let content_hash = compute_content_hash(&content);
 
@@ -397,7 +480,7 @@ impl Indexer {
                             let existing_chunks =
                                 chunks::list_chunks_by_file(db_guard.conn(), &relative_path)?;
                             let chunks_skipped = existing_chunks.len();
-                            return Ok((Vec::new(), 0, chunks_skipped));
+                            return Ok((Vec::new(), 0, chunks_skipped, Vec::new()));
                         }
                     }
                 }
@@ -437,6 +520,7 @@ impl Indexer {
                 let mut file_new_chunks = Vec::new();
                 let mut chunks_skipped = 0;
                 let mut files_indexed = 0;
+                let file_record;
 
                 {
                     let mut db_guard = db.lock().await;
@@ -471,37 +555,37 @@ impl Indexer {
                     let _ = crate::store::graph::insert_nodes(&tx, &graph_nodes);
                     let _ = crate::store::graph::insert_edges(&tx, &graph_edges);
 
-                    // Update file record
-                    files::upsert_file(
-                        &tx,
-                        &relative_path,
-                        mtime,
-                        size,
-                        &content_hash,
-                        chrono::Utc::now().timestamp(),
-                    )?;
+                    // Defer file record upsert until AFTER chunks are successfully embedded and stored
+                    file_record = Some((relative_path.clone(), mtime, size, content_hash.clone()));
 
                     tx.commit()?;
                     files_indexed += 1;
                 }
 
-                Ok((file_new_chunks, files_indexed, chunks_skipped))
+                Ok((
+                    file_new_chunks,
+                    files_indexed,
+                    chunks_skipped,
+                    file_record.into_iter().collect::<Vec<_>>(),
+                ))
             });
         }
 
         let mut new_chunks = Vec::new();
         let mut files_indexed = 0;
         let mut chunks_skipped = 0;
+        let mut file_records = Vec::new();
 
         while let Some(res) = join_set.join_next().await {
-            let (file_chunks, indexed, skipped) = res??;
+            let (file_chunks, indexed, skipped, records) = res??;
             new_chunks.extend(file_chunks);
             files_indexed += indexed;
             chunks_skipped += skipped;
+            file_records.extend(records);
             self.report_progress(ProgressEvent::ProcessedFile);
         }
 
-        Ok((new_chunks, files_indexed, chunks_skipped))
+        Ok((new_chunks, files_indexed, chunks_skipped, file_records))
     }
 }
 

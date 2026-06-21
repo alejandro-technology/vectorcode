@@ -53,13 +53,15 @@ pub async fn execute(args: &IndexArgs, project_path: &std::path::Path, quiet: bo
 
     // Check meta for provider mismatch
     let index_meta = meta::read_index_meta(db.conn())?;
-    if index_meta.is_none() {
-        anyhow::bail!(
-            "Index metadata not found. The database may be corrupt.\n\
-             Try: rm -rf .vectorcode/ && vectorcode init"
-        );
-    }
-    let index_meta = index_meta.unwrap();
+    let index_meta = match index_meta {
+        Some(m) => m,
+        None => {
+            anyhow::bail!(
+                "Index metadata not found. The database may be corrupt.\n\
+                 Try: rm -rf .vectorcode/ && vectorcode init"
+            );
+        }
+    };
 
     // Ensure schema is up to date (handles v2→v3 FTS5 migration)
     db.init_schema(index_meta.dimensions)?;
@@ -133,11 +135,18 @@ pub async fn execute(args: &IndexArgs, project_path: &std::path::Path, quiet: bo
     }
 
     // Create indexer and run
+    let batch_size = config
+        .provider
+        .onnx
+        .as_ref()
+        .map(|o| o.batch_size)
+        .unwrap_or(64);
     let indexer = crate::engine::Indexer::new(
         std::sync::Arc::new(tokio::sync::Mutex::new(Database::open(&db_path)?)),
         embedder,
         config.indexing.clone(),
-    );
+    )
+    .with_batch_size(batch_size);
 
     // Set up progress callback for CLI mode (visual progress bars)
     let progress_bar = if quiet {
@@ -197,16 +206,22 @@ pub async fn execute(args: &IndexArgs, project_path: &std::path::Path, quiet: bo
     };
 
     let report = if let Some(ref file_path) = args.file {
-        // Index a specific file
-        let abs_path = if file_path.is_absolute() {
-            file_path.clone()
-        } else {
-            project_path.join(file_path)
+        // REQ-SEC-04: reject paths that fall outside the project root
+        // (closes the symlink escape vector at the CLI surface).
+        let canonical = match crate::mcp::security::resolve_within_project(
+            file_path.to_str().unwrap_or(""),
+            project_path,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                anyhow::bail!(
+                    "Refusing to index '{}': {} (path is outside the project root)",
+                    file_path.display(),
+                    e
+                );
+            }
         };
-        if !abs_path.exists() {
-            anyhow::bail!("File not found: {}", abs_path.display());
-        }
-        indexer.index_files(&[abs_path], project_path).await?
+        indexer.index_files(&[canonical], project_path).await?
     } else {
         // Full project index
         indexer.index_project(project_path).await?

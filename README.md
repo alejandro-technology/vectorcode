@@ -21,6 +21,10 @@
 
 VectorCode fills the gap between exact string matching (`grep`) and structural analysis (CodeGraph). It enables **semantic search** over your codebase — finding code by concept when you don't know the exact symbol name, pattern, or terminology.
 
+> **Honest status:** see [`docs/STATUS.md`](docs/STATUS.md) for the per-pilar
+> verdict (P1-P7) and the deep dives under `docs/pilar-status/`. Every
+> claim in this README is cross-checked against that index.
+
 **Example queries that VectorCode answers:**
 
 - "code that handles payment retries"
@@ -229,15 +233,28 @@ timeout_ms = 5000         # Fallback to hybrid on timeout
 
 ## Supported Languages
 
-| Language   | Extensions                    | Tree-sitter Grammar    |
-| ---------- | ----------------------------- | ---------------------- |
-| TypeScript | `.ts`                         | tree-sitter-typescript |
-| TSX        | `.tsx`                        | tree-sitter-typescript |
-| JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` | tree-sitter-javascript |
-| Python     | `.py`                         | tree-sitter-python     |
-| Rust       | `.rs`                         | tree-sitter-rust       |
-| Go         | `.go`                         | tree-sitter-go         |
-| Java       | `.java`                       | tree-sitter-java       |
+VectorCode parses 14 languages via tree-sitter. All 14 are chunked; 3 of
+them (Rust, the TS/JS family, Python) also emit graph edges. The
+per-pilar deep dive at
+[`docs/pilar-status/P3-estructura-ast-grafo.md`](docs/pilar-status/P3-estructura-ast-grafo.md)
+documents the language × edge-type matrix.
+
+| Language   | Extensions                          | Tree-sitter Grammar      | Graph edges |
+| ---------- | ----------------------------------- | ------------------------ | ----------- |
+| TypeScript | `.ts`                               | tree-sitter-typescript   | Call, Import |
+| TSX        | `.tsx`                              | tree-sitter-typescript   | Call, Import |
+| JavaScript | `.js`, `.mjs`, `.cjs`               | tree-sitter-javascript   | Call, Import |
+| JSX        | `.jsx`                              | tree-sitter-javascript   | Call, Import |
+| Python     | `.py`                               | tree-sitter-python       | Call, Import |
+| Rust       | `.rs`                               | tree-sitter-rust         | Call, Import |
+| Go         | `.go`                               | tree-sitter-go           | —           |
+| Java       | `.java`                             | tree-sitter-java         | —           |
+| C#         | `.cs`                               | tree-sitter-c-sharp      | —           |
+| C          | `.c`, `.h`                          | tree-sitter-c            | —           |
+| C++        | `.cpp`, `.hpp`, `.cc`, `.cxx`       | tree-sitter-cpp          | —           |
+| Ruby       | `.rb`                               | tree-sitter-ruby         | —           |
+| Swift      | `.swift`                            | tree-sitter-swift        | —           |
+| Kotlin     | `.kt`, `.kts`                       | tree-sitter-kotlin-ng    | —           |
 
 ## MCP Tools
 
@@ -294,6 +311,41 @@ Notes:
 - Max file size: 2MB
 - Path must be within project bounds
 
+### `vec_find_callers`
+
+Find functions or methods that call a given symbol. Uses the graph port
+(`src/store/graph.rs`). Currently emits `Call` and `Import` edges for
+Rust, the TS/JS family, and Python; returns an empty list for languages
+without a graph extractor.
+
+Parameters:
+
+- `symbol` (required) — Symbol name to search for (function, method, or
+  fully-qualified path)
+
+### `vec_find_dependents`
+
+Find symbols that depend on the given one (e.g. via class extension or
+symbol reference). Backed by the graph port's `get_dependents` method.
+
+Parameters:
+
+- `symbol` (required) — Symbol to find dependents for
+- `file_path` (optional) — Restrict the search to a single file
+
+### `vec_trace_imports`
+
+Trace the import graph for a symbol: every file that imports it, and
+every symbol those files re-export. Backed by `GraphStore::get_imports`.
+
+Parameters:
+
+- `symbol` (required) — Symbol to trace imports for
+- `file_path` (optional) — Restrict to imports within a single file
+
+> Honest status: see [docs/STATUS.md](docs/STATUS.md) for the per-pilar
+> verdict (P1-P7) and the deep dives under `docs/pilar-status/`.
+
 ## Benchmarks
 
 This section tracks the ongoing validation and ROI metrics of VectorCode across different SDD flow phases.
@@ -333,7 +385,7 @@ This section tracks the ongoing validation and ROI metrics of VectorCode across 
 | **Ollama + gemma** | embeddinggemma:latest (621MB) | 768 | 🎯 Máxima precisión (P@5=92%), indexado más lento |
 
 > 3 iteraciones × 50 queries cada una. Resultados: mediana a través de iteraciones.
-> `VECTORCODE_MODEL=nomic-embed-text` para cambiar modelo en benchmarks. Reporte en `benchmarks/results/phase1_report.json`.
+> `VECTORCODE_MODEL=nomic-embed-text` para cambiar modelo en benchmarks. Re-ejecutable vía `bash scripts/verify-baseline.sh` (regression gate, <30s, sin red).
 
 ### Fase 2: Ahorro de Tokens (Agente E2E)
 

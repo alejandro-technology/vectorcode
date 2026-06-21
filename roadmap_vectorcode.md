@@ -26,16 +26,23 @@ Estos principios gobiernan cada decisión técnica del roadmap. Si una feature n
 
 ## Estado actual (línea base verificada)
 
+Snapshot al cierre de fase 4.3 (commit `9df149a`). El detalle por pilar
+—verdict %, evidencia con `file:line` y límites conocidos— vive en
+[`docs/STATUS.md`](docs/STATUS.md) y los siete deep dives bajo
+`docs/pilar-status/`. El snapshot pre-Fase-1 (que tenía 4 entradas
+marcadas como pendientes y que el código ya había resuelto) se preserva
+al pie del archivo como `## Historical snapshots`.
+
 - ✅ Arquitectura hexagonal, tests compilando y en verde
-- ✅ MCP con 5 tools, `on_initialized` proactivo, `parent_context` en resultados
-- ✅ AST chunking vía Tree-sitter, 12+ lenguajes
-- ✅ Seguridad: path canonization, boundary checks, límites de lectura
-- ✅ Embedder con traits (Ollama, OpenAI, Gemini, ONNX)
-- ✅ Store: SQLite + sqlite-vec
-- ❌ Solo dense search (sin BM25/FTS, sin RRF, sin reranking)
-- ❌ Sin knowledge graph de relaciones
-- ❌ Sin soporte multi-repo
-- ❌ Sin benchmark formal de calidad de retrieval
+- ✅ MCP con 8 tools (3 graph-aware), `on_initialized` proactivo, `parent_context` en resultados
+- ✅ AST chunking vía Tree-sitter, 14 lenguajes; 3 de ellos con grafo (Rust / TS-JS / Python)
+- ✅ Seguridad: path canonization, boundary checks, límites de lectura, BTreeMap de workspaces
+- ✅ Embedder con traits — 6 proveedores (Onnx, Ollama, OpenAI, Gemini, OpenRouter, Mock)
+- ✅ Store: trait `Store` con 2 impls (`SqliteStore` producción, `LanceStore` SHIM tras `--features lancedb-store`); decisión documentada en ADR-0001
+- ✅ Hybrid search: dense + sparse (FTS5) + RRF + reranker ONNX (BGE-Reranker-v2-m3)
+- ✅ Knowledge graph de relaciones: nodos + aristas `Call` / `Import` extraídos inline durante el indexado
+- ✅ Multi-repo serve: `BTreeMap<PathBuf, AppInnerState>` con `repo_name` por resultado
+- ✅ Benchmark formal: harness en `src/bench/`, baseline en `BASELINE.md` + `benchmarks/baseline/`, regression gate en `scripts/verify-baseline.sh`
 
 ---
 
@@ -82,7 +89,7 @@ Estos principios gobiernan cada decisión técnica del roadmap. Si una feature n
 |---|---|---|
 | 3.1 | Evaluación de store a escala | Con datos reales de Fase 1-2 (tamaño de embeddings + FTS + grafo), probar sqlite-vec vs LanceDB vs Qdrant embebido en un repo grande real. Decisión basada en benchmarks de tiempo de indexado + memoria. |
 | 3.2 | Migración de store (si aplica) | Si 3.1 indica migrar, hacerlo detrás del puerto `Store` ya existente — el resto del motor no debería notar el cambio. |
-| 3.3 | Indexado incremental real | Hashing de archivos (SHA-256) + timestamps para reindexar solo lo que cambió. |
+| 3.3 | Indexado incremental real | Hashing de archivos (BLAKE3 — `src/types.rs:127` y `:134`) + timestamps para reindexar solo lo que cambió. |
 | 3.4 | Multi-repo serve mode | El MCP server indexa y sirve búsquedas sobre varios repos a la vez, con resultados que indican de qué repo vienen. Ranking cruzado vía RRF. |
 | 3.5 | Footprint y CI-readiness | Medir tiempo de indexado y consumo de memoria en un monorepo grande real. Validar que corre en un runner de CI estándar. |
 | 3.6 | Benchmark a escala | Extender el harness para medir Recall/latencia con múltiples repos cargados simultáneamente. |
@@ -99,7 +106,7 @@ Estos principios gobiernan cada decisión técnica del roadmap. Si una feature n
 |---|---|---|
 | 4.1 | Benchmark público reproducible | Publicar el harness como parte del repo, con instrucciones para que cualquiera lo corra y verifique los números. |
 | 4.2 | Auditoría de seguridad | Revisar de nuevo boundary checks y límites de lectura; validar si el grafo o multi-repo abren alguna superficie nueva de escape de directorio. |
-| 4.3 | Documentación honesta por pilar | Por cada pilar, documentar explícitamente qué tan completo está — nada de "production-ready" genérico. |
+| 4.3 | Documentación honesta por pilar | Por cada pilar, documentar explícitamente qué tan completo está, con `file:line` por afirmación y `Known limits` no vacío. Ver [`docs/STATUS.md`](docs/STATUS.md) + `docs/pilar-status/P{1..7}-*.md` (P1-P7). |
 | 4.4 | Comparación pública vs competidores | Correr el benchmark contra `flupkede/codesearch`, `mcp-vector-search`, etc., para tener una comparación objetiva. |
 | 4.5 | Release v1.0 | Changelog, guía de instalación, ejemplos de configuración Ollama+API, guía de contribución. |
 
@@ -121,3 +128,33 @@ Este roadmap parte de un análisis comparativo entre dos arquitecturas (Proyecto
 
 - **Proyecto A (base actual):** arquitectura hexagonal sólida, MCP excepcional (5 tools, `on_initialized` proactivo, `parent_context`), AST chunking en 12+ lenguajes, seguridad robusta. Debilidad principal: solo dense search.
 - **Proyecto B (referencia):** pipeline de hybrid search avanzado (FTS5 + RRF + reranking), pero con un bug crítico de concurrencia en el reranker (instanciación de `LlmClient` dentro del loop sin pool/Arc, `tokio::spawn` sin control) que generaba latencias severas. La Fase 1 porta la idea de B corrigiendo explícitamente ese error de diseño.
+
+---
+
+## Historical snapshots
+
+> Snapshots preservados por auditoría. La sección `## Estado actual` de este
+> archivo se reescribe en cada fase para reflejar la verdad; los snapshots
+> históricos quedan aquí para que un lector pueda reconstruir el "antes" sin
+> reconstruirlo a mano.
+
+### Estado al inicio (Fase 1) — historical snapshot
+
+Snapshot del bloque `## Estado actual (línea base verificada)` previo al
+commit C2 de la fase 4.3. Contenía 4 `❌` que el código ya había
+resuelto: dense-only (Fase 1), knowledge graph (Fase 2), multi-repo
+(Fase 3), benchmark formal (Fase 1.2). El snapshot original se
+preserva verbatim abajo; el bloque actual está al inicio del archivo.
+
+```text
+- ✅ Arquitectura hexagonal, tests compilando y en verde
+- ✅ MCP con 5 tools, `on_initialized` proactivo, `parent_context` en resultados
+- ✅ AST chunking vía Tree-sitter, 12+ lenguajes
+- ✅ Seguridad: path canonization, boundary checks, límites de lectura
+- ✅ Embedder con traits (Ollama, OpenAI, Gemini, ONNX)
+- ✅ Store: SQLite + sqlite-vec
+- ❌ Solo dense search (sin BM25/FTS, sin RRF, sin reranking)
+- ❌ Sin knowledge graph de relaciones
+- ❌ Sin soporte multi-repo
+- ❌ Sin benchmark formal de calidad de retrieval
+```

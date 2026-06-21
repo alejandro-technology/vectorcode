@@ -137,6 +137,12 @@ pub struct BenchmarkResult {
 
     /// Wall-clock duration in seconds.
     pub duration_secs: f64,
+
+    /// Embedder provider name (e.g., "mock-deterministic", "onnx"). Used by
+    /// the baseline comparator to ensure the comparison runs against the
+    /// same embedding model as the committed baseline.
+    #[serde(default)]
+    pub embedder: String,
 }
 
 /// Results for a single query.
@@ -286,6 +292,12 @@ pub struct StoreMetricsReport {
 
     /// The SLO limit applied (seconds). 360 by default for the vscode corpus.
     pub slo_limit_secs: u32,
+
+    /// Embedder provider name (e.g., "mock-deterministic", "onnx"). Used by
+    /// the baseline comparator to ensure the comparison runs against the
+    /// same embedding model as the committed baseline.
+    #[serde(default)]
+    pub embedder: String,
 }
 
 /// Verdict comparing two backend reports against the spec's thresholds.
@@ -320,6 +332,7 @@ mod tests {
             query_sample_size: 100,
             slo_passed: true,
             slo_limit_secs: 360,
+            embedder: "test-mock".to_string(),
         };
         let json = serde_json::to_string(&report).unwrap();
         assert!(json.contains("\"backend\":\"sqlite-vec\""));
@@ -432,6 +445,7 @@ mod tests {
                 symbol_precision_at_5: 0.0,
             },
             duration_secs: 12.5,
+            embedder: "test-mock".to_string(),
         };
 
         let json = serde_json::to_string(&result).unwrap();

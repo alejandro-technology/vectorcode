@@ -72,6 +72,50 @@ impl Embedder for MockEmbedder {
     }
 }
 
+/// Thin wrapper around [`MockEmbedder`] that exposes a distinct
+/// `provider_name()` ("mock-deterministic") so the `--compare` path in the
+/// benchmark CLI can identify it as the deterministic variant required by
+/// the regression gate.
+///
+/// The vectors produced are identical to `MockEmbedder` — only the
+/// `provider_name` changes. This keeps every existing test against
+/// `MockEmbedder` valid while making the compare path explicit.
+pub struct MockDeterministicEmbedder {
+    inner: MockEmbedder,
+}
+
+impl MockDeterministicEmbedder {
+    /// Create a new `MockDeterministicEmbedder` with the specified dimensions.
+    pub fn new(dims: u32) -> Self {
+        Self {
+            inner: MockEmbedder::new(dims),
+        }
+    }
+}
+
+#[async_trait]
+impl Embedder for MockDeterministicEmbedder {
+    async fn embed(&self, text: &str) -> EmbedderResult<Vec<f32>> {
+        self.inner.embed(text).await
+    }
+
+    fn dimensions(&self) -> u32 {
+        self.inner.dimensions()
+    }
+
+    fn provider_name(&self) -> &str {
+        "mock-deterministic"
+    }
+
+    fn model_name(&self) -> &str {
+        "mock-deterministic-embedder"
+    }
+
+    fn max_tokens(&self) -> u32 {
+        self.inner.max_tokens()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +191,36 @@ mod tests {
         let v768 = e768.embed("test").await.unwrap();
         assert_eq!(v384.len(), 384);
         assert_eq!(v768.len(), 768);
+    }
+
+    // ─── MockDeterministicEmbedder (phase 4.1) ──────────────────────────
+
+    #[test]
+    fn mock_deterministic_provider_name_is_distinct() {
+        let e = MockDeterministicEmbedder::new(384);
+        assert_eq!(e.provider_name(), "mock-deterministic");
+        // It must be distinct from the regular MockEmbedder's provider name.
+        assert_ne!(e.provider_name(), "mock");
+    }
+
+    #[test]
+    fn mock_deterministic_dimensions_match_inner() {
+        let e384 = MockDeterministicEmbedder::new(384);
+        let e768 = MockDeterministicEmbedder::new(768);
+        assert_eq!(e384.dimensions(), 384);
+        assert_eq!(e768.dimensions(), 768);
+    }
+
+    #[tokio::test]
+    async fn mock_deterministic_is_deterministic_across_instances() {
+        // The wrapper must produce the same vector as `MockEmbedder` for the
+        // same input — reproducibility is the whole point of using it in the
+        // --compare path.
+        let a = MockDeterministicEmbedder::new(128);
+        let b = MockDeterministicEmbedder::new(128);
+        assert_eq!(
+            a.embed("hello").await.unwrap(),
+            b.embed("hello").await.unwrap()
+        );
     }
 }

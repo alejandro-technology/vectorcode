@@ -7,10 +7,13 @@ use anyhow::Result;
 use clap::Args;
 
 use crate::bench::corpus::{Corpus, GitCorpus, LocalCorpus, MultiCorpus};
-use crate::bench::report::{self, OutputFormat};
+use crate::bench::report::{self, write_delta_json, write_delta_table, OutputFormat};
 use crate::bench::runner;
 use crate::bench::schema::{CorpusSource, QuerySet};
-use crate::embedder::mock::MockEmbedder;
+use crate::bench::verdict::{
+    compare_to_baseline, load_ir_baseline, load_structural_baseline, validate_baseline,
+};
+use crate::embedder::mock::{MockDeterministicEmbedder, MockEmbedder};
 use crate::engine::SearchMode;
 
 /// Corpus selection argument.
@@ -68,6 +71,19 @@ pub struct BenchmarkArgs {
     /// Path to queries file (default: benchmarks/queries/<corpus>.toml).
     #[arg(long)]
     pub queries: Option<PathBuf>,
+
+    /// Force the deterministic mock embedder (`mock-deterministic`). Required
+    /// for `--compare` when no deterministic configured provider is available.
+    /// Exit 0 = pass, 2 = regression, 1 = error.
+    #[arg(long)]
+    pub mock_embedder: bool,
+
+    /// Path to a baseline JSON file. When set, the run is compared against
+    /// the baseline and the process exits 0 (pass), 2 (regression), or 1
+    /// (error). A `delta-report.json` artifact is written next to the
+    /// baseline file.
+    #[arg(long)]
+    pub compare: Option<PathBuf>,
 }
 
 /// Execute the `benchmark` command.
@@ -107,8 +123,13 @@ pub async fn execute(
         CorpusArg::Custom(name) => vec![name.clone()],
     };
 
-    // Create embedder (try real, fall back to mock)
-    let embedder: Arc<dyn crate::embedder::Embedder> =
+    // Create embedder. The `--compare` path is strict about determinism:
+    // either `--mock-embedder` is set (we use MockDeterministicEmbedder) or
+    // a real provider loads successfully. The non-compare path keeps the
+    // historical behavior of falling back to MockEmbedder with a warning.
+    let embedder: Arc<dyn crate::embedder::Embedder> = if args.mock_embedder {
+        Arc::new(MockDeterministicEmbedder::new(384))
+    } else {
         match crate::cli::create_embedder_from_config(
             &crate::config::load_config(project_path).unwrap_or_default(),
         )
@@ -116,16 +137,42 @@ pub async fn execute(
         {
             Ok(e) => e,
             Err(err) => {
+                if args.compare.is_some() {
+                    anyhow::bail!(
+                        "comparison requires deterministic embeddings; \
+                         use --mock-embedder or configure a provider ({err})"
+                    );
+                }
                 if !quiet {
                     eprintln!("Warning: Could not create embedder: {err}");
                     eprintln!("Using mock embedder (results will be meaningless).");
                 }
                 Arc::new(MockEmbedder::new(384))
             }
-        };
+        }
+    };
+
+    // If --compare is set, validate the baseline up front so we fail fast
+    // before paying the indexing cost.
+    let baseline = if let Some(compare_path) = &args.compare {
+        let header = validate_baseline(compare_path).map_err(|e| anyhow::anyhow!("{e}"))?;
+        if !quiet {
+            eprintln!(
+                "Comparing to baseline: version={} corpus={} embedder={}",
+                header.version, header.corpus, header.embedder
+            );
+        }
+        Some(compare_path.clone())
+    } else {
+        None
+    };
 
     // Parse search mode(s)
     let modes = parse_modes(&args.mode)?;
+
+    // Track the worst verdict across all corpora so multi-corpus runs still
+    // exit 2 if any single corpus regresses.
+    let mut worst_regression: bool = false;
 
     // Run benchmark for each corpus
     for corpus_name in &corpora_to_run {
@@ -155,6 +202,14 @@ pub async fn execute(
 
             // Output results
             output_single_result(&result, &args.output, corpus_name, project_path, quiet)?;
+
+            // If --compare is set, run the comparison and exit accordingly.
+            if let Some(compare_path) = &baseline {
+                let exit = run_ir_comparison(&result, compare_path, project_path, quiet)?;
+                if exit == 2 {
+                    worst_regression = true;
+                }
+            }
         } else {
             let results = runner::run_multi_mode_benchmark(
                 corpus.as_ref(),
@@ -169,7 +224,66 @@ pub async fn execute(
         }
     }
 
+    if worst_regression {
+        // Bubble up the regression exit code to the process. We do this
+        // here (rather than per-corpus) so a multi-corpus run still ends
+        // with the correct code even when the bench loop completes cleanly.
+        std::process::exit(2);
+    }
+
     Ok(())
+}
+
+/// Run the IR (or structural) comparison against a baseline file and emit
+/// the delta report. Returns the would-be exit code (0 = pass, 2 = regress,
+/// 1 = error) so the caller can decide whether to short-circuit.
+fn run_ir_comparison(
+    current: &crate::bench::schema::BenchmarkResult,
+    baseline_path: &std::path::Path,
+    project_path: &std::path::Path,
+    quiet: bool,
+) -> Result<i32> {
+    // Try the IR shape first, then the structural shape. Whichever parses
+    // becomes the comparison target. (We don't have a separate CLI flag for
+    // structural yet — the structural run uses `--queries` to point at the
+    // structural query file and the baseline file name disambiguates.)
+    let baseline_report = match load_ir_baseline(baseline_path) {
+        Ok(b) => b.to_benchmark_result(),
+        Err(_) => match load_structural_baseline(baseline_path) {
+            Ok(b) => b.to_benchmark_result(),
+            Err(e) => {
+                anyhow::bail!("baseline is neither IR nor structural: {e}");
+            }
+        },
+    };
+
+    let comparison = compare_to_baseline(current, &baseline_report);
+
+    // Always emit the table to stdout (the spec requires it).
+    let mut buf: Vec<u8> = Vec::new();
+    if write_delta_table(&comparison, &mut buf).is_err() {
+        // write_delta_table returns io::Result; surface any error to the caller.
+        anyhow::bail!("failed to render delta table");
+    }
+    print!("{}", String::from_utf8_lossy(&buf));
+
+    // Write the JSON artifact next to the baseline file so users can find it
+    // in the same directory they pointed --compare at.
+    let delta_path = baseline_path.with_file_name("delta-report.json");
+    let mut json_buf: Vec<u8> = Vec::new();
+    if write_delta_json(&comparison, &mut json_buf).is_err() {
+        anyhow::bail!("failed to render delta JSON");
+    }
+    std::fs::write(&delta_path, &json_buf)?;
+    if !quiet {
+        eprintln!("Delta report written to: {}", delta_path.display());
+    }
+
+    // Silence the unused-warning on project_path (kept for future use when
+    // the delta report moves into `benchmarks/results/`).
+    let _ = project_path;
+
+    Ok(if comparison.passed() { 0 } else { 2 })
 }
 
 /// Parse mode string into a list of SearchMode values.
@@ -426,5 +540,45 @@ mod tests {
     #[test]
     fn parse_modes_invalid_returns_error() {
         assert!(parse_modes("invalid-mode").is_err());
+    }
+
+    #[test]
+    fn benchmark_args_parse_mock_embedder() {
+        let cli = crate::cli::Cli::parse_from(["vectorcode", "benchmark", "--mock-embedder"]);
+        match cli.command {
+            crate::cli::Commands::Benchmark(args) => {
+                assert!(args.mock_embedder, "--mock-embedder should be true");
+                assert!(args.compare.is_none());
+            }
+            _ => panic!("Expected Benchmark command"),
+        }
+    }
+
+    #[test]
+    fn benchmark_args_parse_compare() {
+        let cli = crate::cli::Cli::parse_from([
+            "vectorcode",
+            "benchmark",
+            "--compare",
+            "/path/to/baseline.json",
+        ]);
+        match cli.command {
+            crate::cli::Commands::Benchmark(args) => {
+                assert_eq!(args.compare, Some(PathBuf::from("/path/to/baseline.json")));
+            }
+            _ => panic!("Expected Benchmark command"),
+        }
+    }
+
+    #[test]
+    fn benchmark_args_defaults_compare_and_mock_embedder_are_off() {
+        let cli = crate::cli::Cli::parse_from(["vectorcode", "benchmark"]);
+        match cli.command {
+            crate::cli::Commands::Benchmark(args) => {
+                assert!(!args.mock_embedder);
+                assert!(args.compare.is_none());
+            }
+            _ => panic!("Expected Benchmark command"),
+        }
     }
 }

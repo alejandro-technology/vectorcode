@@ -6,6 +6,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::bench::schema::BenchmarkResult;
+use crate::bench::verdict::{BaselineVerdict, Comparison, MetricStatus};
 
 /// Output format for benchmark results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +143,86 @@ pub fn write_json(result: &BenchmarkResult, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Write a human-readable delta table to the given writer.
+///
+/// Format (one metric per row):
+/// ```text
+/// Metric             Current   Baseline   Delta    Verdict
+/// recall_at_5         0.8500     0.8500   +0.0000  pass
+/// recall_at_10        0.9100     0.9200   -0.0100  regress
+/// ```
+pub fn write_delta_table(c: &Comparison, w: &mut impl Write) -> std::io::Result<()> {
+    writeln!(
+        w,
+        "Metric             Current   Baseline   Delta    Verdict"
+    )?;
+    writeln!(
+        w,
+        "--------------------------------------------------------------"
+    )?;
+    for m in &c.metrics {
+        writeln!(
+            w,
+            "{:<18} {:>8.4} {:>10.4} {:>+9.4}  {}",
+            m.name,
+            m.current,
+            m.baseline,
+            m.delta,
+            match m.status {
+                MetricStatus::Pass => "pass",
+                MetricStatus::Regress => "regress",
+            }
+        )?;
+    }
+    writeln!(w)?;
+    match &c.verdict {
+        BaselineVerdict::Pass => writeln!(w, "Overall: PASS")?,
+        BaselineVerdict::Regress { reasons } => {
+            writeln!(w, "Overall: REGRESS ({} failing)", reasons.len())?;
+            for r in reasons {
+                writeln!(w, "  - {r}")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Write the comparison as JSON to the given writer.
+///
+/// Schema:
+/// ```json
+/// {
+///   "overall_verdict": "pass" | "regress",
+///   "metrics": [
+///     { "name": "...", "current": 0.0, "baseline": 0.0, "delta": 0.0, "status": "Pass" | "Regress" }
+///   ]
+/// }
+/// ```
+pub fn write_delta_json(c: &Comparison, w: &mut impl Write) -> std::io::Result<()> {
+    let payload = serde_json::json!({
+        "overall_verdict": match c.verdict {
+            BaselineVerdict::Pass => "pass",
+            BaselineVerdict::Regress { .. } => "regress",
+        },
+        "metrics": c.metrics.iter().map(|m| {
+            serde_json::json!({
+                "name": m.name,
+                "current": m.current,
+                "baseline": m.baseline,
+                "delta": m.delta,
+                "status": match m.status {
+                    MetricStatus::Pass => "Pass",
+                    MetricStatus::Regress => "Regress",
+                },
+            })
+        }).collect::<Vec<_>>(),
+    });
+    let pretty = serde_json::to_string_pretty(&payload).map_err(std::io::Error::other)?;
+    w.write_all(pretty.as_bytes())?;
+    w.write_all(b"\n")?;
+    Ok(())
+}
+
 /// Write BASELINE.md and results.json for baseline recording.
 pub fn write_baseline(result: &BenchmarkResult, output_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(output_dir)?;
@@ -271,6 +352,7 @@ mod tests {
                 symbol_precision_at_5: 0.0,
             },
             duration_secs: 5.5,
+            embedder: "test-mock".to_string(),
         }
     }
 
@@ -355,5 +437,123 @@ mod tests {
             OutputFormat::Baseline
         );
         assert!("invalid".parse::<OutputFormat>().is_err());
+    }
+
+    // ─── Delta writer tests (t1.7 / t1.8) ────────────────────────────────
+
+    use crate::bench::verdict::{BaselineVerdict, Comparison, MetricDelta, MetricStatus};
+
+    fn sample_pass_comparison() -> Comparison {
+        Comparison {
+            metrics: vec![
+                MetricDelta {
+                    name: "recall_at_5".to_string(),
+                    current: 0.86,
+                    baseline: 0.85,
+                    delta: 0.01,
+                    status: MetricStatus::Pass,
+                },
+                MetricDelta {
+                    name: "ndcg_at_10".to_string(),
+                    current: 0.90,
+                    baseline: 0.90,
+                    delta: 0.0,
+                    status: MetricStatus::Pass,
+                },
+            ],
+            verdict: BaselineVerdict::Pass,
+        }
+    }
+
+    fn sample_regress_comparison() -> Comparison {
+        Comparison {
+            metrics: vec![MetricDelta {
+                name: "recall_at_5".to_string(),
+                current: 0.83,
+                baseline: 0.85,
+                delta: -0.02,
+                status: MetricStatus::Regress,
+            }],
+            verdict: BaselineVerdict::Regress {
+                reasons: vec!["recall_at_5: current=0.83 baseline=0.85 delta=-0.02".to_string()],
+            },
+        }
+    }
+
+    #[test]
+    fn delta_table_pass_renders_overall_pass() {
+        let cmp = sample_pass_comparison();
+        let mut buf: Vec<u8> = Vec::new();
+        write_delta_table(&cmp, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("Overall: PASS"), "Got:\n{s}");
+        assert!(s.contains("recall_at_5"));
+        assert!(s.contains("pass"));
+        assert!(!s.contains("regress"));
+    }
+
+    #[test]
+    fn delta_table_regress_renders_overall_regress_and_reason() {
+        let cmp = sample_regress_comparison();
+        let mut buf: Vec<u8> = Vec::new();
+        write_delta_table(&cmp, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("Overall: REGRESS"), "Got:\n{s}");
+        assert!(s.contains("recall_at_5"));
+        assert!(s.contains("regress"), "row should mark regressing metric");
+        // The reason from the verdict is in the output.
+        assert!(
+            s.contains("current=0.83") && s.contains("baseline=0.85"),
+            "Reason should be embedded in the table footer, got:\n{s}"
+        );
+    }
+
+    #[test]
+    fn delta_json_roundtrips_overall_verdict_and_metrics() {
+        let cmp = sample_regress_comparison();
+        let mut buf: Vec<u8> = Vec::new();
+        write_delta_json(&cmp, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        // Parse the JSON back to verify the schema matches the spec.
+        let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed["overall_verdict"], "regress");
+        let metrics = parsed["metrics"].as_array().expect("metrics array");
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0]["name"], "recall_at_5");
+        assert_eq!(metrics[0]["status"], "Regress");
+        assert!(
+            (metrics[0]["delta"].as_f64().unwrap() - (-0.02)).abs() < 1e-9,
+            "delta should be -0.02"
+        );
+    }
+
+    #[test]
+    fn delta_handles_nan_as_regress() {
+        // A NaN value must serialize to a regress row, and the JSON writer
+        // must not panic on it. We construct a comparison directly (the
+        // comparator would also mark NaN as regress, but here we test the
+        // writer alone).
+        let cmp = Comparison {
+            metrics: vec![MetricDelta {
+                name: "recall_at_5".to_string(),
+                current: f64::NAN,
+                baseline: 0.85,
+                delta: f64::NAN,
+                status: MetricStatus::Regress,
+            }],
+            verdict: BaselineVerdict::Regress {
+                reasons: vec!["NaN in current".to_string()],
+            },
+        };
+
+        let mut table_buf: Vec<u8> = Vec::new();
+        write_delta_table(&cmp, &mut table_buf).unwrap();
+        let table = String::from_utf8(table_buf).unwrap();
+        assert!(table.contains("regress"));
+        // NaN serializes as `null` in JSON, so we just ensure no panic.
+        let mut json_buf: Vec<u8> = Vec::new();
+        write_delta_json(&cmp, &mut json_buf).unwrap();
+        let json = String::from_utf8(json_buf).unwrap();
+        assert!(json.contains("\"overall_verdict\": \"regress\""));
     }
 }

@@ -106,6 +106,7 @@ pub async fn run_benchmark(
         query_results,
         aggregate,
         duration_secs: duration.as_secs_f64(),
+        embedder: embedder.provider_name().to_string(),
     })
 }
 

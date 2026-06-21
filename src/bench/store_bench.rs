@@ -156,6 +156,7 @@ pub async fn run_store_benchmark(
         query_sample_size,
         slo_passed,
         slo_limit_secs,
+        embedder: embedder.provider_name().to_string(),
     })
 }
 
@@ -252,6 +253,7 @@ mod tests {
             query_sample_size: 100,
             slo_passed: indexing_secs <= 360.0,
             slo_limit_secs: 360,
+            embedder: "test-mock".to_string(),
         }
     }
 

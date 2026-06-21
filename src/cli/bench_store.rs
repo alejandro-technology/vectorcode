@@ -19,6 +19,11 @@
 //!
 //! Default: TOML to stdout (machine-readable, captures every axis field).
 //! Use `--output json` for the same payload as JSON.
+//!
+//! ## Comparison gate
+//!
+//! Pass `--compare <baseline.json>` to gate the run against a committed
+//! store baseline. Exit codes: 0 = pass, 2 = regression, 1 = error.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,8 +33,10 @@ use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 
 use crate::bench::corpus::Corpus;
+use crate::bench::report::{write_delta_json, write_delta_table};
 use crate::bench::store_bench::run_store_benchmark;
-use crate::embedder::mock::MockEmbedder;
+use crate::bench::verdict::{compare_to_baseline, load_store_baseline, validate_baseline};
+use crate::embedder::mock::{MockDeterministicEmbedder, MockEmbedder};
 use crate::store::store::StoreFactory;
 
 /// CLI argument for the store backend selection.
@@ -117,6 +124,13 @@ pub struct BenchStoreArgs {
     /// the query phase is O(N) and can take 20+ min on 15K-file corpora).
     #[arg(long, default_value_t = 100)]
     pub query_sample: usize,
+
+    /// Path to a store baseline JSON file. When set, the run is compared
+    /// against the baseline and the process exits 0 (pass), 2 (regression),
+    /// or 1 (error). A `delta-report.json` artifact is written next to the
+    /// baseline file.
+    #[arg(long)]
+    pub compare: Option<PathBuf>,
 }
 
 /// Exit code returned when the SLO is violated. Lets CI/scripts detect
@@ -180,17 +194,23 @@ pub async fn execute(
 
     // 4. Build the embedder. The SLO is a STORE SLO (R3), so the embedder
     //    must not be the bottleneck. Three modes:
-    //    a) --mock-embedder: forced MockEmbedder (384d, deterministic). The
-    //       right default for measuring the store in isolation.
+    //    a) --mock-embedder: forced MockDeterministicEmbedder (384d, deterministic
+    //       variant whose `provider_name` is "mock-deterministic"). The right
+    //       default for measuring the store in isolation and for the
+    //       `--compare` gate.
     //    b) Configured provider: when the user explicitly wants the real
     //       configured embedder in the loop. Often too slow (e.g. ollama
     //       over HTTP) to validate a 6min SLO on a 15K-file corpus.
     //    c) Fallback MockEmbedder: when no real embedder can be built.
+    //       Forbidden when `--compare` is set: the comparison requires
+    //       deterministic embeddings and the fallback MockEmbedder would
+    //       produce different vectors run-to-run only if the hashing
+    //       implementation changes — but we keep the rule strict.
     let embedder: Arc<dyn crate::embedder::Embedder> = if args.mock_embedder {
         if !quiet {
-            eprintln!("Using MockEmbedder (forced via --mock-embedder).");
+            eprintln!("Using MockDeterministicEmbedder (forced via --mock-embedder).");
         }
-        Arc::new(MockEmbedder::new(384))
+        Arc::new(MockDeterministicEmbedder::new(384))
     } else {
         match crate::cli::create_embedder_from_config(
             &crate::config::load_config(project_path).unwrap_or_default(),
@@ -199,6 +219,12 @@ pub async fn execute(
         {
             Ok(e) => e,
             Err(err) => {
+                if args.compare.is_some() {
+                    anyhow::bail!(
+                        "comparison requires deterministic embeddings; \
+                         use --mock-embedder or configure a provider ({err})"
+                    );
+                }
                 if !quiet {
                     eprintln!("Warning: Could not create embedder: {err}");
                     eprintln!("Using mock embedder (results will not reflect real semantics).");
@@ -217,6 +243,18 @@ pub async fn execute(
             embedder.provider_name(),
             embedder.model_name(),
         );
+    }
+
+    // 4b. If --compare is set, validate the baseline up front so we fail
+    //     fast before paying the indexing cost.
+    if let Some(compare_path) = &args.compare {
+        let header = validate_baseline(compare_path).map_err(|e| anyhow::anyhow!("{e}"))?;
+        if !quiet {
+            eprintln!(
+                "Comparing to baseline: version={} corpus={} embedder={}",
+                header.version, header.corpus, header.embedder
+            );
+        }
     }
 
     // 5. Run the harness.
@@ -247,6 +285,11 @@ pub async fn execute(
             "\nSLO VIOLATION: indexing took {:.1}s (limit {}s) for backend '{}' on corpus '{}'.",
             report.indexing_secs, report.slo_limit_secs, report.backend, report.corpus,
         );
+        // If --compare is set, the SLO violation is itself a regression;
+        // surface it as exit 2 so the gate is honored uniformly.
+        if args.compare.is_some() {
+            std::process::exit(2);
+        }
         std::process::exit(EXIT_SLO_VIOLATION);
     } else if !quiet {
         eprintln!(
@@ -255,7 +298,52 @@ pub async fn execute(
         );
     }
 
+    // 8. If --compare is set, run the store comparison and exit 0/2.
+    if let Some(compare_path) = &args.compare {
+        return run_store_comparison(&report, compare_path, quiet);
+    }
+
     Ok(())
+}
+
+/// Run the store-level comparison against a baseline file and emit the
+/// delta report. Returns `Ok(())` after calling `std::process::exit` with
+/// the appropriate code (0 = pass, 2 = regression, 1 = error already
+/// surfaced via the error return path).
+fn run_store_comparison(
+    current: &crate::bench::schema::StoreMetricsReport,
+    baseline_path: &std::path::Path,
+    quiet: bool,
+) -> Result<()> {
+    let baseline = load_store_baseline(baseline_path).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let baseline_report = baseline.to_store_metrics_report();
+
+    let comparison = compare_to_baseline(current, &baseline_report);
+
+    // Emit the table to stdout.
+    let mut buf: Vec<u8> = Vec::new();
+    if write_delta_table(&comparison, &mut buf).is_err() {
+        anyhow::bail!("failed to render delta table");
+    }
+    print!("{}", String::from_utf8_lossy(&buf));
+
+    // Write the JSON artifact next to the baseline file.
+    let delta_path = baseline_path.with_file_name("delta-report.json");
+    let mut json_buf: Vec<u8> = Vec::new();
+    if write_delta_json(&comparison, &mut json_buf).is_err() {
+        anyhow::bail!("failed to render delta JSON");
+    }
+    std::fs::write(&delta_path, &json_buf)?;
+    if !quiet {
+        eprintln!("Delta report written to: {}", delta_path.display());
+    }
+
+    if comparison.passed() {
+        Ok(())
+    } else {
+        // Surface the regression to the process so the CI gate fires.
+        std::process::exit(2);
+    }
 }
 
 #[cfg(test)]
@@ -406,5 +494,40 @@ mod tests {
         // generic error (1) and success (0).
         assert_ne!(EXIT_SLO_VIOLATION, 0);
         assert_ne!(EXIT_SLO_VIOLATION, 1);
+    }
+
+    #[test]
+    fn bench_store_args_parse_compare() {
+        let args = parse_bench_store(&["bench-store", "--compare", "/path/to/store.json"]);
+        assert_eq!(args.compare, Some(PathBuf::from("/path/to/store.json")));
+    }
+
+    #[test]
+    fn bench_store_args_compare_default_is_none() {
+        let args = parse_bench_store(&["bench-store"]);
+        assert!(args.compare.is_none());
+    }
+
+    #[test]
+    fn bench_store_args_parse_compare_combined() {
+        let args = parse_bench_store(&[
+            "bench-store",
+            "--corpus",
+            "mock-mini",
+            "--mock-embedder",
+            "--query-sample",
+            "0",
+            "--compare",
+            "benchmarks/baseline/baseline-store-mock-mini.json",
+        ]);
+        assert_eq!(args.corpus, "mock-mini");
+        assert!(args.mock_embedder);
+        assert_eq!(args.query_sample, 0);
+        assert_eq!(
+            args.compare,
+            Some(PathBuf::from(
+                "benchmarks/baseline/baseline-store-mock-mini.json"
+            ))
+        );
     }
 }

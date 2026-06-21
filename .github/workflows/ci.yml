@@ -53,9 +53,8 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             use_cross: false
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            use_cross: false
+          # x86_64-apple-darwin removed: ort-sys has no prebuilt ONNX Runtime for
+          # macOS Intel, and Apple Silicon is the only supported Mac target now.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             use_cross: false
@@ -83,6 +82,14 @@ jobs:
 
       - name: Build release
         if: "!matrix.use_cross"
+        env:
+          # ONNX Runtime prebuilts (ort-sys download-binaries) are compiled with
+          # /MD (dynamic CRT). cc-rs defaults to /MT (static CRT) on MSVC, which
+          # causes LNK2038 RuntimeLibrary mismatches (ort-sys /MD vs esaxx-rs /MT,
+          # onig_sys /MT, etc.). Force /MD so all cc-rs builds align with ort-sys.
+          # MSVC uses "last flag wins", so appending /MD overrides cc-rs's /MT.
+          CFLAGS_x86_64_pc_windows_msvc: ${{ matrix.target == 'x86_64-pc-windows-msvc' && '/MD' || '' }}
+          CXXFLAGS_x86_64_pc_windows_msvc: ${{ matrix.target == 'x86_64-pc-windows-msvc' && '/MD' || '' }}
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Build release (cross)

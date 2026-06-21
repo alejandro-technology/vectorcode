@@ -43,12 +43,17 @@ jobs:
       - name: Run mini-corpus benchmark
         run: |
           cargo run --release -- benchmark --corpus mini --output table
-        continue-on-error: true  # Fase 1.1-1.2: informational only, exit 0
 
       - name: Validate Indexing Footprint (vscode corpus)
         run: |
           cargo run --release -- bench-store --corpus vscode
-        continue-on-error: true
+
+      - name: Verify against committed baselines
+        # Phase 4.1: the mock-mini regression gate. Runs scripts/verify-baseline.sh
+        # which executes three --compare flows (IR / structural / store) and
+        # exits non-zero on regression. The PR is blocked when this fails.
+        run: |
+          bash scripts/verify-baseline.sh
 
       - name: Upload benchmark results
         if: always()
@@ -57,6 +62,7 @@ jobs:
           name: benchmark-results
           path: |
             benchmark-*.json
+            benchmarks/baseline/delta-report.json
             BASELINE.md
           retention-days: 30
 
@@ -67,16 +73,16 @@ jobs:
           script: |
             const fs = require('fs');
             let body = '## Benchmark Results (mini-corpus)\n\n';
-            
+
             try {
               const results = fs.readFileSync('benchmark-mini.json', 'utf8');
               const data = JSON.parse(results);
-              
+
               body += `**Corpus**: ${data.corpus}\n`;
               body += `**Files indexed**: ${data.files_indexed}\n`;
               body += `**Queries executed**: ${data.queries_executed}\n`;
               body += `**Duration**: ${data.duration_secs.toFixed(2)}s\n\n`;
-              
+
               body += '### Aggregate Metrics\n\n';
               body += '| Metric | Value |\n';
               body += '|--------|-------|\n';
@@ -84,25 +90,25 @@ jobs:
               body += `| Recall@10 | ${data.aggregate.recall_at_10.toFixed(4)} |\n`;
               body += `| nDCG@10 | ${data.aggregate.ndcg_at_10.toFixed(4)} |\n`;
               body += `| MRR | ${data.aggregate.mrr.toFixed(4)} |\n`;
-              
+
               body += '\n<details><summary>Per-query results</summary>\n\n';
               body += '| Query | R@5 | R@10 | nDCG | MRR |\n';
               body += '|-------|-----|------|------|-----|\n';
-              
+
               for (const qr of data.query_results.slice(0, 10)) {
                 const query = qr.query.substring(0, 40);
                 body += `| ${query} | ${qr.recall_at_5.toFixed(2)} | ${qr.recall_at_10.toFixed(2)} | ${qr.ndcg_at_10.toFixed(2)} | ${qr.mrr.toFixed(2)} |\n`;
               }
-              
+
               if (data.query_results.length > 10) {
                 body += `| ... and ${data.query_results.length - 10} more | | | | |\n`;
               }
-              
+
               body += '\n</details>\n';
             } catch (err) {
               body += '⚠️ Could not parse benchmark results\n';
             }
-            
+
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,

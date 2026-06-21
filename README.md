@@ -300,9 +300,16 @@ This section tracks the ongoing validation and ROI metrics of VectorCode across 
 
 | Fase | Descripción | Métrica Principal | Resultado |
 | ---- | ----------- | ----------------- | --------- |
-| 1 | Precisión IR y Rendimiento | P@1, P@3, P@5, Latencia | ✅ Completado |
-| 2 | Ahorro de Tokens (Agente E2E) | Reducción de Input Tokens vs Baseline | ✅ Completado (Real LLM) |
-| 3 | Saturación de Contexto (Context Bloat) | Puntuación del AI Judge | ✅ Completado (Real LLM) |
+| 1 | Precisión IR y Rendimiento | P@1, P@3, P@5, Latencia | [Status](docs/STATUS.md) |
+| 2 | Ahorro de Tokens (Agente E2E) | Reducción de Input Tokens vs Baseline | [Status](docs/STATUS.md) |
+| 3 | Saturación de Contexto (Context Bloat) | Puntuación del AI Judge | [Status](docs/STATUS.md) |
+
+### How to verify these numbers
+
+- **Public verification guide** — see [`docs/benchmarks.md`](docs/benchmarks.md). Clone the repo, run `bash scripts/verify-baseline.sh`, and the committed mock-mini baselines gate the regression in <30s with no network, no Ollama, no API keys.
+- **Baseline JSON schema** — see [`benchmarks/baseline/SCHEMA.md`](benchmarks/baseline/SCHEMA.md) for the per-metric tolerance policy and the update rules.
+- **Historical context** — `BASELINE.md` carries the original Phase 1 IR-quality and latency numbers from the real ONNX / Ollama / gemma runs. The mock-mini baselines under `benchmarks/baseline/` are the regression gate; the published `BASELINE.md` numbers are not directly comparable (different model + corpus).
+- **Delivery status** — see [`docs/STATUS.md`](docs/STATUS.md) for the current phase status.
 
 ### Fase 1: Precisión IR
 

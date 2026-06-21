@@ -390,6 +390,20 @@ This section tracks the ongoing validation and ROI metrics of VectorCode across 
 └─────────────────────────────────────────────────────────────┘
 ```
 
+## Security
+
+VectorCode enforces path-boundary checks across MCP handlers, CLI
+commands, and the indexer to prevent reading or embedding files outside
+the initialized workspace. See [`docs/SECURITY.md`](docs/SECURITY.md)
+for the full threat model, validated defenses, and known limits
+(deferred items like root allowlist, gitignore read-gate, TOCTOU fix,
+and rate limiting).
+
+Quick rules of thumb:
+- Initialize VectorCode in a dedicated project directory, not in `$HOME` or `/`.
+- Keep secrets in `.gitignore` — VectorCode respects it during indexing.
+- Do not point the MCP client at system roots.
+
 ## License
 
 MIT

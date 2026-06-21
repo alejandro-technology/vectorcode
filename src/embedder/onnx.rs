@@ -27,10 +27,10 @@ pub struct OnnxEmbedder {
 
 impl OnnxEmbedder {
     /// Model name constant.
-    pub const MODEL_NAME: &'static str = "all-MiniLM-L6-v2";
+    pub const MODEL_NAME: &'static str = "nomic-embed-text-v1.5";
 
     /// Output dimensions.
-    pub const DIMENSIONS: u32 = 384;
+    pub const DIMENSIONS: u32 = 768;
 
     /// Maximum token length.
     pub const MAX_TOKENS: u32 = 512;
@@ -241,35 +241,77 @@ pub fn onnx_timeout_error_message() -> String {
 #[async_trait]
 impl Embedder for OnnxEmbedder {
     async fn embed(&self, text: &str) -> EmbedderResult<Vec<f32>> {
-        let (input_ids, attention_mask, token_type_ids) = self.tokenize(text)?;
-        let seq_len = input_ids.len();
+        let mut batch_results = self.embed_batch(&[text]).await?;
+        Ok(batch_results.pop().unwrap_or_default())
+    }
+
+    async fn embed_batch(&self, texts: &[&str]) -> EmbedderResult<Vec<Vec<f32>>> {
         let dims = Self::DIMENSIONS as usize;
+        let batch_size = texts.len();
+        if batch_size == 0 {
+            return Ok(Vec::new());
+        }
 
-        // Prepare input tensors: shape (1, seq_len)
+        let mut all_input_ids = Vec::with_capacity(batch_size);
+        let mut all_attention_masks = Vec::with_capacity(batch_size);
+        let mut all_token_type_ids = Vec::with_capacity(batch_size);
+
+        let mut max_seq_len = 0;
+
+        for text in texts {
+            let (input_ids, attention_mask, token_type_ids) = self.tokenize(text)?;
+            max_seq_len = max_seq_len.max(input_ids.len());
+            all_input_ids.push(input_ids);
+            all_attention_masks.push(attention_mask);
+            all_token_type_ids.push(token_type_ids);
+        }
+
+        // Pad sequences to max_seq_len
+        let mut flat_input_ids = Vec::with_capacity(batch_size * max_seq_len);
+        let mut flat_attention_masks = Vec::with_capacity(batch_size * max_seq_len);
+        let mut flat_token_type_ids = Vec::with_capacity(batch_size * max_seq_len);
+
+        for i in 0..batch_size {
+            let ids = &all_input_ids[i];
+            let mask = &all_attention_masks[i];
+            let type_ids = &all_token_type_ids[i];
+            let pad_len = max_seq_len - ids.len();
+
+            flat_input_ids.extend_from_slice(ids);
+            flat_input_ids.extend(std::iter::repeat(0).take(pad_len));
+
+            flat_attention_masks.extend_from_slice(mask);
+            flat_attention_masks.extend(std::iter::repeat(0).take(pad_len));
+
+            flat_token_type_ids.extend_from_slice(type_ids);
+            flat_token_type_ids.extend(std::iter::repeat(0).take(pad_len));
+        }
+
         let input_ids_tensor =
-            Tensor::from_array(([1usize, seq_len], input_ids.into_boxed_slice())).map_err(|e| {
-                VectorCodeError::EmbedderError {
-                    message: format!("Failed to create input_ids tensor: {e}"),
-                }
-            })?;
-
-        let attention_mask_tensor =
-            Tensor::from_array(([1usize, seq_len], attention_mask.clone().into_boxed_slice()))
+            Tensor::from_array(([batch_size, max_seq_len], flat_input_ids.into_boxed_slice()))
                 .map_err(|e| VectorCodeError::EmbedderError {
-                    message: format!("Failed to create attention_mask tensor: {e}"),
+                    message: format!("Failed to create input_ids tensor: {e}"),
                 })?;
 
-        let token_type_ids_tensor =
-            Tensor::from_array(([1usize, seq_len], token_type_ids.into_boxed_slice())).map_err(
-                |e| VectorCodeError::EmbedderError {
-                    message: format!("Failed to create token_type_ids tensor: {e}"),
-                },
-            )?;
+        let attention_mask_tensor = Tensor::from_array((
+            [batch_size, max_seq_len],
+            flat_attention_masks.clone().into_boxed_slice(),
+        ))
+        .map_err(|e| VectorCodeError::EmbedderError {
+            message: format!("Failed to create attention_mask tensor: {e}"),
+        })?;
 
-        // Run session with named inputs — scoped so lock is released promptly
+        let token_type_ids_tensor = Tensor::from_array((
+            [batch_size, max_seq_len],
+            flat_token_type_ids.into_boxed_slice(),
+        ))
+        .map_err(|e| VectorCodeError::EmbedderError {
+            message: format!("Failed to create token_type_ids tensor: {e}"),
+        })?;
+
         let output_vec: Vec<f32> = {
-            let mut session = self.session.lock().await;
-            let outputs = session
+            let mut session_guard = self.session.lock().await;
+            let outputs = session_guard
                 .run(ort::inputs![
                     "input_ids" => input_ids_tensor,
                     "attention_mask" => attention_mask_tensor,
@@ -279,14 +321,12 @@ impl Embedder for OnnxEmbedder {
                     message: format!("ONNX session run failed: {e}"),
                 })?;
 
-            // Extract last_hidden_state — use .get() to avoid panic on unexpected output names
             let (_, output_data) = outputs
                 .get("last_hidden_state")
                 .ok_or_else(|| VectorCodeError::EmbedderError {
                     message: format!(
                         "ONNX model output 'last_hidden_state' not found. \
                          Available outputs: {:?}. \
-                         This embedder requires a MiniLM-L6-v2 model. \
                          Try 'vectorcode init --provider onnx' to re-download.",
                         outputs.keys().collect::<Vec<_>>()
                     ),
@@ -296,15 +336,27 @@ impl Embedder for OnnxEmbedder {
                     message: format!("Failed to extract output tensor: {e}"),
                 })?;
             output_data.to_vec()
-        }; // Lock released here
+        };
 
-        // Apply mean pooling and normalize
-        Ok(Self::pooling_and_normalize(
-            &output_vec,
-            &attention_mask,
-            seq_len,
-            dims,
-        ))
+        let mut results = Vec::with_capacity(batch_size);
+        for i in 0..batch_size {
+            let start_idx = i * max_seq_len * dims;
+            let end_idx = start_idx + (max_seq_len * dims);
+            let item_hidden_state = &output_vec[start_idx..end_idx];
+
+            let padded_mask_start = i * max_seq_len;
+            let padded_mask_end = padded_mask_start + max_seq_len;
+            let item_padded_mask = &flat_attention_masks[padded_mask_start..padded_mask_end];
+
+            results.push(Self::pooling_and_normalize(
+                item_hidden_state,
+                item_padded_mask,
+                max_seq_len,
+                dims,
+            ));
+        }
+
+        Ok(results)
     }
 
     fn dimensions(&self) -> u32 {
@@ -330,9 +382,9 @@ mod tests {
 
     #[test]
     fn onnx_embedder_metadata_constants() {
-        assert_eq!(OnnxEmbedder::DIMENSIONS, 384);
+        assert_eq!(OnnxEmbedder::DIMENSIONS, 768);
         assert_eq!(OnnxEmbedder::MAX_TOKENS, 512);
-        assert_eq!(OnnxEmbedder::MODEL_NAME, "all-MiniLM-L6-v2");
+        assert_eq!(OnnxEmbedder::MODEL_NAME, "nomic-embed-text-v1.5");
     }
 
     #[test]

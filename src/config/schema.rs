@@ -210,17 +210,19 @@ impl Default for ProviderConfig {
     }
 }
 
-/// ONNX provider — model is bundled, no user configuration needed.
+/// ONNX provider — model is bundled or downloaded via model_manager.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct OnnxConfig {
     pub model: String,
+    pub batch_size: usize,
 }
 
 impl Default for OnnxConfig {
     fn default() -> Self {
         Self {
             model: "all-MiniLM-L6-v2".to_string(),
+            batch_size: 64,
         }
     }
 }

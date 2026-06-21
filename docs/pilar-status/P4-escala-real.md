@@ -17,7 +17,7 @@ VectorCode scales beyond a single repo. Incremental re-indexing is real: every c
 
 ## Known limits
 
-- **Hashing is BLAKE3, not SHA-256** — `roadmap_vectorcode.md:85` (row 3.3) says "Hashing de archivos (SHA-256)"; the code uses `blake3`. Roadmap is wrong; this fix lives in [phase-4.3 commit C2](../../roadmap_vectorcode.md).
+- **Hashing is BLAKE3, not SHA-256** — `roadmap_vectorcode.md:92` (row 3.3) now reads "Hashing de archivos (BLAKE3 — `src/types.rs:127` y `:134`)". Phase-4.3 corrected the original "SHA-256" wording; the code was always `blake3` (`Cargo.toml` pins `blake3 = "1"`). See the historical snapshot appendix at `roadmap_vectorcode.md:154-160` for the pre-Fase-4.3 text.
 - **sqlite-vec KNN is O(N) brute force** — `src/store/vectors.rs:193-220` shows the cosine SQL: `SELECT rowid, distance FROM vec_chunks WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2`. No ANN index. ADR-0001 measures **1.55 s/query at 1 668 vectors** and extrapolates **~14 s/query at 14 863 vectors** ("unacceptable" per the ADR's own words). The SLO is on indexing, not query, so the spec passes, but interactive search at vscode scale is not realistic.
 - **One watcher per workspace** — multi-repo serve means N `notify` handles, N debounce timers. No cross-workspace coalescing. CPU cost grows linearly with the number of workspaces.
 - **No published CI-runner profile** — Fase 3.5 said "validate that it runs on a standard CI runner", but the only measured platform is the local ARM Apple Silicon used for development. No GitHub Actions timing data is published.

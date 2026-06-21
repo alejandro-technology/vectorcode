@@ -14,7 +14,7 @@ VectorCode treats retrieval quality as a measured property, not a vibe. The benc
 - **Reproducible regression gate** — `scripts/verify-baseline.sh` (committed in phase-4.1) runs the mock-mini baselines against committed JSON under `benchmarks/baseline/` and exits non-zero on regression. CI gate lives in `.github/workflows/`.
 - **Golden query sets** — `benchmarks/queries/{mini.toml, vscode.toml, mini_structural.toml, mock-mini.toml, mock-mini-structural.toml}`. Each query has hand-labeled relevance judgments (grades 0-3) per `benchmarks/CONTRIBUTING.md`.
 - **ADR-0001 carries real numbers** — `docs/adr/0001-store-choice.md:82-94` shows the bench-store invocation, and the verdict table at `:98-...` records sqlite-vec at **3.15 s for 2 138 files / 14 863 chunks** and notes that LanceDB was not measured (shim). Honest disclosure lives next to the decision.
-- **`BASELINE.md` admits limits** — Fase 1.2 baseline (`BASELINE.md:21-27`) shows R@5 = 0.30 with TypeScript at 0% and Python at 20%. The doc says so plainly, with no empty superlatives.
+- **`BASELINE.md` admits limits** — Fase 1.2 baseline (`BASELINE.md:22-27`) shows R@5 = 0.30 with TypeScript at 0% and Python at 20%. The doc says so plainly, with no empty superlatives.
 
 ## Known limits
 

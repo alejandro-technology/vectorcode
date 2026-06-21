@@ -2,7 +2,8 @@
 
 use crate::engine::languages::SupportedLanguage;
 use crate::engine::outliner;
-use anyhow::Result;
+use crate::mcp::security::resolve_within_project;
+use anyhow::{bail, Result};
 use clap::Args;
 use std::path::Path;
 
@@ -15,8 +16,17 @@ pub struct OutlineArgs {
 
 /// Execute the `outline` command.
 pub fn execute(args: &OutlineArgs, project_path: &Path) -> Result<()> {
-    let requested_path = project_path.join(&args.file_path);
-    let canonical = std::fs::canonicalize(&requested_path)?;
+    // REQ-SEC-04: reject paths that fall outside the project root.
+    let canonical = match resolve_within_project(&args.file_path, project_path) {
+        Ok(p) => p,
+        Err(e) => {
+            bail!(
+                "Refusing to outline '{}': {} (path is outside the project root)",
+                args.file_path,
+                e
+            );
+        }
+    };
     let source = std::fs::read_to_string(&canonical)?;
     let ext = canonical.extension().and_then(|e| e.to_str()).unwrap_or("");
     let language = SupportedLanguage::from_extension(ext);

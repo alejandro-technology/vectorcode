@@ -66,10 +66,12 @@ impl SqliteStore {
 /// "inside a tokio runtime" and "no runtime" contexts. Returns an
 /// `OwnedMutexGuard<Database>` which is `'static` and can be moved into
 /// inner closures/blocks freely.
-fn lock_db(db: Arc<Mutex<Database>>) -> tokio::sync::OwnedMutexGuard<Database> {
+fn lock_db(
+    db: Arc<Mutex<Database>>,
+) -> Result<tokio::sync::OwnedMutexGuard<Database>, VectorCodeError> {
     let handle = tokio::runtime::Handle::try_current();
     if let Ok(handle) = handle {
-        handle.block_on(async move { db.lock_owned().await })
+        Ok(handle.block_on(async move { db.lock_owned().await }))
     } else {
         // No runtime: convert the sync-context lock into an owned guard.
         // We do this by spawning a new current-thread runtime just to
@@ -78,8 +80,10 @@ fn lock_db(db: Arc<Mutex<Database>>) -> tokio::sync::OwnedMutexGuard<Database> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("create current-thread runtime");
-        rt.block_on(async move { db.lock_owned().await })
+            .map_err(|e| VectorCodeError::EmbedderError {
+                message: format!("failed to create tokio runtime: {e}"),
+            })?;
+        Ok(rt.block_on(async move { db.lock_owned().await }))
     }
 }
 
@@ -88,7 +92,7 @@ impl Store for SqliteStore {
         let db = self.db.clone();
         let chunk = chunk.clone();
         tokio::task::block_in_place(move || {
-            let guard = lock_db(db);
+            let guard = lock_db(db)?;
             crate::store::chunks::insert_chunk(guard.conn(), &chunk)
         })
     }
@@ -97,7 +101,7 @@ impl Store for SqliteStore {
         let db = self.db.clone();
         let file = file.clone();
         tokio::task::block_in_place(move || {
-            let guard = lock_db(db);
+            let guard = lock_db(db)?;
             crate::store::files::upsert_file(
                 guard.conn(),
                 &file.path,
@@ -114,7 +118,7 @@ impl Store for SqliteStore {
         let chunk_id = chunk_id.to_string();
         let embedding = embedding.to_vec();
         tokio::task::block_in_place(move || {
-            let guard = lock_db(db);
+            let guard = lock_db(db)?;
             crate::store::vectors::insert_vector(guard.conn(), &chunk_id, &embedding)
         })
     }
@@ -130,7 +134,7 @@ impl Store for SqliteStore {
         let db = self.db.clone();
         let chunk_id = chunk_id.to_string();
         tokio::task::block_in_place(move || {
-            let guard = lock_db(db);
+            let guard = lock_db(db)?;
             crate::store::vectors::delete_vectors_for_chunk(guard.conn(), &chunk_id)
         })
     }
@@ -139,7 +143,7 @@ impl Store for SqliteStore {
         let db = self.db.clone();
         let file_path = file_path.to_string();
         tokio::task::block_in_place(move || {
-            let guard = lock_db(db);
+            let guard = lock_db(db)?;
             crate::store::chunks::delete_chunks_for_file(guard.conn(), &file_path)
         })
     }
@@ -148,7 +152,7 @@ impl Store for SqliteStore {
         let db = self.db.clone();
         let valid_paths = valid_paths.clone();
         tokio::task::block_in_place(move || {
-            let guard = lock_db(db);
+            let guard = lock_db(db)?;
             crate::store::chunks::delete_stale_chunks(guard.conn(), &valid_paths)
         })
     }
@@ -164,7 +168,7 @@ impl Store for SqliteStore {
         let query_vec = query_vec.to_vec();
         let path_filter = path_filter.map(|s| s.to_string());
         tokio::task::block_in_place(move || {
-            let guard = lock_db(db);
+            let guard = lock_db(db)?;
             crate::store::vectors::search_similar(
                 guard.conn(),
                 &query_vec,
@@ -187,7 +191,7 @@ impl Store for SqliteStore {
         let language = language.map(|s| s.to_string());
         let path_filter = path_filter.map(|s| s.to_string());
         tokio::task::block_in_place(move || {
-            let guard = lock_db(db);
+            let guard = lock_db(db)?;
             crate::store::fts::search_sparse(
                 guard.conn(),
                 &query,
@@ -206,7 +210,7 @@ impl Store for SqliteStore {
         let db = self.db.clone();
         let key = key.to_string();
         tokio::task::block_in_place(move || {
-            let guard = lock_db(db);
+            let guard = lock_db(db)?;
             crate::store::meta::read_meta(guard.conn(), &key)
         })
     }
@@ -216,7 +220,7 @@ impl Store for SqliteStore {
         let key = key.to_string();
         let value = value.to_string();
         tokio::task::block_in_place(move || {
-            let guard = lock_db(db);
+            let guard = lock_db(db)?;
             crate::store::meta::write_meta(guard.conn(), &key, &value)
         })
     }
@@ -224,7 +228,7 @@ impl Store for SqliteStore {
     fn count_chunks(&self) -> Result<u32, VectorCodeError> {
         let db = self.db.clone();
         tokio::task::block_in_place(move || {
-            let guard = lock_db(db);
+            let guard = lock_db(db)?;
             crate::store::meta::count_chunks(guard.conn())
         })
     }
@@ -232,7 +236,7 @@ impl Store for SqliteStore {
     fn init_schema(&self, dims: u32) -> Result<(), VectorCodeError> {
         let db = self.db.clone();
         tokio::task::block_in_place(move || {
-            let guard = lock_db(db);
+            let guard = lock_db(db)?;
             guard.init_schema(dims)
         })
     }
@@ -267,7 +271,7 @@ impl GraphStore for SqliteGraphView {
         let db = self.db.clone();
         let nodes = nodes.to_vec();
         tokio::task::block_in_place(move || {
-            let guard = lock_db(db);
+            let guard = lock_db(db)?;
             crate::store::graph::insert_nodes(guard.conn(), &nodes)
         })
     }
@@ -276,7 +280,7 @@ impl GraphStore for SqliteGraphView {
         let db = self.db.clone();
         let edges = edges.to_vec();
         tokio::task::block_in_place(move || {
-            let guard = lock_db(db);
+            let guard = lock_db(db)?;
             crate::store::graph::insert_edges(guard.conn(), &edges)
         })
     }
@@ -285,7 +289,7 @@ impl GraphStore for SqliteGraphView {
         let db = self.db.clone();
         let symbol = symbol.to_string();
         tokio::task::block_in_place(move || {
-            let guard = lock_db(db);
+            let guard = lock_db(db)?;
             crate::store::graph::get_callers_filtered(guard.conn(), &symbol, None)
         })
     }
@@ -294,7 +298,7 @@ impl GraphStore for SqliteGraphView {
         let db = self.db.clone();
         let symbol = symbol.to_string();
         tokio::task::block_in_place(move || {
-            let guard = lock_db(db);
+            let guard = lock_db(db)?;
             let mut stmt = guard.conn().prepare(
                 "SELECT n_target.id, n_target.symbol, n_target.kind, n_target.file_path
                  FROM graph_nodes n_source
@@ -327,7 +331,7 @@ impl GraphStore for SqliteGraphView {
         let symbol = symbol.to_string();
         let file_path = file_path.map(|s| s.to_string());
         tokio::task::block_in_place(move || {
-            let guard = lock_db(db);
+            let guard = lock_db(db)?;
             crate::store::graph::get_dependents(guard.conn(), &symbol, file_path.as_deref())
         })
     }
@@ -337,7 +341,7 @@ impl GraphStore for SqliteGraphView {
         let symbol = symbol.to_string();
         let file_path = file_path.map(|s| s.to_string());
         tokio::task::block_in_place(move || {
-            let guard = lock_db(db);
+            let guard = lock_db(db)?;
             crate::store::graph::get_imports(guard.conn(), &symbol, file_path.as_deref())
         })
     }
@@ -346,7 +350,7 @@ impl GraphStore for SqliteGraphView {
         let db = self.db.clone();
         let file_path = file_path.to_string();
         tokio::task::block_in_place(move || {
-            let guard = lock_db(db);
+            let guard = lock_db(db)?;
             crate::store::graph::delete_nodes_by_file(guard.conn(), &file_path)
         })
     }

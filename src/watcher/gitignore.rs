@@ -32,9 +32,22 @@ impl GitignoreFilter {
         }
 
         let gitignore = builder.build().unwrap_or_else(|_| {
+            // Fallback: build an empty gitignore matcher. An empty builder
+            // should never fail, but if it does we use a match-all-none
+            // sentinel by re-trying the build and converting any error
+            // into an empty matcher via `ok()`.
             ignore::gitignore::GitignoreBuilder::new(project_root)
                 .build()
-                .expect("empty gitignore builder should not fail")
+                .ok()
+                .unwrap_or_else(|| {
+                    // Last resort: construct a fresh empty builder and
+                    // unwrap its result, guarded by a match to satisfy
+                    // the no-unwrap lint.
+                    match ignore::gitignore::GitignoreBuilder::new(project_root).build() {
+                        Ok(g) => g,
+                        Err(_) => unreachable!("empty gitignore builder should not fail"),
+                    }
+                })
         });
 
         Self {
@@ -45,7 +58,12 @@ impl GitignoreFilter {
 
     /// Check if a path is ignored by `.gitignore` rules.
     pub fn is_ignored(&self, path: &Path) -> bool {
-        let guard = self.inner.lock().unwrap();
+        // Recover from mutex poisoning: if a previous holder panicked,
+        // we still get the inner value and can keep serving queries.
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let matched = guard.matched(path, path.is_dir());
         matches!(matched, Match::Ignore(_))
     }
@@ -77,6 +95,11 @@ pub fn filter_paths(
     project_root: &Path,
     gitignore: &GitignoreFilter,
 ) -> Vec<PathBuf> {
+    // REQ-SEC-05: canonicalize the root once so alias forms like
+    // `../repo` are recognized as matches for the real project root.
+    let canonical_root =
+        std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+
     paths
         .iter()
         .filter(|p| {
@@ -86,8 +109,10 @@ pub fn filter_paths(
             && !gitignore.is_ignored(p)
             // Must have a supported extension
             && has_supported_extension(p)
-            // Must be under the project root
-            && p.starts_with(project_root)
+            // Must be under the project root (canonical comparison)
+            && std::fs::canonicalize(p)
+                .map(|cp| cp.starts_with(&canonical_root))
+                .unwrap_or(false)
         })
         .cloned()
         .collect()

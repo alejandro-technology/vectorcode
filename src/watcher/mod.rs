@@ -126,10 +126,16 @@ impl FileWatcher {
 
                         // Filter removals: check extension + gitignore, but NOT is_file()
                         // (deleted files don't exist on disk, so is_file() returns false)
+                        // REQ-SEC-05: canonicalize the root for the starts_with check so
+                        // alias forms (e.g. ../repo) are recognized.
+                        let canonical_root_for_removals = std::fs::canonicalize(&root_clone)
+                            .unwrap_or_else(|_| root_clone.clone());
                         let filtered_removals: Vec<PathBuf> = removal_paths
                             .into_iter()
                             .filter(|p| {
-                                p.starts_with(&root_clone)
+                                std::fs::canonicalize(p)
+                                    .map(|cp| cp.starts_with(&canonical_root_for_removals))
+                                    .unwrap_or_else(|_| p.starts_with(&root_clone))
                                     && !gitignore.is_ignored(p)
                                     && has_supported_extension(p)
                             })

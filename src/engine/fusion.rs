@@ -47,10 +47,10 @@ pub fn rrf_fuse(result_sets: &[Vec<SearchResult>], k: u32, limit: usize) -> Vec<
     // Build fused results with RRF scores
     let mut fused: Vec<SearchResult> = scores
         .into_iter()
-        .map(|(key, rrf_score)| {
-            let mut result = result_map.remove(&key).unwrap();
+        .filter_map(|(key, rrf_score)| {
+            let mut result = result_map.remove(&key)?;
             result.score = rrf_score as f32;
-            result
+            Some(result)
         })
         .collect();
 

@@ -193,7 +193,7 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
     // We start uninitialized. The MCP handler will attempt to discover the workspace
     // root during `initialize` or when the first tool is called.
     let state = AppState {
-        workspaces: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        workspaces: Arc::new(tokio::sync::RwLock::new(std::collections::BTreeMap::new())),
         known_roots: Arc::new(tokio::sync::RwLock::new(vec![project_path.to_path_buf()])),
         watch: watch_arg,
         debounce: args.debounce,

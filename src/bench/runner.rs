@@ -177,8 +177,15 @@ async fn execute_structural_query(
     // Validate structural query
     validate_structural(query).map_err(|e| anyhow::anyhow!(e))?;
 
-    let target_symbol = query.target_symbol.as_ref().unwrap();
-    let target_tool = query.target_tool.as_ref().unwrap();
+    // After validate_structural, target_symbol and target_tool are guaranteed
+    // to be set. If they are not, return an error rather than panicking.
+    let target_symbol = query.target_symbol.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("structural query missing target_symbol after validation")
+    })?;
+    let target_tool = query
+        .target_tool
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("structural query missing target_tool after validation"))?;
 
     let start_time = Instant::now();
 

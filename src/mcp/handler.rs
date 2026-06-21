@@ -66,6 +66,24 @@ impl McpHandler {
             Err("VectorCode is not initialized in any workspace. Run `vectorcode init` in your project directory to set it up.".to_string())
         }
     }
+
+    /// Validate a client-supplied `file_path` for graph tools.
+    ///
+    /// Returns `true` when the path resolves inside an initialized
+    /// workspace, `false` otherwise. Graph tools use this to silently
+    /// drop invalid disambiguation paths (preserving the non-error
+    /// contract for callers that pass optional hints).
+    async fn validate_graph_file_path(&self, file_path: Option<&str>) -> bool {
+        let Some(fp) = file_path else {
+            return true;
+        };
+        // Trigger lazy init so the map is populated before we resolve.
+        if self.get_all_inner_states().await.is_err() {
+            return false;
+        }
+        let workspaces = self.state.workspaces.read().await;
+        crate::mcp::security::resolve_within_workspace(fp, &workspaces).is_ok()
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -464,41 +482,17 @@ impl McpHandler {
         params: Parameters<VecReadLinesParams>,
     ) -> Result<String, String> {
         let p = params.0;
-        let inner_states = self.get_all_inner_states().await?;
+        // Trigger lazy workspace init so the map is populated before we resolve.
+        let _ = self.get_all_inner_states().await?;
 
-        let mut found = None;
-        for inner in &inner_states {
-            let requested_path = inner.project_path.join(&p.file_path);
-            if requested_path.exists() {
-                found = Some((inner, requested_path));
-                break;
-            }
-        }
-
-        let (inner_state, requested_path) = match found {
-            Some(f) => f,
-            None => {
-                return Err(format!(
-                    "File not found in any initialized workspace: {}",
-                    p.file_path
-                ))
-            }
-        };
-
-        // Canonicalize to resolve any ../ and follow symlinks
-        let canonical =
-            match tokio::task::spawn_blocking(move || std::fs::canonicalize(&requested_path)).await
-            {
-                Ok(Ok(c)) => c,
-                _ => return Err(format!("File not found or invalid: {}", p.file_path)),
-            };
-
-        let canonical_project = std::fs::canonicalize(&inner_state.project_path)
-            .unwrap_or_else(|_| inner_state.project_path.clone());
-
-        if !canonical.starts_with(&canonical_project) {
-            return Err("Access denied: Path is outside of project bounds.".to_string());
-        }
+        // Delegate path validation to the shared security helper.
+        // BTreeMap iteration is deterministic, so the resolution is stable
+        // across overlapping workspaces (R7).
+        let workspaces = self.state.workspaces.read().await;
+        let (canonical, _inner_state) =
+            crate::mcp::security::resolve_within_workspace(&p.file_path, &workspaces)
+                .map_err(|e| format!("Access denied: {e}"))?;
+        drop(workspaces);
 
         if p.start_line == 0 {
             return Err("Invalid start_line".to_string());
@@ -545,41 +539,15 @@ impl McpHandler {
     )]
     async fn vec_outline(&self, params: Parameters<VecOutlineParams>) -> Result<String, String> {
         let p = params.0;
-        let inner_states = self.get_all_inner_states().await?;
+        // Trigger lazy workspace init so the map is populated before we resolve.
+        let _ = self.get_all_inner_states().await?;
 
-        let mut found = None;
-        for inner in &inner_states {
-            let requested_path = inner.project_path.join(&p.file_path);
-            if requested_path.exists() {
-                found = Some((inner, requested_path));
-                break;
-            }
-        }
-
-        let (inner_state, requested_path) = match found {
-            Some(f) => f,
-            None => {
-                return Err(format!(
-                    "File not found in any initialized workspace: {}",
-                    p.file_path
-                ))
-            }
-        };
-
-        // Canonicalize to resolve any ../ and follow symlinks
-        let canonical =
-            match tokio::task::spawn_blocking(move || std::fs::canonicalize(&requested_path)).await
-            {
-                Ok(Ok(c)) => c,
-                _ => return Err(format!("File not found or invalid: {}", p.file_path)),
-            };
-
-        let canonical_project = std::fs::canonicalize(&inner_state.project_path)
-            .unwrap_or_else(|_| inner_state.project_path.clone());
-
-        if !canonical.starts_with(&canonical_project) {
-            return Err("Access denied: Path is outside of project bounds.".to_string());
-        }
+        // Delegate path validation to the shared security helper.
+        let workspaces = self.state.workspaces.read().await;
+        let (canonical, _inner_state) =
+            crate::mcp::security::resolve_within_workspace(&p.file_path, &workspaces)
+                .map_err(|e| format!("Access denied: {e}"))?;
+        drop(workspaces);
 
         let metadata = tokio::fs::metadata(&canonical)
             .await
@@ -641,8 +609,13 @@ impl McpHandler {
         for inner in inner_states {
             let db = inner.db.lock().await;
 
-            let nodes = if let Some(ref fp) = p.file_path {
-                crate::store::graph::get_callers_filtered(db.conn(), &p.symbol, Some(fp))
+            let nodes = if let Some(fp) = p.file_path.as_deref() {
+                if self.validate_graph_file_path(Some(fp)).await {
+                    crate::store::graph::get_callers_filtered(db.conn(), &p.symbol, Some(fp))
+                } else {
+                    // Invalid disambiguation path → empty result for this workspace.
+                    Ok(Vec::new())
+                }
             } else {
                 use crate::store::graph::GraphStore;
                 db.get_callers(&p.symbol)
@@ -680,7 +653,16 @@ impl McpHandler {
             let db = inner.db.lock().await;
 
             use crate::store::graph::GraphStore;
-            let nodes = db.get_dependents(&p.symbol, p.file_path.as_deref());
+            let nodes = if let Some(fp) = p.file_path.as_deref() {
+                if self.validate_graph_file_path(Some(fp)).await {
+                    db.get_dependents(&p.symbol, Some(fp))
+                } else {
+                    // Invalid disambiguation path → empty result for this workspace.
+                    Ok(Vec::new())
+                }
+            } else {
+                db.get_dependents(&p.symbol, None)
+            };
 
             if let Ok(nodes) = nodes {
                 all_nodes.extend(nodes);
@@ -718,7 +700,16 @@ impl McpHandler {
             let db = inner.db.lock().await;
 
             use crate::store::graph::GraphStore;
-            let nodes = db.get_imports(&p.symbol, p.file_path.as_deref());
+            let nodes = if let Some(fp) = p.file_path.as_deref() {
+                if self.validate_graph_file_path(Some(fp)).await {
+                    db.get_imports(&p.symbol, Some(fp))
+                } else {
+                    // Invalid disambiguation path → empty result for this workspace.
+                    Ok(Vec::new())
+                }
+            } else {
+                db.get_imports(&p.symbol, None)
+            };
 
             if let Ok(nodes) = nodes {
                 all_nodes.extend(nodes);

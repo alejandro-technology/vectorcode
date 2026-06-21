@@ -1,5 +1,6 @@
 target/
 .vectorcode/index.db
+.vectorcode/config.toml
 .codegraph/
 *.dylib
 *.so

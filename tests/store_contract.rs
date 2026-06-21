@@ -143,6 +143,7 @@ impl Store for MockStore {
                 let score = cosine(query_vec, emb);
                 if score >= threshold {
                     results.push(vectorcode::types::SearchResult {
+                        repo_name: None,
                         file_path: chunk.file_path.clone(),
                         start_line: chunk.start_line,
                         end_line: chunk.end_line,
@@ -204,6 +205,7 @@ impl Store for MockStore {
         let mut results = Vec::new();
         for (score, chunk) in scored.into_iter().take(limit) {
             results.push(vectorcode::types::SearchResult {
+                repo_name: None,
                 file_path: chunk.file_path.clone(),
                 start_line: chunk.start_line,
                 end_line: chunk.end_line,

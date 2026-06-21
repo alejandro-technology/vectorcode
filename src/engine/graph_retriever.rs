@@ -37,6 +37,7 @@ impl GraphRetriever {
 
         let mut rows = stmt.query_map([&node.symbol, &node.file_path], |row| {
             Ok(SearchResult {
+                repo_name: None,
                 file_path: row.get(0)?,
                 start_line: row.get(1)?,
                 end_line: row.get(2)?,

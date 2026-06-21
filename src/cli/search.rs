@@ -258,6 +258,7 @@ mod tests {
     #[test]
     fn format_result_brief_with_symbol() {
         let result = SearchResult {
+            repo_name: None,
             file_path: "src/auth.rs".to_string(),
             start_line: 42,
             end_line: 80,
@@ -278,6 +279,7 @@ mod tests {
     #[test]
     fn format_result_brief_without_symbol() {
         let result = SearchResult {
+            repo_name: None,
             file_path: "lib/utils.py".to_string(),
             start_line: 10,
             end_line: 20,
@@ -395,6 +397,7 @@ mod tests {
     #[test]
     fn search_json_output_format() {
         let results = vec![SearchResult {
+            repo_name: None,
             file_path: "test.rs".to_string(),
             start_line: 1,
             end_line: 10,

@@ -27,14 +27,16 @@ pub struct AppInnerState {
     pub watcher: Option<Arc<tokio::sync::RwLock<FileWatcher>>>,
 }
 
+use std::collections::HashMap;
+
 /// Shared application state accessible by MCP tool handlers.
 /// Starts uninitialized, and gets initialized once the MCP client provides
 /// the workspace roots.
 #[derive(Clone)]
 pub struct AppState {
-    pub inner: Arc<tokio::sync::RwLock<Option<AppInnerState>>>,
-    // The dynamically discovered root, which we can fallback to for lazy init
-    pub known_root: Arc<tokio::sync::RwLock<Option<PathBuf>>>,
+    pub workspaces: Arc<tokio::sync::RwLock<HashMap<PathBuf, AppInnerState>>>,
+    // The dynamically discovered roots, which we can fallback to for lazy init
+    pub known_roots: Arc<tokio::sync::RwLock<Vec<PathBuf>>>,
     // CLI flags we need to hold onto for initialization
     pub watch: bool,
     pub debounce: u64,

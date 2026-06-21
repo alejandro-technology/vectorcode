@@ -604,3 +604,113 @@ fn mcp_vec_search_routing_none_byte_identical() {
     child.stdin.take().unwrap();
     let _ = child.wait();
 }
+
+#[test]
+fn test_mcp_multi_repo() {
+    let parent_dir = tempfile::tempdir().unwrap();
+    let repo1 = parent_dir.path().join("repo1");
+    let repo2 = parent_dir.path().join("repo2");
+    std::fs::create_dir_all(&repo1).unwrap();
+    std::fs::create_dir_all(&repo2).unwrap();
+
+    init_project(&repo1);
+    init_project(&repo2);
+
+    // Add chunks to repo1
+    let db1 = vectorcode::Database::open(&repo1.join(".vectorcode").join("index.db")).unwrap();
+    let chunk1 = vectorcode::Chunk {
+        id: "repo1_chunk".into(),
+        file_path: "src/repo1_file.rs".into(),
+        start_line: 1,
+        end_line: 10,
+        byte_start: 0,
+        byte_end: 100,
+        symbol: Some("repo1_func".into()),
+        kind: "function".into(),
+        content: "fn repo1_func() {}".into(),
+        parent_context: None,
+        language: "rust".into(),
+        file_mtime: 0,
+        content_hash: "hash1".into(),
+    };
+    vectorcode::store::chunks::insert_chunk(db1.conn(), &chunk1).unwrap();
+    vectorcode::store::vectors::insert_vector(db1.conn(), "repo1_chunk", &vec![0.1; 384]).unwrap();
+
+    // Add chunks to repo2
+    let db2 = vectorcode::Database::open(&repo2.join(".vectorcode").join("index.db")).unwrap();
+    let chunk2 = vectorcode::Chunk {
+        id: "repo2_chunk".into(),
+        file_path: "src/repo2_file.rs".into(),
+        start_line: 1,
+        end_line: 10,
+        byte_start: 0,
+        byte_end: 100,
+        symbol: Some("repo2_func".into()),
+        kind: "function".into(),
+        content: "fn repo2_func() {}".into(),
+        parent_context: None,
+        language: "rust".into(),
+        file_mtime: 0,
+        content_hash: "hash2".into(),
+    };
+    vectorcode::store::chunks::insert_chunk(db2.conn(), &chunk2).unwrap();
+    vectorcode::store::vectors::insert_vector(db2.conn(), "repo2_chunk", &vec![0.1; 384]).unwrap();
+
+    let mut child = spawn_mcp_server(parent_dir.path());
+
+    // Custom initialization to provide two roots
+    let req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}"#;
+    let _ = send_and_receive(&mut child, req);
+    let notif = r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#;
+    send_notification(&mut child, notif);
+
+    use std::io::{BufRead, BufReader};
+    let stdout = child.stdout.as_mut().unwrap();
+    let mut reader = BufReader::new(stdout);
+    let mut request_str = String::new();
+    reader.read_line(&mut request_str).unwrap();
+
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&request_str) {
+        if parsed["method"] == "roots/list" {
+            let id = parsed["id"].as_i64().unwrap();
+            let uri1 = format!("file://{}", repo1.display());
+            let uri2 = format!("file://{}", repo2.display());
+            let reply = format!(
+                r#"{{"jsonrpc":"2.0","id":{},"result":{{"roots":[{{"uri":"{}"}}, {{"uri":"{}"}}]}}}}"#,
+                id, uri1, uri2
+            );
+            send_notification(&mut child, &reply);
+        }
+    }
+
+    // Wait a moment for initialization of roots to finish
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Call vec_search
+    let req = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vec_search","arguments":{"query":"func", "mode":"hybrid"}}}"#;
+    let resp = send_and_receive(&mut child, req);
+
+    // We expect both repo1_func and repo2_func to be in the result, along with [Repo: repo1] and [Repo: repo2]
+    assert!(
+        resp.contains("repo1_func"),
+        "Missing repo1 result: {}",
+        resp
+    );
+    assert!(
+        resp.contains("repo2_func"),
+        "Missing repo2 result: {}",
+        resp
+    );
+    assert!(
+        resp.contains("[Repo: repo1]"),
+        "Missing repo1 prefix: {}",
+        resp
+    );
+    assert!(
+        resp.contains("[Repo: repo2]"),
+        "Missing repo2 prefix: {}",
+        resp
+    );
+
+    child.kill().unwrap();
+}

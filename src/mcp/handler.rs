@@ -9,7 +9,7 @@ use tracing::error;
 use crate::engine::indexer::Indexer;
 use crate::engine::languages::SupportedLanguage;
 use crate::engine::outliner;
-use crate::engine::searcher::{build_strategy, SearchMode, SearchOptions};
+use crate::engine::searcher::{SearchMode, SearchOptions};
 use crate::mcp::{AppInnerState, AppState};
 use crate::store::meta;
 use crate::watcher::PendingFile;
@@ -21,16 +21,18 @@ pub struct McpHandler {
 }
 
 impl McpHandler {
-    async fn get_inner_state(&self) -> Result<AppInnerState, String> {
+    async fn get_all_inner_states(&self) -> Result<Vec<AppInnerState>, String> {
         {
-            let inner = self.state.inner.read().await;
-            if let Some(state) = &*inner {
-                return Ok(state.clone());
+            let workspaces = self.state.workspaces.read().await;
+            if !workspaces.is_empty() {
+                return Ok(workspaces.values().cloned().collect());
             }
         }
 
-        let known_root = self.state.known_root.read().await.clone();
-        if let Some(root) = known_root {
+        let known_roots = self.state.known_roots.read().await.clone();
+        let mut initialized = Vec::new();
+
+        for root in known_roots {
             if root.join(".vectorcode").exists() {
                 match crate::cli::serve::try_init_workspace(
                     &root,
@@ -40,15 +42,29 @@ impl McpHandler {
                 .await
                 {
                     Ok(inner_state) => {
-                        *self.state.inner.write().await = Some(inner_state.clone());
-                        return Ok(inner_state);
+                        self.state
+                            .workspaces
+                            .write()
+                            .await
+                            .insert(root.clone(), inner_state.clone());
+                        initialized.push(inner_state);
                     }
-                    Err(e) => return Err(format!("Failed to lazily initialize workspace: {e}")),
+                    Err(e) => {
+                        return Err(format!(
+                            "Failed to lazily initialize workspace at {}: {}",
+                            root.display(),
+                            e
+                        ))
+                    }
                 }
             }
         }
 
-        Err("VectorCode is not initialized in this workspace. Run `vectorcode init` in your project directory to set it up.".to_string())
+        if !initialized.is_empty() {
+            Ok(initialized)
+        } else {
+            Err("VectorCode is not initialized in any workspace. Run `vectorcode init` in your project directory to set it up.".to_string())
+        }
     }
 }
 
@@ -148,7 +164,7 @@ impl McpHandler {
             return Err("Query cannot be empty".to_string());
         }
 
-        let inner_state = self.get_inner_state().await?;
+        let inner_states = self.get_all_inner_states().await?;
 
         // Determine effective mode based on routing param
         let mode: SearchMode = if let Some(ref routing) = p.routing {
@@ -188,20 +204,6 @@ impl McpHandler {
                 })?
         };
 
-        // For hybrid-rerank mode, enable the reranker in the search config
-        let mut search_config = inner_state.config.search.clone();
-        if mode == SearchMode::HybridRerank {
-            search_config.rerank.enabled = true;
-        }
-
-        let searcher = build_strategy(
-            mode,
-            inner_state.db.clone(),
-            inner_state.embedder.clone(),
-            search_config,
-        )
-        .await;
-
         let options = SearchOptions {
             limit: p.limit.unwrap_or(10).min(100),
             threshold: p.threshold.unwrap_or(0.0),
@@ -210,45 +212,174 @@ impl McpHandler {
             ..Default::default()
         };
 
-        match searcher.search(&p.query, options).await {
-            Ok(results) => {
-                let staleness_banner = match &inner_state.watcher {
-                    Some(w) => {
-                        let pending = w.read().await.pending_files().await;
-                        build_staleness_banner(&results, &pending)
-                    }
-                    None => None,
-                };
+        let mut all_results = Vec::new();
+        let mut pending_files = Vec::new();
 
-                let text = format_search_results_text(&p.query, p.threshold, &results);
-                match staleness_banner {
-                    Some(banner) => Ok(format!("{banner}\n{text}")),
-                    None => Ok(text),
+        let mut search_config = inner_states
+            .first()
+            .map(|s| s.config.search.clone())
+            .unwrap_or_default();
+        if mode == SearchMode::HybridRerank {
+            search_config.rerank.enabled = true;
+        }
+
+        match mode {
+            SearchMode::Hybrid | SearchMode::HybridRerank => {
+                let mut global_dense = Vec::new();
+                let mut global_sparse = Vec::new();
+
+                for inner in &inner_states {
+                    let repo_name = inner
+                        .project_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    if let Some(w) = &inner.watcher {
+                        pending_files.extend(w.read().await.pending_files().await);
+                    }
+
+                    let dense_searcher = crate::engine::searcher::build_strategy(
+                        SearchMode::Dense,
+                        inner.db.clone(),
+                        inner.embedder.clone(),
+                        inner.config.search.clone(),
+                    )
+                    .await;
+
+                    let sparse_searcher = crate::engine::searcher::build_strategy(
+                        SearchMode::Sparse,
+                        inner.db.clone(),
+                        inner.embedder.clone(),
+                        inner.config.search.clone(),
+                    )
+                    .await;
+
+                    let (dense_result, sparse_result) = tokio::join!(
+                        dense_searcher.search(&p.query, options.clone()),
+                        sparse_searcher.search(&p.query, options.clone())
+                    );
+
+                    if let Ok(mut res) = dense_result {
+                        for r in &mut res {
+                            r.repo_name = Some(repo_name.clone());
+                        }
+                        global_dense.extend(res);
+                    }
+                    if let Ok(mut res) = sparse_result {
+                        for r in &mut res {
+                            r.repo_name = Some(repo_name.clone());
+                        }
+                        global_sparse.extend(res);
+                    }
                 }
+
+                global_dense.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                global_sparse.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                all_results = crate::engine::fusion::rrf_fuse(
+                    &[global_dense, global_sparse],
+                    search_config.rrf_k,
+                    options.limit,
+                );
             }
-            Err(e) => {
-                error!("vec_search failed: {e}");
-                Err(format!("Search failed: {e}"))
+            _ => {
+                for inner in &inner_states {
+                    let repo_name = inner
+                        .project_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    if let Some(w) = &inner.watcher {
+                        pending_files.extend(w.read().await.pending_files().await);
+                    }
+
+                    let mut inner_config = inner.config.search.clone();
+                    if mode == SearchMode::HybridRerank {
+                        inner_config.rerank.enabled = true;
+                    }
+
+                    let searcher = crate::engine::searcher::build_strategy(
+                        mode,
+                        inner.db.clone(),
+                        inner.embedder.clone(),
+                        inner_config,
+                    )
+                    .await;
+
+                    if let Ok(mut res) = searcher.search(&p.query, options.clone()).await {
+                        for r in &mut res {
+                            r.repo_name = Some(repo_name.clone());
+                        }
+                        all_results.extend(res);
+                    }
+                }
+                all_results.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                all_results.truncate(options.limit);
             }
+        }
+
+        let staleness_banner = build_staleness_banner(&all_results, &pending_files);
+        let text = format_search_results_text(&p.query, p.threshold, &all_results);
+
+        match staleness_banner {
+            Some(banner) => Ok(format!("{banner}\n{text}")),
+            None => Ok(text),
         }
     }
 
     #[tool(
         name = "vec_status",
-        description = "Get the current status of the vector index, including provider, \
-                       dimensions, number of files indexed, and last sync time.",
+        description = "Get the current status of the vector index across all initialized workspaces.",
         annotations(read_only_hint = true)
     )]
     async fn vec_status(&self, _params: Parameters<VecStatusParams>) -> Result<String, String> {
-        let inner_state = self.get_inner_state().await?;
-        let db = inner_state.db.lock().await;
-        match meta::read_index_meta(db.conn()) {
-            Ok(Some(index_meta)) => Ok(format_status_text(&index_meta)),
-            Ok(None) => {
-                Err("Index metadata not found. Run `vectorcode init` to initialize.".to_string())
+        let inner_states = self.get_all_inner_states().await?;
+        let mut outputs = Vec::new();
+
+        for inner in inner_states {
+            let repo_name = inner
+                .project_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
+            let db = inner.db.lock().await;
+            match meta::read_index_meta(db.conn()) {
+                Ok(Some(index_meta)) => {
+                    outputs.push(format!(
+                        "Workspace: {}\n{}",
+                        repo_name,
+                        format_status_text(&index_meta)
+                    ));
+                }
+                Ok(None) => {
+                    outputs.push(format!(
+                        "Workspace: {}\nIndex metadata not found. Run `vectorcode init`.",
+                        repo_name
+                    ));
+                }
+                Err(e) => {
+                    outputs.push(format!(
+                        "Workspace: {}\nFailed to read index metadata: {}",
+                        repo_name, e
+                    ));
+                }
             }
-            Err(e) => Err(format!("Failed to read index metadata: {e}")),
         }
+        Ok(outputs.join("\n\n------------------------\n\n"))
     }
 
     #[tool(
@@ -259,45 +390,66 @@ impl McpHandler {
     )]
     async fn vec_reindex(&self, params: Parameters<VecReindexParams>) -> Result<String, String> {
         let p = params.0;
-        let inner_state = self.get_inner_state().await?;
+        let inner_states = self.get_all_inner_states().await?;
+        let mut outputs = Vec::new();
 
-        if p.full {
-            let db = inner_state.db.lock().await;
-            if let Err(e) = db.clear_database() {
-                return Err(format!("Failed to clear database: {e}"));
+        for inner_state in inner_states {
+            let repo_name = inner_state
+                .project_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
+            if p.full {
+                let db = inner_state.db.lock().await;
+                if let Err(e) = db.clear_database() {
+                    outputs.push(format!(
+                        "Workspace {}: Failed to clear database: {}",
+                        repo_name, e
+                    ));
+                    continue;
+                }
+                if let Err(e) = db.init_schema(inner_state.embedder.dimensions()) {
+                    outputs.push(format!(
+                        "Workspace {}: Failed to reinitialize schema: {}",
+                        repo_name, e
+                    ));
+                    continue;
+                }
             }
-            if let Err(e) = db.init_schema(inner_state.embedder.dimensions()) {
-                return Err(format!("Failed to reinitialize schema: {e}"));
+
+            let indexer = Indexer::new(
+                inner_state.db.clone(),
+                inner_state.embedder.clone(),
+                inner_state.config.indexing.clone(),
+            );
+
+            match indexer.index_project(&inner_state.project_path).await {
+                Ok(report) => outputs.push(format!(
+                    "Workspace {}: Re-indexing complete.\n\
+                         Files scanned:  {}\n\
+                         Files indexed:  {}\n\
+                         Chunks total:   {}\n\
+                         Chunks new:     {}\n\
+                         Chunks skipped: {}\n\
+                         Duration:       {:.2}s\n",
+                    repo_name,
+                    report.files_scanned,
+                    report.files_indexed,
+                    report.chunks_total,
+                    report.chunks_new,
+                    report.chunks_skipped,
+                    report.duration.as_secs_f64(),
+                )),
+                Err(e) => {
+                    error!("vec_reindex failed for {}: {}", repo_name, e);
+                    outputs.push(format!(
+                        "Workspace {}: Re-indexing failed: {}",
+                        repo_name, e
+                    ));
+                }
             }
         }
-
-        let indexer = Indexer::new(
-            inner_state.db.clone(),
-            inner_state.embedder.clone(),
-            inner_state.config.indexing.clone(),
-        );
-
-        match indexer.index_project(&inner_state.project_path).await {
-            Ok(report) => Ok(format!(
-                "Re-indexing complete.\n\
-                     Files scanned:  {}\n\
-                     Files indexed:  {}\n\
-                     Chunks total:   {}\n\
-                     Chunks new:     {}\n\
-                     Chunks skipped: {}\n\
-                     Duration:       {:.2}s\n",
-                report.files_scanned,
-                report.files_indexed,
-                report.chunks_total,
-                report.chunks_new,
-                report.chunks_skipped,
-                report.duration.as_secs_f64(),
-            )),
-            Err(e) => {
-                error!("vec_reindex failed: {e}");
-                Err(format!("Re-indexing failed: {e}"))
-            }
-        }
+        Ok(outputs.join("\n\n"))
     }
 
     #[tool(
@@ -312,8 +464,26 @@ impl McpHandler {
         params: Parameters<VecReadLinesParams>,
     ) -> Result<String, String> {
         let p = params.0;
-        let inner_state = self.get_inner_state().await?;
-        let requested_path = inner_state.project_path.join(&p.file_path);
+        let inner_states = self.get_all_inner_states().await?;
+
+        let mut found = None;
+        for inner in &inner_states {
+            let requested_path = inner.project_path.join(&p.file_path);
+            if requested_path.exists() {
+                found = Some((inner, requested_path));
+                break;
+            }
+        }
+
+        let (inner_state, requested_path) = match found {
+            Some(f) => f,
+            None => {
+                return Err(format!(
+                    "File not found in any initialized workspace: {}",
+                    p.file_path
+                ))
+            }
+        };
 
         // Canonicalize to resolve any ../ and follow symlinks
         let canonical =
@@ -375,8 +545,26 @@ impl McpHandler {
     )]
     async fn vec_outline(&self, params: Parameters<VecOutlineParams>) -> Result<String, String> {
         let p = params.0;
-        let inner_state = self.get_inner_state().await?;
-        let requested_path = inner_state.project_path.join(&p.file_path);
+        let inner_states = self.get_all_inner_states().await?;
+
+        let mut found = None;
+        for inner in &inner_states {
+            let requested_path = inner.project_path.join(&p.file_path);
+            if requested_path.exists() {
+                found = Some((inner, requested_path));
+                break;
+            }
+        }
+
+        let (inner_state, requested_path) = match found {
+            Some(f) => f,
+            None => {
+                return Err(format!(
+                    "File not found in any initialized workspace: {}",
+                    p.file_path
+                ))
+            }
+        };
 
         // Canonicalize to resolve any ../ and follow symlinks
         let canonical =
@@ -446,27 +634,30 @@ impl McpHandler {
         params: Parameters<VecFindCallersParams>,
     ) -> Result<String, String> {
         let p = params.0;
-        let inner_state = self.get_inner_state().await?;
-        let db = inner_state.db.lock().await;
+        let inner_states = self.get_all_inner_states().await?;
 
-        let nodes = if let Some(ref fp) = p.file_path {
-            crate::store::graph::get_callers_filtered(db.conn(), &p.symbol, Some(fp))
-        } else {
-            use crate::store::graph::GraphStore;
-            db.get_callers(&p.symbol)
-        };
+        let mut all_nodes = Vec::new();
 
-        match nodes {
-            Ok(nodes) => {
-                let limit = p.limit.unwrap_or(10).min(100);
-                let truncated = &nodes[..nodes.len().min(limit)];
-                Ok(format_graph_results_text("callers", &p.symbol, truncated))
-            }
-            Err(e) => {
-                error!("vec_find_callers failed: {e}");
-                Err(format!("Failed to query graph: {e}"))
+        for inner in inner_states {
+            let db = inner.db.lock().await;
+
+            let nodes = if let Some(ref fp) = p.file_path {
+                crate::store::graph::get_callers_filtered(db.conn(), &p.symbol, Some(fp))
+            } else {
+                use crate::store::graph::GraphStore;
+                db.get_callers(&p.symbol)
+            };
+
+            if let Ok(nodes) = nodes {
+                all_nodes.extend(nodes);
+            } else if let Err(e) = nodes {
+                error!("vec_find_callers failed for workspace: {e}");
             }
         }
+
+        let limit = p.limit.unwrap_or(10).min(100);
+        let truncated = &all_nodes[..all_nodes.len().min(limit)];
+        Ok(format_graph_results_text("callers", &p.symbol, truncated))
     }
 
     #[tool(
@@ -481,25 +672,30 @@ impl McpHandler {
         params: Parameters<VecFindDependentsParams>,
     ) -> Result<String, String> {
         let p = params.0;
-        let inner_state = self.get_inner_state().await?;
-        let db = inner_state.db.lock().await;
+        let inner_states = self.get_all_inner_states().await?;
 
-        use crate::store::graph::GraphStore;
-        match db.get_dependents(&p.symbol, p.file_path.as_deref()) {
-            Ok(nodes) => {
-                let limit = p.limit.unwrap_or(10).min(100);
-                let truncated = &nodes[..nodes.len().min(limit)];
-                Ok(format_graph_results_text(
-                    "dependents",
-                    &p.symbol,
-                    truncated,
-                ))
-            }
-            Err(e) => {
-                error!("vec_find_dependents failed: {e}");
-                Err(format!("Failed to query graph: {e}"))
+        let mut all_nodes = Vec::new();
+
+        for inner in inner_states {
+            let db = inner.db.lock().await;
+
+            use crate::store::graph::GraphStore;
+            let nodes = db.get_dependents(&p.symbol, p.file_path.as_deref());
+
+            if let Ok(nodes) = nodes {
+                all_nodes.extend(nodes);
+            } else if let Err(e) = nodes {
+                error!("vec_find_dependents failed for workspace: {e}");
             }
         }
+
+        let limit = p.limit.unwrap_or(10).min(100);
+        let truncated = &all_nodes[..all_nodes.len().min(limit)];
+        Ok(format_graph_results_text(
+            "dependents",
+            &p.symbol,
+            truncated,
+        ))
     }
 
     #[tool(
@@ -514,21 +710,26 @@ impl McpHandler {
         params: Parameters<VecTraceImportsParams>,
     ) -> Result<String, String> {
         let p = params.0;
-        let inner_state = self.get_inner_state().await?;
-        let db = inner_state.db.lock().await;
+        let inner_states = self.get_all_inner_states().await?;
 
-        use crate::store::graph::GraphStore;
-        match db.get_imports(&p.symbol, p.file_path.as_deref()) {
-            Ok(nodes) => {
-                let limit = p.limit.unwrap_or(10).min(100);
-                let truncated = &nodes[..nodes.len().min(limit)];
-                Ok(format_graph_results_text("imports", &p.symbol, truncated))
-            }
-            Err(e) => {
-                error!("vec_trace_imports failed: {e}");
-                Err(format!("Failed to query graph: {e}"))
+        let mut all_nodes = Vec::new();
+
+        for inner in inner_states {
+            let db = inner.db.lock().await;
+
+            use crate::store::graph::GraphStore;
+            let nodes = db.get_imports(&p.symbol, p.file_path.as_deref());
+
+            if let Ok(nodes) = nodes {
+                all_nodes.extend(nodes);
+            } else if let Err(e) = nodes {
+                error!("vec_trace_imports failed for workspace: {e}");
             }
         }
+
+        let limit = p.limit.unwrap_or(10).min(100);
+        let truncated = &all_nodes[..all_nodes.len().min(limit)];
+        Ok(format_graph_results_text("imports", &p.symbol, truncated))
     }
 
     pub fn new(state: AppState) -> Self {
@@ -581,64 +782,56 @@ impl ServerHandler for McpHandler {
             tokio::spawn(async move {
                 // Ask the client for its active workspace roots
                 if let Ok(roots_result) = context.peer.list_roots().await {
-                    // Find the first root that has a .vectorcode directory
-                    let mut chosen_root = None;
+                    let mut found_roots = Vec::new();
+                    let mut workspaces_to_add = Vec::new();
+
                     for root in &roots_result.roots {
                         if let Ok(url) = url::Url::parse(&root.uri) {
                             if url.scheme() == "file" {
                                 if let Ok(path) = url.to_file_path() {
+                                    found_roots.push(path.clone());
                                     if path.join(".vectorcode").exists() {
-                                        chosen_root = Some(path);
-                                        break;
+                                        tracing::info!(
+                                            "Found initialized vectorcode workspace at {}",
+                                            path.display()
+                                        );
+                                        match crate::cli::serve::try_init_workspace(
+                                            &path,
+                                            state.watch,
+                                            state.debounce,
+                                        )
+                                        .await
+                                        {
+                                            Ok(inner) => {
+                                                workspaces_to_add.push((path.clone(), inner));
+                                            }
+                                            Err(e) => {
+                                                tracing::error!(
+                                                    "Failed to initialize workspace from root {}: {}",
+                                                    path.display(),
+                                                    e
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        tracing::info!("Found root {} but it is not initialized. Awaiting user to run `vectorcode init`.", path.display());
                                     }
                                 }
                             }
                         }
                     }
 
-                    // If none have .vectorcode, fallback to the first root
-                    if chosen_root.is_none() {
-                        if let Some(first_root) = roots_result.roots.first() {
-                            if let Ok(url) = url::Url::parse(&first_root.uri) {
-                                if url.scheme() == "file" {
-                                    if let Ok(path) = url.to_file_path() {
-                                        chosen_root = Some(path);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if let Some(project_path) = chosen_root {
-                        *state.known_root.write().await = Some(project_path.clone());
-                        if project_path.join(".vectorcode").exists() {
-                            tracing::info!(
-                                "Found initialized vectorcode workspace at {}",
-                                project_path.display()
-                            );
-                            match crate::cli::serve::try_init_workspace(
-                                &project_path,
-                                state.watch,
-                                state.debounce,
-                            )
-                            .await
-                            {
-                                Ok(inner) => {
-                                    *state.inner.write().await = Some(inner);
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        "Failed to initialize workspace from root {}: {}",
-                                        project_path.display(),
-                                        e
-                                    );
-                                }
-                            }
-                        } else {
-                            tracing::info!("Found root {} but it is not initialized. Awaiting user to run `vectorcode init`.", project_path.display());
-                        }
-                    } else {
+                    if found_roots.is_empty() {
                         tracing::info!("No roots provided by client.");
+                    } else {
+                        *state.known_roots.write().await = found_roots;
+                    }
+
+                    if !workspaces_to_add.is_empty() {
+                        let mut workspaces = state.workspaces.write().await;
+                        for (path, inner) in workspaces_to_add {
+                            workspaces.insert(path, inner);
+                        }
                     }
                 } else {
                     tracing::warn!("Failed to fetch roots from client.");
@@ -726,9 +919,16 @@ fn format_search_results_text(
             .map(|c| format!(" (in {c})"))
             .unwrap_or_default();
 
+        let repo_prefix = res
+            .repo_name
+            .as_ref()
+            .map(|r| format!("[Repo: {}] ", r))
+            .unwrap_or_default();
+
         out.push_str(&format!(
-            "{}. {}:L{}-{}{} [{}] (score: {:.2})\n",
+            "{}. {}{}:L{}-{}{} [{}] (score: {:.2})\n",
             i + 1,
+            repo_prefix,
             res.file_path,
             res.start_line,
             res.end_line,

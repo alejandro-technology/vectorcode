@@ -193,8 +193,8 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
     // We start uninitialized. The MCP handler will attempt to discover the workspace
     // root during `initialize` or when the first tool is called.
     let state = AppState {
-        inner: Arc::new(tokio::sync::RwLock::new(None)),
-        known_root: Arc::new(tokio::sync::RwLock::new(Some(project_path.to_path_buf()))),
+        workspaces: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        known_roots: Arc::new(tokio::sync::RwLock::new(vec![project_path.to_path_buf()])),
         watch: watch_arg,
         debounce: args.debounce,
     };
@@ -202,7 +202,11 @@ pub async fn execute(args: &ServeArgs, project_path: &std::path::Path) -> Result
     // If `.vectorcode` exists in the provided project path, we can pre-initialize it
     if project_path.join(".vectorcode").exists() {
         let inner = try_init_workspace(project_path, watch_arg, args.debounce).await?;
-        *state.inner.write().await = Some(inner);
+        state
+            .workspaces
+            .write()
+            .await
+            .insert(project_path.to_path_buf(), inner);
     }
 
     let mut server = McpServer::new(state);

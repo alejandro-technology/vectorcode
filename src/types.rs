@@ -110,6 +110,9 @@ pub struct SearchResult {
     pub parent_context: Option<String>,
     pub content: String,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_name: Option<String>,
+
     /// Cosine similarity score (0.0–1.0, higher = more relevant).
     pub score: f32,
 }
@@ -257,6 +260,7 @@ mod tests {
             language: "typescript".to_string(),
             parent_context: Some("class PaymentRetryHandler".to_string()),
             content: "async handleRetry() { ... }".to_string(),
+            repo_name: Some("vectorcode".to_string()),
             score: 0.87,
         };
 

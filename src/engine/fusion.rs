@@ -216,6 +216,7 @@ impl HybridSearcher {
                     .iter()
                     .filter_map(|(orig_idx, score)| {
                         top_candidates.get(*orig_idx).map(|r| SearchResult {
+                            repo_name: None,
                             score: *score,
                             ..r.clone()
                         })
@@ -253,6 +254,7 @@ mod tests {
 
     fn make_result(file_path: &str, start_line: u32, end_line: u32, score: f32) -> SearchResult {
         SearchResult {
+            repo_name: None,
             file_path: file_path.to_string(),
             start_line,
             end_line,

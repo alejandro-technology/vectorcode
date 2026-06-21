@@ -172,6 +172,7 @@ pub fn search_similar(
 
             Ok((
                 SearchResult {
+                    repo_name: None,
                     file_path,
                     start_line,
                     end_line,
@@ -293,6 +294,7 @@ pub fn search_similar(
         for (chunk_id, score) in scored {
             if let Some(chunk) = chunks::get_chunk(conn, &chunk_id)? {
                 results.push(SearchResult {
+                    repo_name: None,
                     file_path: chunk.file_path,
                     start_line: chunk.start_line,
                     end_line: chunk.end_line,

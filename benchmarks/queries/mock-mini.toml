@@ -1,0 +1,95 @@
+# Semantic (file-level) golden queries for the mock-mini corpus.
+#
+# 4 fixture files: error.rs, rate_limiter.ts, search.rs, signing.py.
+# File paths are corpus-relative (no `corpus_N/` prefix because the
+# mock-mini corpus is a single local directory, not a multi-repo fixture).
+#
+# Grade scale: 0=irrelevant (omit), 1=marginal, 2=relevant, 3=highly relevant.
+#
+# This is the file the IR-quality baseline compares against. The mock
+# embedder produces zero IR signal (all-zero vectors → all-zero metrics),
+# so a baseline run produces 0.0s and the regression gate only fires on
+# code changes that break indexing. This is intentional and documented
+# in docs/benchmarks.md ("mock corpus is smoke-only").
+
+name = "mock-mini"
+
+# === error.rs (Rust) ===
+
+[[queries]]
+text = "custom error type with display implementation"
+[[queries.judgments]]
+file = "error.rs"
+grade = 3
+
+[[queries]]
+text = "result type alias for application errors"
+[[queries.judgments]]
+file = "error.rs"
+grade = 2
+
+[[queries]]
+text = "converting io error into application error"
+[[queries.judgments]]
+file = "error.rs"
+grade = 3
+
+# === rate_limiter.ts (TypeScript) ===
+
+[[queries]]
+text = "rate limiter with async await and concurrency control"
+[[queries.judgments]]
+file = "rate_limiter.ts"
+grade = 3
+
+[[queries]]
+text = "promise with timeout and error rejection"
+[[queries.judgments]]
+file = "rate_limiter.ts"
+grade = 2
+
+[[queries]]
+text = "queue of pending callbacks waiting for slot"
+[[queries.judgments]]
+file = "rate_limiter.ts"
+grade = 2
+
+# === search.rs (Rust) ===
+
+[[queries]]
+text = "async search function with retry on failure"
+[[queries.judgments]]
+file = "search.rs"
+grade = 3
+
+[[queries]]
+text = "exponential backoff between retry attempts"
+[[queries.judgments]]
+file = "search.rs"
+grade = 3
+
+[[queries]]
+text = "search result struct with relevance score"
+[[queries.judgments]]
+file = "search.rs"
+grade = 2
+
+# === signing.py (Python) ===
+
+[[queries]]
+text = "hmac signature generation for signed tokens"
+[[queries.judgments]]
+file = "signing.py"
+grade = 3
+
+[[queries]]
+text = "verify and extract value from signed token"
+[[queries.judgments]]
+file = "signing.py"
+grade = 3
+
+[[queries]]
+text = "token expiration check using timestamp"
+[[queries.judgments]]
+file = "signing.py"
+grade = 2

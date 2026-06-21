@@ -64,6 +64,18 @@ When adding queries, expect small metric fluctuations (±0.01). If metrics chang
 - Check if the query exposes a real search quality issue
 - Document the expected change in the PR description
 
+## Real-corpus verification (thiserror / defu / itsdangerous / vscode)
+
+The `mini` and `vscode` query sets in this directory are placeholders for
+the phase-4.4 real-corpus verification path. The current mock-mini
+baselines under `baseline/` gate the deterministic smoke test only — they
+are not a published measurement of retrieval quality.
+
+The real-corpus path (with a pinned model + OLLAMA setup) is intentionally
+out of scope here. If you need a real baseline, see phase 4.4 in the SDD
+roadmap; the comparator added in 4.1 is model-agnostic so 4.4 will only
+need new JSON files and a workflow update.
+
 ## Example: Adding a Query
 
 ```toml

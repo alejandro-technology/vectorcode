@@ -26,3 +26,11 @@ file_extensions = [".py"]
 url = "https://github.com/microsoft/vscode.git"
 sparse_paths = ["src/vs/editor/common", "src/vs/base/common", "src/vs/platform"]
 file_extensions = [".ts"]
+
+# Mock-mini: a 4-file local corpus that lives in tests/fixtures/mini/.
+# Used by the phase-4.1 public verify path so anyone with a Rust toolchain
+# can reproduce the regression gate without network, Ollama, or model
+# downloads. Permissive licenses (MIT / BSD-3) — see file headers.
+[mock-mini]
+url = "tests/fixtures/mini"
+file_extensions = [".rs", ".ts", ".py"]

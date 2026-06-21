@@ -1,0 +1,13 @@
+{
+  "version": "1",
+  "corpus": "mock-mini",
+  "embedder": "mock-deterministic",
+  "generated_at": "2026-06-21T20:16:00Z",
+  "search_mode": "dense",
+  "metrics": {
+    "recall_at_5": 0.8333333333333334,
+    "recall_at_10": 0.8333333333333334,
+    "ndcg_at_10": 0.641044672101359,
+    "mrr": 0.576388888888889
+  }
+}

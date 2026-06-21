@@ -1,0 +1,58 @@
+# Structural (symbol-level) golden queries for the mock-mini corpus.
+#
+# The mock-mini corpus has no real call graph (4 small, unrelated files),
+# so the structural baseline measures what we can: a structural query that
+# is allowed to return zero results when no caller exists in the corpus.
+# `expected_symbols` is empty for every query on purpose.
+#
+# Why this file exists: the phase-4.1 spec requires a structural baseline
+# (baseline-mock-mini-structural.json) so the structural comparator path
+# has a committed reference point. The expected_symbols can be empty as
+# long as the file does not have ALL grade=0 entries (the gate that
+# rejects vscode.toml-style placeholders).
+
+name = "mock-mini-structural"
+
+# Each query asks "who calls X" / "what imports Y" for a symbol that does
+# not exist in the mock-mini corpus. The expected result is "no matches",
+# which exercises the structural pipeline without a false-grade=0 wall.
+
+[[queries]]
+text = "who calls sign"
+kind = "structural"
+target_tool = "callers"
+target_symbol = "sign"
+judgments = []
+expected_symbols = []
+
+[[queries]]
+text = "who calls search_with_retry"
+kind = "structural"
+target_tool = "callers"
+target_symbol = "search_with_retry"
+judgments = []
+expected_symbols = []
+
+[[queries]]
+text = "who calls unsign"
+kind = "structural"
+target_tool = "callers"
+target_symbol = "unsign"
+judgments = []
+expected_symbols = []
+
+[[queries]]
+text = "dependents of RateLimiter"
+kind = "structural"
+target_tool = "dependents"
+target_symbol = "RateLimiter"
+judgments = []
+expected_symbols = []
+
+[[queries]]
+text = "imports of hashlib"
+kind = "structural"
+target_tool = "imports"
+target_symbol = "hashlib"
+judgments = []
+expected_symbols = []

@@ -189,6 +189,18 @@ fn evaluate_metric(current: f64, baseline: f64, delta: f64, tolerance: Tolerance
             }
         }
         Tolerance::Relative(r) => {
+            // When the baseline is exactly 0, a relative tolerance collapses
+            // to "delta must be 0" — any non-zero change trips the gate. This
+            // is the right behavior for store metrics like `query_p95_ms`
+            // when the baseline was captured with `--query-sample 0` (i.e.
+            // no query phase ran and the baseline is 0 by design).
+            if baseline == 0.0 {
+                return if delta == 0.0 {
+                    MetricStatus::Pass
+                } else {
+                    MetricStatus::Regress
+                };
+            }
             // Allow growth up to baseline * r above baseline. The boundary
             // current == baseline * (1 + r) is a regress (strict less-than).
             let allowed_growth = baseline * r;
@@ -203,9 +215,12 @@ fn evaluate_metric(current: f64, baseline: f64, delta: f64, tolerance: Tolerance
 
 // ─── BaselineReport impls for the existing schema types ─────────────────
 
-/// IR metrics with `Absolute(0.01)` tolerance — recall@5, recall@10, nDCG@10,
-/// MRR. Symbol metrics (structural-only) are intentionally excluded from the
-/// IR baseline; the structural baseline covers them.
+/// IR + symbol metrics with `Absolute(0.01)` tolerance — recall@5,
+/// recall@10, nDCG@10, MRR, symbol_recall@5, symbol_recall@10,
+/// symbol_precision@5. The 4 IR metrics are populated by semantic runs;
+/// the 3 symbol metrics are populated by structural runs. Each type of
+/// baseline sets the other family to 0.0, so the comparator can use a
+/// single `BenchmarkResult` shape for both IR and structural comparisons.
 impl BaselineReport for BenchmarkResult {
     fn metrics(&self) -> Vec<(&'static str, f64, Tolerance)> {
         vec![
@@ -225,6 +240,21 @@ impl BaselineReport for BenchmarkResult {
                 Tolerance::Absolute(0.01),
             ),
             ("mrr", self.aggregate.mrr, Tolerance::Absolute(0.01)),
+            (
+                "symbol_recall_at_5",
+                self.aggregate.symbol_recall_at_5,
+                Tolerance::Absolute(0.01),
+            ),
+            (
+                "symbol_recall_at_10",
+                self.aggregate.symbol_recall_at_10,
+                Tolerance::Absolute(0.01),
+            ),
+            (
+                "symbol_precision_at_5",
+                self.aggregate.symbol_precision_at_5,
+                Tolerance::Absolute(0.01),
+            ),
         ]
     }
 }
@@ -834,7 +864,9 @@ mod tests {
             "All metrics within tolerance should pass: {:?}",
             cmp.verdict
         );
-        assert_eq!(cmp.metrics.len(), 4);
+        // The BenchmarkResult BaselineReport impl returns 7 metrics:
+        // 4 IR + 3 symbol.
+        assert_eq!(cmp.metrics.len(), 7);
         assert!(cmp.metrics.iter().all(|m| m.status == MetricStatus::Pass));
     }
 
@@ -978,6 +1010,45 @@ mod tests {
             MetricStatus::Pass,
             "indexing_secs +40% is inside +50% tolerance"
         );
+    }
+
+    #[test]
+    fn compare_store_zero_baseline_is_binary() {
+        // When the store baseline has query_p95_ms = 0 (e.g. captured with
+        // --query-sample 0), the relative tolerance must collapse to a
+        // strict-equality check. This protects against a non-zero query
+        // phase silently going un-gated.
+        let mut baseline = make_report("baseline", 1.0, 1_000_000, 1_000, 5.0, 0.0, true);
+        let mut current = make_report("current", 1.0, 1_000_000, 1_000, 5.0, 0.0, true);
+        current.embedder = baseline.embedder.clone();
+
+        // Both at 0 → pass.
+        let cmp_zero = compare_to_baseline(&current, &baseline);
+        assert!(
+            cmp_zero.passed(),
+            "0 vs 0 must pass under zero-baseline rule"
+        );
+        let p95_zero = cmp_zero
+            .metrics
+            .iter()
+            .find(|m| m.name == "query_p95_ms")
+            .unwrap();
+        assert_eq!(p95_zero.status, MetricStatus::Pass);
+
+        // Baseline 0, current > 0 → regress.
+        baseline.query_p95_ms = 0.0;
+        current.query_p95_ms = 0.5;
+        let cmp_pos = compare_to_baseline(&current, &baseline);
+        assert!(
+            !cmp_pos.passed(),
+            "0 → 0.5 must regress under zero-baseline rule"
+        );
+        let p95_pos = cmp_pos
+            .metrics
+            .iter()
+            .find(|m| m.name == "query_p95_ms")
+            .unwrap();
+        assert_eq!(p95_pos.status, MetricStatus::Regress);
     }
 
     // ─── validate_baseline + baseline loaders (t1.5) ─────────────────────

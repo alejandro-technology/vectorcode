@@ -54,26 +54,37 @@ pub fn write_table(result: &BenchmarkResult) -> Result<()> {
     println!("  Recall@10: {:.4}", result.aggregate.recall_at_10);
     println!("  nDCG@10:   {:.4}", result.aggregate.ndcg_at_10);
     println!("  MRR:       {:.4}", result.aggregate.mrr);
+    println!(
+        "  Latency:   p50={:.2}ms, p95={:.2}ms, avg={:.2}ms",
+        result.aggregate.latency_p50_ms,
+        result.aggregate.latency_p95_ms,
+        result.aggregate.latency_avg_ms
+    );
     println!();
 
     // Per-query results
     if !result.query_results.is_empty() {
         println!("Per-Query Results:");
         println!(
-            "{:<40} {:>8} {:>8} {:>8} {:>8}",
-            "Query", "R@5", "R@10", "nDCG", "MRR"
+            "{:<35} {:>8} {:>8} {:>8} {:>8} {:>8}",
+            "Query", "R@5", "R@10", "nDCG", "MRR", "Lat(ms)"
         );
-        println!("{}", "-".repeat(76));
+        println!("{}", "-".repeat(81));
 
         for qr in &result.query_results {
-            let query_display = if qr.query.len() > 38 {
-                format!("{}...", &qr.query[..37])
+            let query_display = if qr.query.len() > 33 {
+                format!("{}...", &qr.query[..32])
             } else {
                 qr.query.clone()
             };
             println!(
-                "{:<40} {:>8.4} {:>8.4} {:>8.4} {:>8.4}",
-                query_display, qr.recall_at_5, qr.recall_at_10, qr.ndcg_at_10, qr.mrr
+                "{:<35} {:>8.4} {:>8.4} {:>8.4} {:>8.4} {:>8.2}",
+                query_display,
+                qr.recall_at_5,
+                qr.recall_at_10,
+                qr.ndcg_at_10,
+                qr.mrr,
+                qr.latency_ms
             );
         }
     }
@@ -93,20 +104,21 @@ pub fn write_multi_mode_table(results: &[BenchmarkResult]) -> Result<()> {
 
     // Summary header
     println!(
-        "{:<15} {:>10} {:>10} {:>10} {:>10} {:>10}",
-        "Mode", "Files", "Chunks", "R@5", "nDCG@10", "MRR"
+        "{:<15} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "Mode", "Files", "Chunks", "R@5", "nDCG@10", "MRR", "p50(ms)"
     );
-    println!("{}", "-".repeat(80));
+    println!("{}", "-".repeat(91));
 
     for result in results {
         println!(
-            "{:<15} {:>10} {:>10} {:>10.4} {:>10.4} {:>10.4}",
+            "{:<15} {:>10} {:>10} {:>10.4} {:>10.4} {:>10.4} {:>10.2}",
             result.search_mode,
             result.files_indexed,
             result.chunks_created,
             result.aggregate.recall_at_5,
             result.aggregate.ndcg_at_10,
             result.aggregate.mrr,
+            result.aggregate.latency_p50_ms,
         );
     }
 
@@ -168,6 +180,21 @@ pub fn write_baseline(result: &BenchmarkResult, output_dir: &Path) -> Result<()>
     writeln!(file, "| Recall@10 | {:.4} |", result.aggregate.recall_at_10)?;
     writeln!(file, "| nDCG@10 | {:.4} |", result.aggregate.ndcg_at_10)?;
     writeln!(file, "| MRR | {:.4} |", result.aggregate.mrr)?;
+    writeln!(
+        file,
+        "| Latency p50 | {:.2}ms |",
+        result.aggregate.latency_p50_ms
+    )?;
+    writeln!(
+        file,
+        "| Latency p95 | {:.2}ms |",
+        result.aggregate.latency_p95_ms
+    )?;
+    writeln!(
+        file,
+        "| Latency avg | {:.2}ms |",
+        result.aggregate.latency_avg_ms
+    )?;
     writeln!(file)?;
     writeln!(file, "## Reproducibility")?;
     writeln!(file)?;
@@ -213,6 +240,7 @@ mod tests {
                     recall_at_10: 1.0,
                     ndcg_at_10: 0.9,
                     mrr: 1.0,
+                    latency_ms: 12.5,
                     symbol_recall_at_5: 0.0,
                     symbol_recall_at_10: 0.0,
                     symbol_precision_at_5: 0.0,
@@ -224,6 +252,7 @@ mod tests {
                     recall_at_10: 0.8,
                     ndcg_at_10: 0.7,
                     mrr: 0.5,
+                    latency_ms: 18.2,
                     symbol_recall_at_5: 0.0,
                     symbol_recall_at_10: 0.0,
                     symbol_precision_at_5: 0.0,
@@ -234,6 +263,9 @@ mod tests {
                 recall_at_10: 0.9,
                 ndcg_at_10: 0.8,
                 mrr: 0.75,
+                latency_p50_ms: 12.5,
+                latency_p95_ms: 18.2,
+                latency_avg_ms: 15.35,
                 symbol_recall_at_5: 0.0,
                 symbol_recall_at_10: 0.0,
                 symbol_precision_at_5: 0.0,
@@ -293,6 +325,9 @@ mod tests {
                 recall_at_10: 0.95,
                 ndcg_at_10: 0.85,
                 mrr: 0.8,
+                latency_p50_ms: 0.0,
+                latency_p95_ms: 0.0,
+                latency_avg_ms: 0.0,
                 symbol_recall_at_5: 0.0,
                 symbol_recall_at_10: 0.0,
                 symbol_precision_at_5: 0.0,

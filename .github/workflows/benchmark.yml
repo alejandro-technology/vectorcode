@@ -45,6 +45,11 @@ jobs:
           cargo run --release -- benchmark --corpus mini --output table
         continue-on-error: true  # Fase 1.1-1.2: informational only, exit 0
 
+      - name: Validate Indexing Footprint (vscode corpus)
+        run: |
+          cargo run --release -- bench-store --corpus vscode
+        continue-on-error: true
+
       - name: Upload benchmark results
         if: always()
         uses: actions/upload-artifact@v4

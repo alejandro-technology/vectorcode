@@ -124,7 +124,9 @@ async fn execute_query(
         ..Default::default()
     };
 
+    let start_time = Instant::now();
     let results = strategy.search(&query.text, search_options).await?;
+    let latency_ms = start_time.elapsed().as_secs_f64() * 1000.0;
 
     // Deduplicate chunk results to file-level ranking
     let predicted = dedupe_to_file_rank(&results, corpus_path);
@@ -156,6 +158,7 @@ async fn execute_query(
         recall_at_10,
         ndcg_at_10,
         mrr,
+        latency_ms,
         symbol_recall_at_5: 0.0,
         symbol_recall_at_10: 0.0,
         symbol_precision_at_5: 0.0,
@@ -177,6 +180,8 @@ async fn execute_structural_query(
     let target_symbol = query.target_symbol.as_ref().unwrap();
     let target_tool = query.target_tool.as_ref().unwrap();
 
+    let start_time = Instant::now();
+
     // Call the appropriate GraphStore method
     let db_guard = db.lock().await;
     let nodes = match target_tool.as_str() {
@@ -185,6 +190,8 @@ async fn execute_structural_query(
         "imports" => db_guard.get_imports(target_symbol, None)?,
         other => anyhow::bail!("Unknown target_tool: {other}"),
     };
+
+    let latency_ms = start_time.elapsed().as_secs_f64() * 1000.0;
 
     // Convert GraphNode[] to predicted symbol keys, stripping corpus prefix
     let predicted: Vec<String> = nodes
@@ -230,6 +237,7 @@ async fn execute_structural_query(
         recall_at_10: 0.0,
         ndcg_at_10: 0.0,
         mrr: 0.0,
+        latency_ms,
         symbol_recall_at_5,
         symbol_recall_at_10,
         symbol_precision_at_5,
@@ -273,6 +281,9 @@ fn compute_aggregate_metrics(query_results: &[QueryResult]) -> AggregateMetrics 
             recall_at_10: 0.0,
             ndcg_at_10: 0.0,
             mrr: 0.0,
+            latency_p50_ms: 0.0,
+            latency_p95_ms: 0.0,
+            latency_avg_ms: 0.0,
             symbol_recall_at_5: 0.0,
             symbol_recall_at_10: 0.0,
             symbol_precision_at_5: 0.0,
@@ -300,11 +311,24 @@ fn compute_aggregate_metrics(query_results: &[QueryResult]) -> AggregateMetrics 
         .sum::<f64>()
         / n;
 
+    let latency_avg_ms = query_results.iter().map(|r| r.latency_ms).sum::<f64>() / n;
+
+    let mut latencies: Vec<f64> = query_results.iter().map(|r| r.latency_ms).collect();
+    latencies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let p50_idx = ((n - 1.0) * 0.5).round() as usize;
+    let p95_idx = ((n - 1.0) * 0.95).round() as usize;
+    let latency_p50_ms = latencies.get(p50_idx).copied().unwrap_or(0.0);
+    let latency_p95_ms = latencies.get(p95_idx).copied().unwrap_or(0.0);
+
     AggregateMetrics {
         recall_at_5,
         recall_at_10,
         ndcg_at_10,
         mrr,
+        latency_p50_ms,
+        latency_p95_ms,
+        latency_avg_ms,
         symbol_recall_at_5,
         symbol_recall_at_10,
         symbol_precision_at_5,
@@ -420,6 +444,7 @@ pub fn search(query: &str) -> Vec<String> {
         let corpus_path = Path::new("/tmp/corpus");
         let results = vec![
             SearchResult {
+                repo_name: None,
                 file_path: "/tmp/corpus/a.rs".to_string(),
                 start_line: 1,
                 end_line: 10,
@@ -431,6 +456,7 @@ pub fn search(query: &str) -> Vec<String> {
                 score: 0.9,
             },
             SearchResult {
+                repo_name: None,
                 file_path: "/tmp/corpus/a.rs".to_string(),
                 start_line: 20,
                 end_line: 30,
@@ -442,6 +468,7 @@ pub fn search(query: &str) -> Vec<String> {
                 score: 0.7,
             },
             SearchResult {
+                repo_name: None,
                 file_path: "/tmp/corpus/b.rs".to_string(),
                 start_line: 1,
                 end_line: 10,
@@ -470,6 +497,7 @@ pub fn search(query: &str) -> Vec<String> {
                 recall_at_10: 0.8,
                 ndcg_at_10: 0.6,
                 mrr: 0.5,
+                latency_ms: 20.0,
                 symbol_recall_at_5: 0.0,
                 symbol_recall_at_10: 0.0,
                 symbol_precision_at_5: 0.0,
@@ -481,6 +509,7 @@ pub fn search(query: &str) -> Vec<String> {
                 recall_at_10: 0.9,
                 ndcg_at_10: 0.8,
                 mrr: 1.0,
+                latency_ms: 100.0,
                 symbol_recall_at_5: 0.0,
                 symbol_recall_at_10: 0.0,
                 symbol_precision_at_5: 0.0,
@@ -492,6 +521,76 @@ pub fn search(query: &str) -> Vec<String> {
         assert!((agg.recall_at_10 - 0.85).abs() < 1e-9);
         assert!((agg.ndcg_at_10 - 0.7).abs() < 1e-9);
         assert!((agg.mrr - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_compute_aggregate_metrics_latency() {
+        let results = vec![
+            QueryResult {
+                query: "q1".to_string(),
+                predicted: vec![],
+                recall_at_5: 0.0,
+                recall_at_10: 0.0,
+                ndcg_at_10: 0.0,
+                mrr: 0.0,
+                latency_ms: 10.0,
+                symbol_recall_at_5: 0.0,
+                symbol_recall_at_10: 0.0,
+                symbol_precision_at_5: 0.0,
+            },
+            QueryResult {
+                query: "q2".to_string(),
+                predicted: vec![],
+                recall_at_5: 0.0,
+                recall_at_10: 0.0,
+                ndcg_at_10: 0.0,
+                mrr: 0.0,
+                latency_ms: 30.0,
+                symbol_recall_at_5: 0.0,
+                symbol_recall_at_10: 0.0,
+                symbol_precision_at_5: 0.0,
+            },
+            QueryResult {
+                query: "q3".to_string(),
+                predicted: vec![],
+                recall_at_5: 0.0,
+                recall_at_10: 0.0,
+                ndcg_at_10: 0.0,
+                mrr: 0.0,
+                latency_ms: 20.0,
+                symbol_recall_at_5: 0.0,
+                symbol_recall_at_10: 0.0,
+                symbol_precision_at_5: 0.0,
+            },
+            QueryResult {
+                query: "q4".to_string(),
+                predicted: vec![],
+                recall_at_5: 0.0,
+                recall_at_10: 0.0,
+                ndcg_at_10: 0.0,
+                mrr: 0.0,
+                latency_ms: 40.0,
+                symbol_recall_at_5: 0.0,
+                symbol_recall_at_10: 0.0,
+                symbol_precision_at_5: 0.0,
+            },
+            QueryResult {
+                query: "q5".to_string(),
+                predicted: vec![],
+                recall_at_5: 0.0,
+                recall_at_10: 0.0,
+                ndcg_at_10: 0.0,
+                mrr: 0.0,
+                latency_ms: 50.0,
+                symbol_recall_at_5: 0.0,
+                symbol_recall_at_10: 0.0,
+                symbol_precision_at_5: 0.0,
+            },
+        ];
+        let agg = compute_aggregate_metrics(&results);
+        assert_eq!(agg.latency_p50_ms, 30.0);
+        assert_eq!(agg.latency_p95_ms, 50.0);
+        assert_eq!(agg.latency_avg_ms, 30.0);
     }
 
     #[test]

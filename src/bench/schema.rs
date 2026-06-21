@@ -154,6 +154,10 @@ pub struct QueryResult {
     pub ndcg_at_10: f64,
     pub mrr: f64,
 
+    /// Query execution latency in milliseconds.
+    #[serde(default)]
+    pub latency_ms: f64,
+
     /// Symbol-level metrics for structural queries (0.0 for semantic).
     #[serde(default)]
     pub symbol_recall_at_5: f64,
@@ -170,6 +174,14 @@ pub struct AggregateMetrics {
     pub recall_at_10: f64,
     pub ndcg_at_10: f64,
     pub mrr: f64,
+
+    /// Query execution latency percentiles.
+    #[serde(default)]
+    pub latency_p50_ms: f64,
+    #[serde(default)]
+    pub latency_p95_ms: f64,
+    #[serde(default)]
+    pub latency_avg_ms: f64,
 
     /// Symbol-level aggregates for structural queries (0.0 for semantic-only).
     #[serde(default)]
@@ -412,6 +424,9 @@ mod tests {
                 recall_at_10: 0.80,
                 ndcg_at_10: 0.72,
                 mrr: 0.55,
+                latency_p50_ms: 15.0,
+                latency_p95_ms: 25.0,
+                latency_avg_ms: 18.0,
                 symbol_recall_at_5: 0.0,
                 symbol_recall_at_10: 0.0,
                 symbol_precision_at_5: 0.0,
@@ -465,5 +480,30 @@ mod tests {
         assert!(query.expected_symbols.is_empty());
         // Validation should catch this
         assert!(validate_structural(&query).is_err());
+    }
+
+    #[test]
+    fn test_latency_defaults_on_deserialize() {
+        let json = r#"{
+            "query": "test",
+            "predicted": [],
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "ndcg_at_10": 1.0,
+            "mrr": 1.0
+        }"#;
+        let qr: QueryResult = serde_json::from_str(json).unwrap();
+        assert_eq!(qr.latency_ms, 0.0);
+
+        let agg_json = r#"{
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "ndcg_at_10": 1.0,
+            "mrr": 1.0
+        }"#;
+        let agg: AggregateMetrics = serde_json::from_str(agg_json).unwrap();
+        assert_eq!(agg.latency_p50_ms, 0.0);
+        assert_eq!(agg.latency_p95_ms, 0.0);
+        assert_eq!(agg.latency_avg_ms, 0.0);
     }
 }

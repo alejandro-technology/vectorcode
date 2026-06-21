@@ -3,6 +3,7 @@
 //! Each subcommand is implemented in its own module. This module defines
 //! the top-level `Cli` struct and shared helpers.
 
+pub mod bench_store;
 pub mod benchmark;
 pub mod index;
 pub mod init;
@@ -67,6 +68,8 @@ pub enum Commands {
     Upgrade(upgrade::UpgradeArgs),
     /// Run code-search quality benchmarks.
     Benchmark(benchmark::BenchmarkArgs),
+    /// Run the parameterized store benchmark against a real corpus.
+    BenchStore(bench_store::BenchStoreArgs),
 }
 
 /// Supported embedding providers for the `init --provider` flag.
@@ -267,6 +270,10 @@ mod tests {
         assert!(
             subcommand_names.contains(&"benchmark"),
             "Missing benchmark: {subcommand_names:?}"
+        );
+        assert!(
+            subcommand_names.contains(&"bench-store"),
+            "Missing bench-store: {subcommand_names:?}"
         );
     }
 

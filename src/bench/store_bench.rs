@@ -41,15 +41,17 @@ pub const DEFAULT_SLO_SECS: u32 = 360;
 /// Number of warm-up queries before the latency sample.
 const WARMUP_QUERIES: usize = 5;
 
-/// Number of queries in the latency sample.
-const SAMPLE_QUERIES: usize = 100;
-
 /// Run the store benchmark through a `StoreFactory` and produce a metrics report.
+///
+/// `query_sample_size` controls the number of latency samples. Pass `0` to
+/// skip the query phase entirely (useful when validating only the indexing
+/// SLO — the query phase is O(N) and dominates wall-clock on large corpora).
 pub async fn run_store_benchmark(
     factory: &dyn StoreFactory,
     corpus: &dyn Corpus,
     embedder: Arc<dyn Embedder>,
     slo_limit_secs: u32,
+    query_sample_size: usize,
 ) -> Result<StoreMetricsReport> {
     // Step 1: prepare corpus
     let corpus_dir = TempDir::new()?;
@@ -111,23 +113,33 @@ pub async fn run_store_benchmark(
     // We drive dense queries through the store trait directly. This measures
     // the store path, not the full search pipeline (which would include the
     // embedder). For the store benchmark that's exactly what we want.
-    let mut latencies_ms = Vec::with_capacity(SAMPLE_QUERIES);
-    let dim = embedder.dimensions() as usize;
+    //
+    // The query phase is O(N) per query against the brute-force sqlite-vec
+    // KNN, so it dominates wall-clock on large corpora (e.g. ~22 min for
+    // 100 queries against 14K vscode vectors). The SLO is on indexing_secs,
+    // not on this phase, so we expose `query_sample_size` to let callers
+    // skip it when only the SLO matters.
+    let (query_p50_ms, query_p95_ms) = if query_sample_size == 0 {
+        (0.0, 0.0)
+    } else {
+        let mut latencies_ms = Vec::with_capacity(query_sample_size);
+        let dim = embedder.dimensions() as usize;
 
-    // Warmup queries (not counted in the sample)
-    for i in 0..WARMUP_QUERIES {
-        let q = make_random_query(dim, &format!("warmup-{i}"));
-        let _ = store_ref.search_dense(&q, 10, 0.0, None);
-    }
+        // Warmup queries (not counted in the sample)
+        for i in 0..WARMUP_QUERIES {
+            let q = make_random_query(dim, &format!("warmup-{i}"));
+            let _ = store_ref.search_dense(&q, 10, 0.0, None);
+        }
 
-    for i in 0..SAMPLE_QUERIES {
-        let q = make_random_query(dim, &format!("sample-{i}"));
-        let t = Instant::now();
-        let _ = store_ref.search_dense(&q, 10, 0.0, None);
-        latencies_ms.push(t.elapsed().as_secs_f64() * 1000.0);
-    }
+        for i in 0..query_sample_size {
+            let q = make_random_query(dim, &format!("sample-{i}"));
+            let t = Instant::now();
+            let _ = store_ref.search_dense(&q, 10, 0.0, None);
+            latencies_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
 
-    let (query_p50_ms, query_p95_ms) = LatencyPercentiles::from_samples(&latencies_ms);
+        LatencyPercentiles::from_samples(&latencies_ms)
+    };
 
     let slo_passed = indexing_secs <= slo_limit_secs as f64;
 
@@ -141,7 +153,7 @@ pub async fn run_store_benchmark(
         disk_size_bytes,
         query_p50_ms,
         query_p95_ms,
-        query_sample_size: SAMPLE_QUERIES,
+        query_sample_size,
         slo_passed,
         slo_limit_secs,
     })
@@ -263,7 +275,7 @@ mod tests {
         let factory = SqliteStoreFactory;
         let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(4));
 
-        let report = run_store_benchmark(&factory, &corpus, embedder, DEFAULT_SLO_SECS)
+        let report = run_store_benchmark(&factory, &corpus, embedder, DEFAULT_SLO_SECS, 10)
             .await
             .unwrap();
 
@@ -283,14 +295,31 @@ mod tests {
             "query_p50_ms must be >= 0, got {}",
             report.query_p50_ms
         );
-        assert!(
-            report.query_sample_size > 0,
-            "query_sample_size must be > 0"
-        );
+        assert_eq!(report.query_sample_size, 10);
         assert_eq!(report.backend, "sqlite-vec");
         assert_eq!(report.corpus, "test");
         assert!(report.slo_passed, "Small corpus should pass the SLO");
         assert_eq!(report.files_indexed, 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn store_benchmark_with_zero_query_sample_skips_query_phase() {
+        let (_dir, corpus) = make_test_corpus();
+        let factory = SqliteStoreFactory;
+        let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(4));
+
+        let report = run_store_benchmark(&factory, &corpus, embedder, DEFAULT_SLO_SECS, 0)
+            .await
+            .unwrap();
+
+        // Query phase skipped → p50/p95 are 0.0, sample size is 0.
+        assert_eq!(report.query_p50_ms, 0.0);
+        assert_eq!(report.query_p95_ms, 0.0);
+        assert_eq!(report.query_sample_size, 0);
+        // Indexing still happened.
+        assert!(report.indexing_secs > 0.0);
+        assert_eq!(report.files_indexed, 3);
+        assert!(report.slo_passed);
     }
 
     #[test]

@@ -44,6 +44,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Benchmark(args) => {
             vectorcode::cli::benchmark::execute(args, &project_path, cli.quiet).await?;
         }
+        Commands::BenchStore(args) => {
+            vectorcode::cli::bench_store::execute(args, &project_path, cli.quiet).await?;
+        }
     }
 
     Ok(())

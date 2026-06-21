@@ -259,7 +259,10 @@ fn output_multi_results(
 }
 
 /// Build a corpus adapter from config.
-fn build_corpus(
+///
+/// Public so that sibling CLIs (e.g. `bench-store`) can reuse the same
+/// single-repo + multi-repo dispatch without duplicating the toml parsing.
+pub fn build_corpus(
     name: &str,
     configs: &std::collections::HashMap<String, toml::Value>,
     project_path: &std::path::Path,

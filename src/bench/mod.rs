@@ -8,3 +8,4 @@ pub mod metrics;
 pub mod report;
 pub mod runner;
 pub mod schema;
+pub mod store_bench;

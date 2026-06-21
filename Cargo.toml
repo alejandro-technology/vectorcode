@@ -104,6 +104,9 @@ sha2 = "0.10"
 openssl = { version = "0.10", features = ["vendored"] }
 secrecy = "0.8"
 
+# Platform FFI for getrusage (peak RSS measurement in bench)
+libc = "0.2"
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"

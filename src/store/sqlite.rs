@@ -236,6 +236,10 @@ impl Store for SqliteStore {
             guard.init_schema(dims)
         })
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Factory for creating `SqliteStore` instances.

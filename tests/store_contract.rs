@@ -246,6 +246,10 @@ impl Store for MockStore {
         }
         Ok(())
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// GraphStore projection for MockStore. Shares state via Arc<RwLock<MockState>>.

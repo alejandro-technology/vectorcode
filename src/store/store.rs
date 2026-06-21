@@ -14,6 +14,7 @@
 //! - **Minimal port** — only the engine hot-path methods are abstracted; the
 //!   full 53+ leak points stay free functions for now.
 
+use std::any::Any;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -28,7 +29,7 @@ use crate::types::{Chunk, SearchResult};
 /// share across threads. State mutation must use interior mutability (the
 /// `MockStore` uses `RwLock`; the production `SqliteStore` uses an internal
 /// `tokio::sync::Mutex<Database>`).
-pub trait Store: Send + Sync {
+pub trait Store: Send + Sync + Any {
     // ─── Indexing ──────────────────────────────────────────────────────
 
     /// Insert or replace a chunk row. Triggers FTS5 sync in the sqlite impl.
@@ -95,6 +96,11 @@ pub trait Store: Send + Sync {
 
     /// Initialize the schema (idempotent). `dims` is the embedding dimension.
     fn init_schema(&self, dims: u32) -> Result<(), VectorCodeError>;
+
+    /// Downcast helper for the bench harness to extract backend-specific
+    /// state (e.g., the inner `Database` for `SqliteStore`). Returns `self`
+    /// as `&dyn Any`.
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// Factory for creating `Store` instances. Lets the benchmark harness and

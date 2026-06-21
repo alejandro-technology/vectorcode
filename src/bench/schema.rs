@@ -231,9 +231,115 @@ pub fn validate_structural(query: &Query) -> Result<(), String> {
     Ok(())
 }
 
+// ─── Phase 3: Store evaluation schema ──────────────────────────────────
+
+/// Metrics report for a single backend in the store evaluation harness.
+///
+/// Captures the 4 axes per the spec (R2): indexing wall-clock, peak RSS,
+/// on-disk size, query latency p50/p95.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoreMetricsReport {
+    /// Backend name (e.g., "sqlite-vec", "lancedb").
+    pub backend: String,
+
+    /// Corpus name (e.g., "vscode", "mini").
+    pub corpus: String,
+
+    /// Indexing wall-clock duration in seconds.
+    pub indexing_secs: f64,
+
+    /// Number of files indexed.
+    pub files_indexed: usize,
+
+    /// Number of chunks created during indexing.
+    pub chunks_created: usize,
+
+    /// Peak resident set size during indexing, in bytes (normalized).
+    pub peak_rss_bytes: u64,
+
+    /// On-disk size of the index in bytes.
+    pub disk_size_bytes: u64,
+
+    /// Query latency p50 in milliseconds.
+    pub query_p50_ms: f64,
+
+    /// Query latency p95 in milliseconds.
+    pub query_p95_ms: f64,
+
+    /// Number of queries executed for the latency sample.
+    pub query_sample_size: usize,
+
+    /// Whether the SLO (indexing wall-clock ≤ 360s on vscode) was met.
+    pub slo_passed: bool,
+
+    /// The SLO limit applied (seconds). 360 by default for the vscode corpus.
+    pub slo_limit_secs: u32,
+}
+
+/// Verdict comparing two backend reports against the spec's thresholds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Verdict {
+    /// All 4 axes pass: migrate to the candidate backend.
+    Migrate,
+
+    /// At least one axis fails: stay with the incumbent. Reasons is non-empty
+    /// and lists the failing axes with measured values.
+    Stay { reasons: Vec<String> },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── StoreMetricsReport serialization ──────────────────────────────
+
+    #[test]
+    fn store_metrics_report_serializes_all_axes() {
+        let report = StoreMetricsReport {
+            backend: "sqlite-vec".to_string(),
+            corpus: "vscode".to_string(),
+            indexing_secs: 240.5,
+            files_indexed: 15000,
+            chunks_created: 200000,
+            peak_rss_bytes: 512_000_000,
+            disk_size_bytes: 1_000_000_000,
+            query_p50_ms: 25.0,
+            query_p95_ms: 80.0,
+            query_sample_size: 100,
+            slo_passed: true,
+            slo_limit_secs: 360,
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("\"backend\":\"sqlite-vec\""));
+        assert!(json.contains("\"indexing_secs\":240.5"));
+        assert!(json.contains("\"peak_rss_bytes\":512000000"));
+        assert!(json.contains("\"query_p50_ms\":25.0"));
+        assert!(json.contains("\"query_p95_ms\":80.0"));
+        assert!(json.contains("\"slo_passed\":true"));
+    }
+
+    #[test]
+    fn verdict_migrate_serializes_as_string() {
+        let v = Verdict::Migrate;
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(json, "\"Migrate\"");
+    }
+
+    #[test]
+    fn verdict_stay_carries_reasons() {
+        let v = Verdict::Stay {
+            reasons: vec![
+                "indexing too slow".to_string(),
+                "disk too large".to_string(),
+            ],
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(json.contains("Stay"));
+        assert!(json.contains("indexing too slow"));
+        assert!(json.contains("disk too large"));
+    }
+
+    // ─── Original schema tests (kept verbatim) ─────────────────────────
 
     #[test]
     fn test_query_serialization() {

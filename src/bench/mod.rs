@@ -9,3 +9,4 @@ pub mod report;
 pub mod runner;
 pub mod schema;
 pub mod store_bench;
+pub mod verdict;

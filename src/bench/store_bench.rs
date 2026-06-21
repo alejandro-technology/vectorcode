@@ -29,7 +29,7 @@ use tempfile::TempDir;
 
 use crate::bench::corpus::{Corpus, LocalCorpus};
 use crate::bench::metrics::{DiskUsage, LatencyPercentiles, PeakRss, WallClock};
-use crate::bench::schema::{StoreMetricsReport, Verdict};
+use crate::bench::schema::StoreMetricsReport;
 use crate::config::schema::IndexingConfig;
 use crate::embedder::Embedder;
 use crate::engine::Indexer;
@@ -202,49 +202,7 @@ pub fn local_corpus_from_dir(name: &str, path: PathBuf, exts: Vec<String>) -> Lo
 /// - latency: candidate must be ≤1.2x of incumbent
 ///
 /// Otherwise stay with the incumbent and return the reasons.
-pub fn compare_reports(incumbent: &StoreMetricsReport, candidate: &StoreMetricsReport) -> Verdict {
-    let mut reasons = Vec::new();
-
-    // Indexing speed: candidate must be at least 1.5x faster.
-    // 1.5x faster means candidate.indexing_secs ≤ incumbent / 1.5.
-    let max_indexing_for_migrate = incumbent.indexing_secs / 1.5;
-    if candidate.indexing_secs > max_indexing_for_migrate {
-        reasons.push(format!(
-            "Indexing not 1.5x faster: incumbent={:.1}s, candidate={:.1}s (max {:.1}s)",
-            incumbent.indexing_secs, candidate.indexing_secs, max_indexing_for_migrate
-        ));
-    }
-
-    // RSS: candidate must be ≤1.2x of incumbent.
-    if candidate.peak_rss_bytes as f64 > incumbent.peak_rss_bytes as f64 * 1.2 {
-        reasons.push(format!(
-            "Peak RSS > 1.2x: incumbent={}B, candidate={}B",
-            incumbent.peak_rss_bytes, candidate.peak_rss_bytes
-        ));
-    }
-
-    // Disk: candidate must be ≤1.2x of incumbent.
-    if candidate.disk_size_bytes as f64 > incumbent.disk_size_bytes as f64 * 1.2 {
-        reasons.push(format!(
-            "Disk size > 1.2x: incumbent={}B, candidate={}B",
-            incumbent.disk_size_bytes, candidate.disk_size_bytes
-        ));
-    }
-
-    // Latency p95: candidate must be ≤1.2x of incumbent.
-    if incumbent.query_p95_ms > 0.0 && candidate.query_p95_ms > incumbent.query_p95_ms * 1.2 {
-        reasons.push(format!(
-            "Query p95 > 1.2x: incumbent={:.1}ms, candidate={:.1}ms",
-            incumbent.query_p95_ms, candidate.query_p95_ms
-        ));
-    }
-
-    if reasons.is_empty() {
-        Verdict::Migrate
-    } else {
-        Verdict::Stay { reasons }
-    }
-}
+pub use crate::bench::verdict::compare_reports as compare_reports_impl;
 
 /// Mark a report's SLO as failed when the benchmark exceeds the limit.
 /// Use this when ingesting pre-recorded metrics that haven't been through
@@ -260,21 +218,7 @@ mod tests {
     use crate::embedder::mock::MockEmbedder;
     use crate::store::sqlite::SqliteStoreFactory;
     use tempfile::TempDir;
-
-    fn make_test_corpus() -> (TempDir, LocalCorpus) {
-        let dir = TempDir::new().unwrap();
-        let p = dir.path();
-        for (name, content) in [
-            ("a.rs", "pub fn alpha() { 1 }\npub fn beta() { 2 }\n"),
-            ("b.rs", "pub fn gamma() { 3 }\n"),
-            ("c.rs", "pub fn delta() { 4 }\npub fn epsilon() { 5 }\n"),
-        ] {
-            std::fs::write(p.join(name), content).unwrap();
-        }
-        let corpus = LocalCorpus::new("test".to_string(), p.to_path_buf(), vec![".rs".to_string()]);
-        (dir, corpus)
-    }
-
+    #[allow(dead_code)]
     fn make_report(
         backend: &str,
         indexing_secs: f64,
@@ -297,6 +241,20 @@ mod tests {
             slo_passed: indexing_secs <= 360.0,
             slo_limit_secs: 360,
         }
+    }
+
+    fn make_test_corpus() -> (TempDir, LocalCorpus) {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path();
+        for (name, content) in [
+            ("a.rs", "pub fn alpha() { 1 }\npub fn beta() { 2 }\n"),
+            ("b.rs", "pub fn gamma() { 3 }\n"),
+            ("c.rs", "pub fn delta() { 4 }\npub fn epsilon() { 5 }\n"),
+        ] {
+            std::fs::write(p.join(name), content).unwrap();
+        }
+        let corpus = LocalCorpus::new("test".to_string(), p.to_path_buf(), vec![".rs".to_string()]);
+        (dir, corpus)
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -358,137 +316,5 @@ mod tests {
         let q = make_random_query(16, "any");
         let norm: f32 = q.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1e-5);
-    }
-
-    // ─── compare_reports tests ────────────────────────────────────────
-
-    #[test]
-    fn compare_reports_win_all_axes_returns_migrate() {
-        let incumbent = make_report(
-            "sqlite-vec",
-            300.0,
-            1_000_000_000,
-            1_000_000_000,
-            50.0,
-            100.0,
-        );
-        // Candidate: 2x faster indexing, 1.0x rss, 1.0x disk, 0.5x latency
-        let candidate = make_report("lancedb", 150.0, 1_000_000_000, 1_000_000_000, 25.0, 50.0);
-        assert_eq!(compare_reports(&incumbent, &candidate), Verdict::Migrate);
-    }
-
-    #[test]
-    fn compare_reports_indexing_too_slow_returns_stay() {
-        let incumbent = make_report(
-            "sqlite-vec",
-            300.0,
-            1_000_000_000,
-            1_000_000_000,
-            50.0,
-            100.0,
-        );
-        // Only 1.2x faster — fails the 1.5x threshold
-        let candidate = make_report("lancedb", 250.0, 1_000_000_000, 1_000_000_000, 50.0, 100.0);
-        match compare_reports(&incumbent, &candidate) {
-            Verdict::Stay { reasons } => {
-                assert!(
-                    reasons.iter().any(|r| r.contains("Indexing")),
-                    "Should mention indexing: {reasons:?}"
-                );
-            }
-            Verdict::Migrate => panic!("Expected Stay, got Migrate"),
-        }
-    }
-
-    #[test]
-    fn compare_reports_rss_too_high_returns_stay() {
-        let incumbent = make_report(
-            "sqlite-vec",
-            300.0,
-            1_000_000_000,
-            1_000_000_000,
-            50.0,
-            100.0,
-        );
-        // 1.5x faster, but 1.5x more RSS — fails
-        let candidate = make_report("lancedb", 150.0, 1_500_000_000, 1_000_000_000, 25.0, 50.0);
-        match compare_reports(&incumbent, &candidate) {
-            Verdict::Stay { reasons } => {
-                assert!(reasons.iter().any(|r| r.contains("RSS")));
-            }
-            Verdict::Migrate => panic!("Expected Stay"),
-        }
-    }
-
-    #[test]
-    fn compare_reports_disk_too_high_returns_stay() {
-        let incumbent = make_report(
-            "sqlite-vec",
-            300.0,
-            1_000_000_000,
-            1_000_000_000,
-            50.0,
-            100.0,
-        );
-        let candidate = make_report("lancedb", 150.0, 1_000_000_000, 1_500_000_000, 25.0, 50.0);
-        match compare_reports(&incumbent, &candidate) {
-            Verdict::Stay { reasons } => {
-                assert!(reasons.iter().any(|r| r.contains("Disk")));
-            }
-            Verdict::Migrate => panic!("Expected Stay"),
-        }
-    }
-
-    #[test]
-    fn compare_reports_latency_too_high_returns_stay() {
-        let incumbent = make_report(
-            "sqlite-vec",
-            300.0,
-            1_000_000_000,
-            1_000_000_000,
-            50.0,
-            100.0,
-        );
-        let candidate = make_report("lancedb", 150.0, 1_000_000_000, 1_000_000_000, 25.0, 150.0);
-        match compare_reports(&incumbent, &candidate) {
-            Verdict::Stay { reasons } => {
-                assert!(reasons.iter().any(|r| r.contains("p95")));
-            }
-            Verdict::Migrate => panic!("Expected Stay"),
-        }
-    }
-
-    #[test]
-    fn compare_reports_tie_returns_stay() {
-        let incumbent = make_report(
-            "sqlite-vec",
-            300.0,
-            1_000_000_000,
-            1_000_000_000,
-            50.0,
-            100.0,
-        );
-        let candidate = make_report("lancedb", 300.0, 1_000_000_000, 1_000_000_000, 50.0, 100.0);
-        assert!(matches!(
-            compare_reports(&incumbent, &candidate),
-            Verdict::Stay { .. }
-        ));
-    }
-
-    // ─── apply_slo tests ─────────────────────────────────────────────
-
-    #[test]
-    fn apply_slo_marks_passed_under_limit() {
-        let mut report = make_report("test", 200.0, 0, 0, 0.0, 0.0);
-        apply_slo(&mut report, 360);
-        assert!(report.slo_passed);
-        assert_eq!(report.slo_limit_secs, 360);
-    }
-
-    #[test]
-    fn apply_slo_marks_failed_over_limit() {
-        let mut report = make_report("test", 400.0, 0, 0, 0.0, 0.0);
-        apply_slo(&mut report, 360);
-        assert!(!report.slo_passed);
     }
 }

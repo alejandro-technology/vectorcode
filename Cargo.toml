@@ -107,6 +107,17 @@ secrecy = "0.8"
 # Platform FFI for getrusage (peak RSS measurement in bench)
 libc = "0.2"
 
+# LanceDB — feature-gated optional backend for the phase-3 store evaluation.
+# Heavy dep tree (lance + datafusion + arrow + object_store + moka) — default
+# build MUST NOT pull this. Enable with `--features lancedb-store`.
+lancedb = { version = "0.30", optional = true }
+
+[features]
+# Default: sqlite-vec only. Fast build, no LanceDB.
+default = []
+# Opt-in: add the LanceDB backend (LanceStore) for the store evaluation harness.
+lancedb-store = ["dep:lancedb"]
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"

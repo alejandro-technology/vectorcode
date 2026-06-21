@@ -11,3 +11,7 @@ pub mod vectors;
 // Intentional per design: `crate::store::store::Store`. Allow the lint.
 #[allow(clippy::module_inception)]
 pub mod store;
+
+// LanceDB backend — only compiled with `--features lancedb-store`.
+#[cfg(feature = "lancedb-store")]
+pub mod lancedb;

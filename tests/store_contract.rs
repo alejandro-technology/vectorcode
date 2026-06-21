@@ -694,3 +694,55 @@ fn sqlitestore_factory_creates_store() {
     store.init_schema(4).unwrap();
     assert_eq!(store.count_chunks().unwrap(), 0);
 }
+
+// ─── LanceStore contract tests (feature-gated) ──────────────────────────
+
+#[cfg(feature = "lancedb-store")]
+#[test]
+fn lancedbstore_put_and_search_round_trip() {
+    use vectorcode::store::lancedb::LanceStore;
+    use vectorcode::store::lancedb::LanceStoreFactory;
+    use vectorcode::store::store::StoreFactory;
+
+    let factory = LanceStoreFactory;
+    let store = factory
+        .create(std::path::Path::new("/tmp/lance-test"))
+        .unwrap();
+    assert_eq!(factory.backend_name(), "lancedb");
+    store.init_schema(4).expect("init_schema");
+
+    let chunk = make_test_chunk(
+        &compute_chunk_id("src/lance.ts", 0, 100),
+        "src/lance.ts",
+        "function searchLance() { return 1; }",
+    );
+    store.put_chunk(&chunk).expect("put_chunk");
+    store
+        .put_vector(&chunk.id, &[1.0, 0.0, 0.0, 0.0])
+        .expect("put_vector");
+
+    let results = store
+        .search_dense(&[1.0, 0.0, 0.0, 0.0], 10, 0.0, None)
+        .expect("search_dense");
+    assert_eq!(
+        results.len(),
+        1,
+        "LanceStore should return the chunk we put"
+    );
+    assert_eq!(results[0].file_path, "src/lance.ts");
+    assert!(
+        results[0].score > 0.99,
+        "Identical vector must score ~1.0, got {}",
+        results[0].score
+    );
+
+    store.set_meta("test_key", "test_value").expect("set_meta");
+    assert_eq!(
+        store.get_meta("test_key").expect("get_meta"),
+        Some("test_value".to_string())
+    );
+    assert_eq!(store.count_chunks().expect("count_chunks"), 1);
+
+    // Silence unused variable warning
+    let _ = LanceStore::open_in_memory;
+}

@@ -1,6 +1,7 @@
 //! MCP server module using rmcp sdk.
 
 pub mod handler;
+pub mod security;
 
 use std::path::PathBuf;
 use std::sync::Arc;

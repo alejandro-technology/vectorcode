@@ -51,6 +51,9 @@ pub enum VectorCodeError {
 
     #[error("Graph query failed: {message}")]
     GraphQueryFailed { message: String },
+
+    #[error("Path '{path}' is outside of all initialized workspaces")]
+    PathOutsideAnyWorkspace { path: String },
 }
 
 #[cfg(test)]

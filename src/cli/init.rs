@@ -99,30 +99,58 @@ pub async fn execute(args: &InitArgs, project_path: &std::path::Path, quiet: boo
         std::fs::write(&env_path, &env_content)?;
     }
 
-    // Resolve provider defaults
-    let (model, dims) = resolve_provider_defaults(&provider, &args.model, &args.dims);
-
-    // If ONNX selected, ensure model is downloaded
-    if matches!(provider, ProviderArg::Onnx) {
-        let manager = ModelManager::new();
-        if !manager.is_downloaded() {
-            #[cfg(not(test))]
-            {
-                if !quiet {
-                    eprintln!("ONNX model not found. Downloading from HuggingFace...");
+    // Resolve provider defaults for model and fallback dims
+    let (model, default_dims) = resolve_provider_defaults(&provider, &args.model, &args.dims);
+    
+    // Dynamically probe dimensions unless explicitly provided by the user
+    let dims = if let Some(d) = args.dims {
+        d
+    } else {
+        if !quiet {
+            eprintln!("Probing embedding dimensions from provider...");
+        }
+        // Build a temporary config to instantiate the embedder
+        let toml_content = generate_config_toml(&provider, &model, default_dims, &api_key, &ollama_url);
+        let config: crate::config::schema::Config = toml::from_str(&toml_content).map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))?;
+        
+        // If ONNX is selected, ensure model is downloaded before instantiating embedder
+        if matches!(provider, ProviderArg::Onnx) {
+            let manager = ModelManager::new();
+            if !manager.is_downloaded() {
+                #[cfg(not(test))]
+                {
+                    if !quiet {
+                        eprintln!("ONNX model not found. Downloading from HuggingFace...");
+                    }
+                    manager.download_model().await?;
+                    if !quiet {
+                        eprintln!("ONNX model downloaded to ~/.vectorcode/models/");
+                    }
                 }
-                manager.download_model().await?;
-                if !quiet {
-                    eprintln!("ONNX model downloaded to ~/.vectorcode/models/");
+                #[cfg(test)]
+                {
+                    let _ = manager; // suppress unused warning
                 }
-            }
-            #[cfg(test)]
-            {
-                // In tests, skip actual download — model_manager tests cover this
-                let _ = manager; // suppress unused warning
             }
         }
-    }
+        
+        match crate::cli::create_embedder_from_config(&config).await {
+            Ok(embedder) => {
+                let probed = embedder.probe_dimensions().await.unwrap_or(default_dims);
+                if !quiet {
+                    eprintln!("Detected dimensions: {}", probed);
+                }
+                probed
+            }
+            Err(e) => {
+                if !quiet {
+                    eprintln!("Warning: Could not create embedder to probe dimensions: {e}");
+                    eprintln!("Falling back to default dimensions: {}", default_dims);
+                }
+                default_dims
+            }
+        }
+    };
 
     // Step 2: Create index.db with schema
     let db_path = vc_dir.join("index.db");

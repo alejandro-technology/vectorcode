@@ -39,8 +39,15 @@ pub trait Embedder: Send + Sync {
         Ok(results)
     }
 
-    /// Number of dimensions in the output vectors.
+    /// Number of dimensions in the output vectors (static/configured).
     fn dimensions(&self) -> u32;
+
+    /// Probe the actual embedding dimensions dynamically by embedding a test string.
+    /// Default implementation sends a small text to the provider and returns the length.
+    async fn probe_dimensions(&self) -> EmbedderResult<u32> {
+        let test_vec = self.embed("test_dimension_probe").await?;
+        Ok(test_vec.len() as u32)
+    }
 
     /// Provider name for metadata (e.g., "onnx", "gemini").
     fn provider_name(&self) -> &str;

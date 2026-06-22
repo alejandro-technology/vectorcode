@@ -49,7 +49,7 @@ pub async fn execute(args: &IndexArgs, project_path: &std::path::Path, quiet: bo
     }
 
     // Open database
-    let db = Database::open(&db_path)?;
+    let mut db = Database::open(&db_path)?;
 
     // Check meta for provider mismatch
     let index_meta = meta::read_index_meta(db.conn())?;
@@ -78,7 +78,7 @@ pub async fn execute(args: &IndexArgs, project_path: &std::path::Path, quiet: bo
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
 
-        let db = Database::open(&db_path)?;
+        db = Database::open(&db_path)?;
         db.init_schema(index_meta.dimensions)?;
         // Re-write meta with zeroed stats
         let now = crate::cli::init::chrono_now_public();
@@ -115,22 +115,26 @@ pub async fn execute(args: &IndexArgs, project_path: &std::path::Path, quiet: bo
             }
         };
 
+    let actual_dims = embedder.probe_dimensions().await.unwrap_or_else(|_| embedder.dimensions());
+
     if !args.full {
-        if index_meta.dimensions != embedder.dimensions() {
-            anyhow::bail!(
-                "Index dimensions ({}) do not match current embedder dimensions ({}). \
-                 Run with '--full' to rebuild the index from scratch.",
-                index_meta.dimensions,
-                embedder.dimensions()
-            );
-        }
-        if index_meta.provider != config.provider.name {
-            anyhow::bail!(
-                "Index provider ({}) does not match current configured provider ({}). \
-                 Run with '--full' to rebuild the index from scratch.",
-                index_meta.provider,
-                config.provider.name
-            );
+        if index_meta.dimensions != actual_dims || index_meta.provider != config.provider.name {
+            if !quiet {
+                eprintln!(
+                    "Embedding provider or dimensions changed (was: {}/{}, now: {}/{}).\n\
+                     Recreating vector index automatically. Existing files and graph will be preserved.",
+                    index_meta.provider, index_meta.dimensions,
+                    config.provider.name, actual_dims
+                );
+            }
+            db.recreate_vector_index(actual_dims)?;
+            
+            // Also update the index metadata to reflect the new provider/model
+            let mut updated_meta = index_meta.clone();
+            updated_meta.provider = config.provider.name.clone();
+            updated_meta.model = embedder.model_name().to_string();
+            updated_meta.dimensions = actual_dims;
+            meta::write_index_meta(db.conn(), &updated_meta)?;
         }
     }
 

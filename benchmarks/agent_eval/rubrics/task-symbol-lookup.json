@@ -1,0 +1,17 @@
+{
+  "taskId": "task-symbol-lookup",
+  "criteria": [
+    {
+      "name": "correct_file",
+      "weight": 0.40,
+      "description": "Identifies the correct file where VectorCodeError is defined (src/error.rs).",
+      "groundTruth": "src/error.rs"
+    },
+    {
+      "name": "correct_variants",
+      "weight": 0.60,
+      "description": "Lists the variants of VectorCodeError (NotInitialized, ProviderMismatch, EmbedderError, RateLimited, OllamaUnavailable, OllamaModelNotFound, ApiKeyMissing, ParseError, Database, Fts5Error, Io, RerankerError, GraphQueryFailed, PathOutsideAnyWorkspace).",
+      "groundTruth": "NotInitialized, ProviderMismatch, EmbedderError, RateLimited, OllamaUnavailable, OllamaModelNotFound, ApiKeyMissing, ParseError, Database, Fts5Error, Io, RerankerError, GraphQueryFailed, PathOutsideAnyWorkspace"
+    }
+  ]
+}

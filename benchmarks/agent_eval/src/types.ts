@@ -33,3 +33,22 @@ export interface EvalResult {
   error?: string;
   durationMs: number;
 }
+
+export interface RubricCriterion {
+  name: string;
+  weight: number;
+  description: string;
+  groundTruth: string;
+}
+
+export interface TaskRubric {
+  taskId: string;
+  criteria: RubricCriterion[];
+}
+
+export interface JudgeResult {
+  score: number;           // 0.0 - 1.0
+  criteriaScores: Record<string, { score: number; reasoning: string }>;
+  overallReasoning: string;
+}
+

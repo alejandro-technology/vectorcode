@@ -1,0 +1,29 @@
+{
+  "taskId": "task-arch-trace",
+  "criteria": [
+    {
+      "name": "watcher_identified",
+      "weight": 0.25,
+      "description": "Correctly identifies watcher/mod.rs as the file change detection module",
+      "groundTruth": "src/watcher/mod.rs uses the notify crate to watch filesystem events"
+    },
+    {
+      "name": "chunker_identified",
+      "weight": 0.25,
+      "description": "Correctly identifies tree-sitter chunking in engine/",
+      "groundTruth": "src/engine/ uses tree-sitter grammars to split files into semantic chunks"
+    },
+    {
+      "name": "embedder_identified",
+      "weight": 0.25,
+      "description": "Correctly identifies the Embedder trait and at least one provider",
+      "groundTruth": "src/embedder/mod.rs defines the Embedder trait, with implementations in onnx.rs, gemini.rs, ollama.rs, openai.rs"
+    },
+    {
+      "name": "store_identified",
+      "weight": 0.25,
+      "description": "Correctly identifies SQLite + sqlite-vec storage",
+      "groundTruth": "src/store/mod.rs manages rusqlite with sqlite-vec extension for vector storage"
+    }
+  ]
+}

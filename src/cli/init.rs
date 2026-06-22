@@ -101,7 +101,7 @@ pub async fn execute(args: &InitArgs, project_path: &std::path::Path, quiet: boo
 
     // Resolve provider defaults for model and fallback dims
     let (model, default_dims) = resolve_provider_defaults(&provider, &args.model, &args.dims);
-    
+
     // Dynamically probe dimensions unless explicitly provided by the user
     let dims = if let Some(d) = args.dims {
         d
@@ -110,9 +110,11 @@ pub async fn execute(args: &InitArgs, project_path: &std::path::Path, quiet: boo
             eprintln!("Probing embedding dimensions from provider...");
         }
         // Build a temporary config to instantiate the embedder
-        let toml_content = generate_config_toml(&provider, &model, default_dims, &api_key, &ollama_url);
-        let config: crate::config::schema::Config = toml::from_str(&toml_content).map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))?;
-        
+        let toml_content =
+            generate_config_toml(&provider, &model, default_dims, &api_key, &ollama_url);
+        let config: crate::config::schema::Config = toml::from_str(&toml_content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))?;
+
         // If ONNX is selected, ensure model is downloaded before instantiating embedder
         if matches!(provider, ProviderArg::Onnx) {
             let manager = ModelManager::new();
@@ -133,7 +135,7 @@ pub async fn execute(args: &InitArgs, project_path: &std::path::Path, quiet: boo
                 }
             }
         }
-        
+
         match crate::cli::create_embedder_from_config(&config).await {
             Ok(embedder) => {
                 let probed = embedder.probe_dimensions().await.unwrap_or(default_dims);

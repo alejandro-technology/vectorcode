@@ -1,274 +1,468 @@
 import { Anthropic } from '@anthropic-ai/sdk';
 import { OpenAI } from 'openai';
-import { Task, AgentConfig, ToolCallRecord, EvalResult } from './types.js';
+import * as fs from 'fs';
+import * as path from 'path';
+import { Task, AgentConfig, ToolCallRecord } from './types.js';
+import { ToolProvider, ToolDefinition } from './tools/types.js';
+import { CacheManager, CacheEntry, CacheMode, computeRequestHash, getGitSha } from './cache.js';
 
-export interface AgentRunner {
-  run: (
-    task: Task,
-    config: AgentConfig,
-    mcpTools: any[],
-    callMcpTool: (name: string, args: any) => Promise<string>
-  ) => Promise<{
-    success: boolean;
-    steps: number;
-    tokens: { input: number; output: number; total: number };
-    toolCalls: ToolCallRecord[];
-    finalAnswer: string;
-    error?: string;
-  }>;
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string | ChatContentBlock[];
 }
 
-export const runAgent: AgentRunner['run'] = async (task, config, mcpTools, callMcpTool) => {
+export type ChatContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'tool_use'; id: string; name: string; input: any }
+  | { type: 'tool_result'; tool_use_id: string; content: string };
+
+export interface LLMResponse {
+  text: string;
+  toolCalls: { name: string; args: Record<string, any>; id: string }[];
+  tokens: { input: number; output: number };
+  stopReason: 'end_turn' | 'tool_use' | 'max_tokens';
+}
+
+export type LLMCallFn = (messages: ChatMessage[]) => Promise<LLMResponse>;
+
+function mapMessagesToOpenAI(messages: ChatMessage[]): OpenAI.ChatCompletionMessageParam[] {
+  const result: OpenAI.ChatCompletionMessageParam[] = [];
+  
+  result.push({
+    role: 'system',
+    content: 'You are an elite coding agent with access to VectorCode MCP tools. Solve the task step-by-step. Use tools when needed.'
+  });
+  
+  for (const msg of messages) {
+    if (msg.role === 'user') {
+      if (typeof msg.content === 'string') {
+        result.push({ role: 'user', content: msg.content });
+      } else {
+        for (const block of msg.content) {
+          if (block.type === 'tool_result') {
+            result.push({
+              role: 'tool',
+              tool_call_id: block.tool_use_id,
+              content: block.content
+            });
+          } else if (block.type === 'text') {
+            result.push({ role: 'user', content: block.text });
+          }
+        }
+      }
+    } else if (msg.role === 'assistant') {
+      if (typeof msg.content === 'string') {
+        result.push({ role: 'assistant', content: msg.content });
+      } else {
+        let textContent = '';
+        const toolCalls: OpenAI.ChatCompletionMessageToolCall[] = [];
+        
+        for (const block of msg.content) {
+          if (block.type === 'text') {
+            textContent += block.text;
+          } else if (block.type === 'tool_use') {
+            toolCalls.push({
+              id: block.id,
+              type: 'function',
+              function: {
+                name: block.name,
+                arguments: JSON.stringify(block.input)
+              }
+            });
+          }
+        }
+        
+        result.push({
+          role: 'assistant',
+          content: textContent || null,
+          tool_calls: toolCalls.length > 0 ? toolCalls : undefined
+        });
+      }
+    }
+  }
+  return result;
+}
+
+function mapMessagesToAnthropic(messages: ChatMessage[]): Anthropic.MessageParam[] {
+  const result: Anthropic.MessageParam[] = [];
+  
+  for (const msg of messages) {
+    if (msg.role === 'user') {
+      if (typeof msg.content === 'string') {
+        result.push({ role: 'user', content: msg.content });
+      } else {
+        const content: any[] = msg.content.map(block => {
+          if (block.type === 'tool_result') {
+            return {
+              type: 'tool_result',
+              tool_use_id: block.tool_use_id,
+              content: block.content
+            };
+          } else {
+            return {
+              type: 'text',
+              text: (block as any).text
+            };
+          }
+        });
+        result.push({ role: 'user', content });
+      }
+    } else if (msg.role === 'assistant') {
+      if (typeof msg.content === 'string') {
+        result.push({ role: 'assistant', content: msg.content });
+      } else {
+        const content: any[] = msg.content.map(block => {
+          if (block.type === 'tool_use') {
+            return {
+              type: 'tool_use',
+              id: block.id,
+              name: block.name,
+              input: block.input
+            };
+          } else {
+            return {
+              type: 'text',
+              text: (block as any).text
+            };
+          }
+        });
+        result.push({ role: 'assistant', content });
+      }
+    }
+  }
+  return result;
+}
+
+async function openaiCall(
+  messages: ChatMessage[],
+  config: AgentConfig,
+  tools: ToolDefinition[]
+): Promise<LLMResponse> {
+  const apiKey = process.env.OPENCODE_API_KEY || process.env.OPENAI_API_KEY || 'dummy';
+  const client = new OpenAI({
+    apiKey,
+    baseURL: 'https://opencode.ai/zen/go/v1'
+  });
+  
+  const openaiTools: OpenAI.ChatCompletionTool[] = tools.map(t => ({
+    type: 'function',
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: t.inputSchema
+    }
+  }));
+  
+  const openaiMessages = mapMessagesToOpenAI(messages);
+  
+  const response = await client.chat.completions.create({
+    model: config.model,
+    messages: openaiMessages,
+    tools: openaiTools.length > 0 ? openaiTools : undefined,
+    tool_choice: openaiTools.length > 0 ? 'auto' : undefined
+  });
+  
+  const choice = response.choices[0];
+  const assistantMessage = choice.message;
+  
+  const text = assistantMessage.content || '';
+  const toolCalls = (assistantMessage.tool_calls || []).map(tc => {
+    let args = {};
+    try {
+      args = JSON.parse(tc.function.arguments);
+    } catch (e) {
+      console.warn(`[OpenAI Adapter] Failed to parse tool arguments: ${tc.function.arguments}`);
+    }
+    return {
+      id: tc.id,
+      name: tc.function.name,
+      args
+    };
+  });
+  
+  const tokens = {
+    input: response.usage?.prompt_tokens || 0,
+    output: response.usage?.completion_tokens || 0
+  };
+  
+  let stopReason: 'end_turn' | 'tool_use' | 'max_tokens' = 'end_turn';
+  if (choice.finish_reason === 'tool_calls') {
+    stopReason = 'tool_use';
+  } else if (choice.finish_reason === 'length') {
+    stopReason = 'max_tokens';
+  }
+  
+  return {
+    text,
+    toolCalls,
+    tokens,
+    stopReason
+  };
+}
+
+async function anthropicCall(
+  messages: ChatMessage[],
+  config: AgentConfig,
+  tools: ToolDefinition[]
+): Promise<LLMResponse> {
+  const apiKey = process.env.OPENCODE_API_KEY || process.env.ANTHROPIC_API_KEY || 'dummy';
+  const client = new Anthropic({
+    apiKey,
+    baseURL: 'https://opencode.ai/zen/go'
+  });
+  
+  const anthropicTools: Anthropic.Tool[] = tools.map(t => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.inputSchema as any
+  }));
+  
+  const anthropicMessages = mapMessagesToAnthropic(messages);
+  
+  const response = await client.messages.create({
+    model: config.model,
+    max_tokens: 4000,
+    system: 'You are an elite coding agent with access to VectorCode MCP tools. Solve the task step-by-step. Use tools when needed.',
+    messages: anthropicMessages,
+    tools: anthropicTools.length > 0 ? anthropicTools : undefined
+  });
+  
+  let text = '';
+  const toolCalls: { name: string; args: Record<string, any>; id: string }[] = [];
+  
+  for (const block of response.content) {
+    if (block.type === 'text') {
+      text += block.text;
+    } else if (block.type === 'tool_use') {
+      toolCalls.push({
+        id: block.id,
+        name: block.name,
+        args: block.input as any
+      });
+    }
+  }
+  
+  const tokens = {
+    input: response.usage?.input_tokens || 0,
+    output: response.usage?.output_tokens || 0
+  };
+  
+  let stopReason: 'end_turn' | 'tool_use' | 'max_tokens' = 'end_turn';
+  if (response.stop_reason === 'tool_use') {
+    stopReason = 'tool_use';
+  } else if (response.stop_reason === 'max_tokens') {
+    stopReason = 'max_tokens';
+  }
+  
+  return {
+    text,
+    toolCalls,
+    tokens,
+    stopReason
+  };
+}
+
+function simulateDryRunResponse(task: Task, steps: number, toolsList: ToolDefinition[]): LLMResponse {
+  if (steps === 1) {
+    const hasSearch = toolsList.some(t => t.name === 'vec_search');
+    const toolName = hasSearch ? 'vec_search' : 'grep';
+    const args = hasSearch 
+      ? { query: 'VectorCodeError', limit: 2 } 
+      : { query: 'VectorCodeError' };
+    
+    return {
+      text: "I will use search tools to locate VectorCodeError.",
+      toolCalls: [{ name: toolName, args, id: 'call_dryrun_1' }],
+      tokens: { input: 100, output: 50 },
+      stopReason: 'tool_use'
+    };
+  } else {
+    const finalAnswer = task.id === 'task-status-command'
+      ? 'pub fn run_status() -> String { "Mock Status: OK".to_string() }'
+      : 'Dry-run execution completed successfully. VectorCodeError is defined in src/error.rs.';
+    
+    return {
+      text: finalAnswer,
+      toolCalls: [],
+      tokens: { input: 150, output: 50 },
+      stopReason: 'end_turn'
+    };
+  }
+}
+
+export async function reactLoop(
+  task: Task,
+  provider: ToolProvider,
+  llmCall: LLMCallFn,
+  cacheManager: CacheManager,
+  config: AgentConfig & { arm: 'vectorcode' | 'traditional'; cacheMode: CacheMode }
+) {
   const maxSteps = config.maxSteps || 10;
   const toolCalls: ToolCallRecord[] = [];
   let inputTokens = 0;
   let outputTokens = 0;
   let steps = 0;
   let finalAnswer = '';
-
-  const apiKey = process.env.OPENCODE_API_KEY || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || 'dummy';
-  const baseURL = 'https://opencode.ai/zen/go/v1';
-
-  // Dry-run mode for testing plumbing without API keys
-  if (config.provider === 'dry-run') {
-    console.log('[DryRun] Starting dry-run execution');
-    // Simulate a vec_search tool call
-    const start = Date.now();
-    const searchResult = await callMcpTool('vec_search', { query: 'VectorCodeError', limit: 2 });
-    toolCalls.push({
-      toolName: 'vec_search',
-      input: { query: 'VectorCodeError', limit: 2 },
-      output: searchResult.substring(0, 100) + '...',
-      durationMs: Date.now() - start
-    });
-
-    // Simulate creating a file for task-2
-    if (task.id === 'task-2-write') {
-      const fs = await import('fs');
-      const path = await import('path');
-      const mockFile = path.resolve(process.cwd(), '../../src/cli/status_mock.rs');
-      fs.writeFileSync(mockFile, `
-        pub fn run_status() -> String {
-          "Mock Status: OK".to_string()
-        }
-      `);
-    }
-
-    const finalAnswer = task.id === 'task-2-write'
-      ? 'pub fn run_status() -> String { "Mock Status: OK".to_string() }'
-      : 'Dry-run execution completed successfully. VectorCodeError is defined in src/error.rs and sanitize_fts_query is in src/store/fts.rs.';
-
-    return {
-      success: true,
-      steps: 1,
-      tokens: { input: 150, output: 50, total: 200 },
-      toolCalls,
-      finalAnswer
-    };
+  
+  const { cacheMode, model, arm } = config;
+  const loaded = cacheMode !== 'dry-run' ? cacheManager.loadTrajectory(model, task.id, arm) : null;
+  const cachedEntries = loaded?.entries || [];
+  
+  if (cacheMode === 'cached' && !loaded) {
+    throw new Error(`No cached trajectory found for model ${model}, task ${task.id}, arm ${arm}`);
   }
-
-  if (config.provider === 'anthropic') {
-    // Anthropic SDK / Client
-    const client = new Anthropic({
-      apiKey,
-      baseURL: 'https://opencode.ai/zen/go'
+  
+  let messages: ChatMessage[] = [
+    { role: 'user', content: task.prompt }
+  ];
+  
+  let isReplaying = cacheMode === 'cached' || (cacheMode === 'live' && cachedEntries.length > 0);
+  const newEntries: CacheEntry[] = [];
+  
+  while (steps < maxSteps) {
+    steps++;
+    console.log(`[reactLoop] Step ${steps}/${maxSteps}... (Replay: ${isReplaying})`);
+    
+    const requestHash = computeRequestHash(messages);
+    
+    let response: LLMResponse = { text: '', toolCalls: [], tokens: { input: 0, output: 0 }, stopReason: 'end_turn' };
+    let tokens: { input: number; output: number } = { input: 0, output: 0 };
+    
+    if (isReplaying) {
+      const cachedEntry = cachedEntries[steps - 1];
+      if (cachedEntry && cachedEntry.requestHash === requestHash) {
+        console.log(`[Cache] Replaying step ${steps} from cache.`);
+        response = cachedEntry.response;
+        tokens = cachedEntry.tokens;
+      } else {
+        if (cacheMode === 'cached') {
+          throw new Error(`Cache divergence at step ${steps} in cached-only mode. Expected hash ${cachedEntry?.requestHash || 'none'} but got ${requestHash}.`);
+        }
+        console.log(`[Cache] Cache diverged at step ${steps}. Switching to live execution.`);
+        isReplaying = false;
+      }
+    }
+    
+    if (!isReplaying) {
+      if (cacheMode === 'dry-run') {
+        response = simulateDryRunResponse(task, steps, provider.listTools());
+        tokens = { input: 150, output: 50 };
+      } else {
+        response = await llmCall(messages);
+        tokens = response.tokens;
+      }
+      
+      if (cacheMode === 'live' || cacheMode === 'update-cache') {
+        newEntries.push({
+          stepIndex: steps,
+          requestHash,
+          response,
+          tokens,
+          timestamp: new Date().toISOString()
+        });
+      }
+    } else {
+      tokens = cachedEntries[steps - 1].tokens;
+    }
+    
+    inputTokens += tokens.input;
+    outputTokens += tokens.output;
+    
+    messages.push({
+      role: 'assistant',
+      content: [
+        { type: 'text', text: response.text },
+        ...response.toolCalls.map(tc => ({
+          type: 'tool_use' as const,
+          id: tc.id,
+          name: tc.name,
+          input: tc.args
+        }))
+      ]
     });
-
-    // Map MCP Tools to Anthropic Format
-    const anthropicTools: Anthropic.Tool[] = mcpTools.map(t => ({
-      name: t.name,
-      description: t.description,
-      input_schema: t.inputSchema
-    }));
-
-    let messages: Anthropic.MessageParam[] = [
-      { role: 'user', content: task.prompt }
+    
+    if (response.toolCalls.length === 0) {
+      finalAnswer = response.text;
+      break;
+    }
+    
+    const toolResults: ChatContentBlock[] = [];
+    for (const toolCall of response.toolCalls) {
+      const name = toolCall.name;
+      const args = toolCall.args;
+      const id = toolCall.id;
+      
+      console.log(`[reactLoop] Calling tool: ${name} with args:`, JSON.stringify(args));
+      const toolStart = Date.now();
+      let output = '';
+      try {
+        output = await provider.callTool(name, args);
+      } catch (e: any) {
+        output = `Error calling tool: ${e.message}`;
+      }
+      const duration = Date.now() - toolStart;
+      
+      toolCalls.push({
+        toolName: name,
+        input: args,
+        output: output.substring(0, 500) + (output.length > 500 ? '...' : ''),
+        durationMs: duration
+      });
+      
+      toolResults.push({
+        type: 'tool_result',
+        tool_use_id: id,
+        content: output
+      });
+    }
+    
+    messages.push({
+      role: 'user',
+      content: toolResults
+    });
+  }
+  
+  if (cacheMode === 'live' || cacheMode === 'update-cache') {
+    const finalEntries = [
+      ...cachedEntries.slice(0, steps - newEntries.length),
+      ...newEntries
     ];
-
-    while (steps < maxSteps) {
-      steps++;
-      console.log(`[Anthropic] Step ${steps}/${maxSteps}...`);
-
-      const startMs = Date.now();
-      const response = await client.messages.create({
-        model: config.model,
-        max_tokens: 4000,
-        system: 'You are an elite coding agent with access to VectorCode MCP tools. Solve the task step-by-step. Use tools when needed.',
-        messages,
-        tools: anthropicTools
-      });
-
-      if (response.usage) {
-        inputTokens += response.usage.input_tokens;
-        outputTokens += response.usage.output_tokens;
-      }
-
-      // Collect text output
-      let textContent = '';
-      const toolUseBlocks: Anthropic.ToolUseBlock[] = [];
-
-      for (const block of response.content) {
-        if (block.type === 'text') {
-          textContent += block.text;
-        } else if (block.type === 'tool_use') {
-          toolUseBlocks.push(block);
-        }
-      }
-
-      console.log(`[Anthropic] Model text response: ${textContent.substring(0, 100)}...`);
-
-      // Add assistant response to messages history
-      messages.push({
-        role: 'assistant',
-        content: response.content
-      });
-
-      if (toolUseBlocks.length === 0) {
-        // No more tool calls, we are done
-        finalAnswer = textContent;
-        break;
-      }
-
-      // Execute tool calls
-      const toolResultBlocks: Anthropic.ToolResultBlockParam[] = [];
-      for (const toolUse of toolUseBlocks) {
-        const name = toolUse.name;
-        const input = toolUse.input;
-        const id = toolUse.id;
-
-        console.log(`[Anthropic] Calling tool: ${name} with args:`, JSON.stringify(input));
-        const toolStart = Date.now();
-        let output = '';
-        try {
-          output = await callMcpTool(name, input);
-        } catch (e: any) {
-          output = `Error calling tool: ${e.message}`;
-        }
-        const duration = Date.now() - toolStart;
-
-        toolCalls.push({
-          toolName: name,
-          input,
-          output: output.substring(0, 500) + (output.length > 500 ? '...' : ''),
-          durationMs: duration
-        });
-
-        toolResultBlocks.push({
-          type: 'tool_result',
-          tool_use_id: id,
-          content: output
-        });
-      }
-
-      messages.push({
-        role: 'user',
-        content: toolResultBlocks
-      });
-    }
-
-    return {
-      success: true,
-      steps,
-      tokens: { input: inputTokens, output: outputTokens, total: inputTokens + outputTokens },
-      toolCalls,
-      finalAnswer
-    };
+    
+    cacheManager.saveTrajectory(model, task.id, arm, {
+      workspaceSha: getGitSha(),
+      model,
+      taskId: task.id,
+      arm
+    }, finalEntries);
   }
+  
+  return {
+    success: true,
+    steps,
+    tokens: { input: inputTokens, output: outputTokens, total: inputTokens + outputTokens },
+    toolCalls,
+    finalAnswer
+  };
+}
 
-  if (config.provider === 'openai') {
-    // OpenAI SDK / Client
-    const client = new OpenAI({
-      apiKey,
-      baseURL: 'https://opencode.ai/zen/go/v1'
-    });
-
-    // Map MCP Tools to OpenAI format
-    const openaiTools: OpenAI.ChatCompletionTool[] = mcpTools.map(t => ({
-      type: 'function',
-      function: {
-        name: t.name,
-        description: t.description,
-        parameters: t.inputSchema
-      }
-    }));
-
-    let messages: OpenAI.ChatCompletionMessageParam[] = [
-      { role: 'system', content: 'You are an elite coding agent with access to VectorCode MCP tools. Solve the task step-by-step. Use tools when needed.' },
-      { role: 'user', content: task.prompt }
-    ];
-
-    while (steps < maxSteps) {
-      steps++;
-      console.log(`[OpenAI] Step ${steps}/${maxSteps}...`);
-
-      const response = await client.chat.completions.create({
-        model: config.model,
-        messages,
-        tools: openaiTools,
-        tool_choice: 'auto'
-      });
-
-      if (response.usage) {
-        inputTokens += response.usage.prompt_tokens;
-        outputTokens += response.usage.completion_tokens;
-      }
-
-      const choice = response.choices[0];
-      const assistantMessage = choice.message;
-
-      // Add response to context history
-      messages.push(assistantMessage);
-
-      if (assistantMessage.content) {
-        console.log(`[OpenAI] Model text response: ${assistantMessage.content.substring(0, 100)}...`);
-      }
-
-      if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
-        finalAnswer = assistantMessage.content || '';
-        break;
-      }
-
-      // Execute tool calls
-      for (const toolCall of assistantMessage.tool_calls) {
-        const name = toolCall.function.name;
-        let args = {};
-        try {
-          args = JSON.parse(toolCall.function.arguments);
-        } catch (e) {}
-
-        console.log(`[OpenAI] Calling tool: ${name} with args:`, toolCall.function.arguments);
-        const toolStart = Date.now();
-        let output = '';
-        try {
-          output = await callMcpTool(name, args);
-        } catch (e: any) {
-          output = `Error calling tool: ${e.message}`;
-        }
-        const duration = Date.now() - toolStart;
-
-        toolCalls.push({
-          toolName: name,
-          input: args,
-          output: output.substring(0, 500) + (output.length > 500 ? '...' : ''),
-          durationMs: duration
-        });
-
-        messages.push({
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          content: output
-        });
-      }
+export async function runAgent(
+  task: Task,
+  config: AgentConfig & { arm: 'vectorcode' | 'traditional'; cacheMode: CacheMode },
+  provider: ToolProvider
+) {
+  const cacheManager = new CacheManager();
+  const tools = provider.listTools();
+  
+  const llmCall = async (messages: ChatMessage[]): Promise<LLMResponse> => {
+    if (config.provider === 'openai') {
+      return openaiCall(messages, config, tools);
+    } else if (config.provider === 'anthropic') {
+      return anthropicCall(messages, config, tools);
+    } else {
+      throw new Error(`Unsupported provider: ${config.provider}`);
     }
+  };
+  
+  return reactLoop(task, provider, llmCall, cacheManager, config);
+}
 
-    return {
-      success: true,
-      steps,
-      tokens: { input: inputTokens, output: outputTokens, total: inputTokens + outputTokens },
-      toolCalls,
-      finalAnswer
-    };
-  }
-
-  throw new Error(`Unsupported provider: ${config.provider}`);
-};

@@ -1,0 +1,23 @@
+{
+  "taskId": "task-refactor-plan",
+  "criteria": [
+    {
+      "name": "implementors_identified",
+      "weight": 0.35,
+      "description": "Correctly identifies all 6 files implementing the Embedder trait: gemini.rs, mock.rs, ollama.rs, onnx.rs, openai.rs, openrouter.rs.",
+      "groundTruth": "src/embedder/gemini.rs, src/embedder/mock.rs, src/embedder/ollama.rs, src/embedder/onnx.rs, src/embedder/openai.rs, src/embedder/openrouter.rs"
+    },
+    {
+      "name": "call_sites_identified",
+      "weight": 0.35,
+      "description": "Correctly identifies main call sites: src/engine/searcher.rs (calls embed) and src/engine/indexer.rs (calls embed_batch). Also accepts test files.",
+      "groundTruth": "src/engine/searcher.rs calling embed, src/engine/indexer.rs calling embed_batch"
+    },
+    {
+      "name": "blast_radius_assessed",
+      "weight": 0.30,
+      "description": "Correctly assesses the blast radius, including the database storage layer (src/store/mod.rs or sqlite-vec integration) and type definitions (src/types.rs) where embeddings are saved or manipulated.",
+      "groundTruth": "Database layer (src/store/mod.rs / SQLite vector storage) and types module (src/types.rs)."
+    }
+  ]
+}

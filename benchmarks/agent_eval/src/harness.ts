@@ -1,11 +1,13 @@
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import * as dotenv from 'dotenv';
 import * as fs from 'fs';
 import * as path from 'path';
 import { tasks } from './tasks.js';
 import { runAgent } from './agents.js';
-import { EvalResult, ToolCallRecord } from './types.js';
+import { VectorCodeProvider } from './tools/vectorcode.js';
+import { TraditionalProvider } from './tools/traditional.js';
+import { ToolProvider } from './tools/types.js';
+import { parseCacheMode, getGitSha, isGitDirty } from './cache.js';
+import { judge } from './judge.js';
 
 dotenv.config();
 
@@ -17,221 +19,226 @@ function getBinPath(): string {
   return path.resolve('../../target/debug/vectorcode');
 }
 
-async function runTask(
-  taskId: string,
-  model: string,
-  provider: 'openai' | 'anthropic' | 'dry-run'
-): Promise<EvalResult> {
-  const task = tasks.find(t => t.id === taskId);
-  if (!task) {
-    throw new Error(`Task with ID ${taskId} not found`);
+function extractRustCode(answer: string): string {
+  const match = answer.match(/```rust\s*([\s\S]*?)```/) || answer.match(/```\s*([\s\S]*?)```/);
+  if (match) {
+    return match[1].trim();
   }
-
-  const binPath = getBinPath();
-  if (!fs.existsSync(binPath) && provider !== 'dry-run') {
-    throw new Error(`VectorCode binary not found at: ${binPath}. Please compile it using 'cargo build' first.`);
-  }
-
-  console.log(`[Harness] Launching VectorCode MCP Server: ${binPath}`);
-  
-  let client: Client | null = null;
-  let transport: StdioClientTransport | null = null;
-  let mcpTools: any[] = [];
-
-  if (provider !== 'dry-run') {
-    transport = new StdioClientTransport({
-      command: binPath,
-      args: ['serve', '--mcp'],
-      env: process.env as any
-    });
-
-    client = new Client(
-      { name: 'vectorcode-eval-harness', version: '1.0.0' },
-      { capabilities: {} }
-    );
-
-    await client.connect(transport);
-    console.log('[Harness] Connected to VectorCode MCP Server');
-
-    const toolsResponse = await client.listTools();
-    mcpTools = toolsResponse.tools;
-    console.log(`[Harness] Discovered ${mcpTools.length} MCP tools`);
-  } else {
-    // Dummy tools for dry-run
-    mcpTools = [
-      { name: 'vec_search', description: 'Semantic search', inputSchema: {} },
-      { name: 'vec_outline', description: 'AST outline', inputSchema: {} }
-    ];
-  }
-
-  const callMcpTool = async (name: string, args: any): Promise<string> => {
-    if (provider === 'dry-run' || !client) {
-      if (name === 'vec_search') {
-        return 'Mock search results: src/error.rs contains VectorCodeError';
-      }
-      return 'Mock tool result';
-    }
-    const response = await client.callTool({
-      name,
-      arguments: args
-    });
-    return response.content
-      .filter(c => c.type === 'text')
-      .map((c: any) => c.text)
-      .join('\n');
-  };
-
-  const startMs = Date.now();
-  console.log(`[Harness] Executing task: ${task.name} with model: ${model}`);
-
-  let success = false;
-  let steps = 0;
-  let tokens = { input: 0, output: 0, total: 0 };
-  let toolCalls: ToolCallRecord[] = [];
-  let error: string | undefined;
-
-  try {
-    const agentResult = await runAgent(task, { model, provider }, mcpTools, callMcpTool);
-    steps = agentResult.steps;
-    tokens = agentResult.tokens;
-    toolCalls = agentResult.toolCalls;
-
-    // Verify workspace state
-    const workspaceDir = path.resolve('../../'); // Project root
-    const verification = await task.verify(workspaceDir);
-    success = verification.success;
-    if (!success) {
-      error = verification.error || 'Task verification failed';
-    }
-
-    // Special verification for read task: check if agent answered correctly
-    if (task.id === 'task-1-read') {
-      const answer = agentResult.finalAnswer.toLowerCase();
-      const hasErrorFile = answer.includes('error.rs');
-      const hasFtsFile = answer.includes('fts.rs');
-      if (hasErrorFile && hasFtsFile) {
-        success = true;
-      } else {
-        success = false;
-        error = `Agent did not identify the correct files. Output: ${agentResult.finalAnswer.substring(0, 200)}...`;
-      }
-    }
-
-    // Special verification for write task: check if agent outputted correct code
-    if (task.id === 'task-2-write') {
-      const answer = agentResult.finalAnswer;
-      const hasFn = answer.includes('pub fn run_status') || answer.includes('pub fn run_status(') || answer.includes('fn run_status');
-      const hasReturn = answer.includes('Mock Status: OK');
-      if (hasFn && hasReturn) {
-        success = true;
-      } else {
-        success = false;
-        error = `Agent did not output the correct Rust implementation. Output: ${agentResult.finalAnswer.substring(0, 200)}...`;
-      }
-    }
-
-  } catch (err: any) {
-    success = false;
-    error = err.message;
-  } finally {
-    if (client) {
-      await client.close();
-    }
-  }
-
-  const durationMs = Date.now() - startMs;
-  return {
-    taskId,
-    model,
-    provider,
-    success,
-    steps,
-    tokens,
-    toolCalls,
-    error,
-    durationMs
-  };
+  return answer.trim();
 }
 
 async function main() {
   const args = process.argv.slice(2);
-  const isDryRun = args.includes('--dry-run');
+  const cacheMode = parseCacheMode(args);
+
+  // Dirty check for live run
+  if ((cacheMode === 'live' || cacheMode === 'update-cache') && isGitDirty()) {
+    console.error('\n[Harness] Error: Workspace is dirty (has changes in src/, Cargo.toml, etc.).');
+    console.error('Please commit or stash your changes before running live cache population.\n');
+    process.exit(1);
+  }
 
   // Parse arguments or set defaults
   const taskIdArg = args.find(a => a.startsWith('--task='))?.split('=')[1];
   const modelArg = args.find(a => a.startsWith('--model='))?.split('=')[1];
-  
-  const tasksToRun = taskIdArg ? [taskIdArg] : tasks.map(t => t.id);
+  const armArg = args.find(a => a.startsWith('--arm='))?.split('=')[1];
 
-  let defaultModel = 'kimi-k2.6';
-  let defaultProvider: 'openai' | 'anthropic' | 'dry-run' = 'openai';
+  const tasksToRun = taskIdArg ? taskIdArg.split(',') : tasks.map(t => t.id);
+  const modelsToRun = modelArg ? modelArg.split(',') : ['mimo-v2.5', 'minimax-m3', 'deepseek-v4-flash'];
+  const armsToRun = (armArg ? armArg.split(',') : ['vectorcode', 'traditional']) as ('vectorcode' | 'traditional')[];
 
-  if (modelArg) {
-    defaultModel = modelArg;
-    // Map model name to provider based on user model list
-    const anthropicModels = [
-      'minimax-m3', 'minimax-m2.7', 'minimax-m2.5',
-      'qwen3.7-max', 'qwen3.7-plus', 'qwen3.6-plus'
-    ];
-    if (anthropicModels.includes(defaultModel)) {
-      defaultProvider = 'anthropic';
-    } else {
-      defaultProvider = 'openai';
-    }
-  }
-
-  if (isDryRun) {
-    defaultModel = 'dry-run-model';
-    defaultProvider = 'dry-run';
-  }
+  const anthropicModels = [
+    'minimax-m3', 'minimax-m2.7', 'minimax-m2.5',
+    'qwen3.7-max', 'qwen3.7-plus', 'qwen3.6-plus'
+  ];
 
   console.log('===================================================');
   console.log(` Starting VectorCode Agent Evaluation Suite`);
-  console.log(` Provider: ${defaultProvider.toUpperCase()}`);
-  console.log(` Model:    ${defaultModel}`);
+  console.log(` Mode:   ${cacheMode.toUpperCase()}`);
+  console.log(` Models: ${modelsToRun.join(', ')}`);
+  console.log(` Tasks:  ${tasksToRun.join(', ')}`);
+  console.log(` Arms:   ${armsToRun.join(', ')}`);
   console.log('===================================================');
 
-  const results: EvalResult[] = [];
+  const results: any[] = [];
+  const binPath = getBinPath();
 
-  for (const taskId of tasksToRun) {
-    try {
-      const result = await runTask(taskId, defaultModel, defaultProvider);
-      results.push(result);
-      console.log(`\nTask: ${taskId}`);
-      console.log(`Status:    ${result.success ? '✅ SUCCESS' : '❌ FAILED'}`);
-      console.log(`Duration:  ${(result.durationMs / 1000).toFixed(2)}s`);
-      console.log(`Steps:     ${result.steps}`);
-      console.log(`Tokens:    In: ${result.tokens.input} | Out: ${result.tokens.output} | Total: ${result.tokens.total}`);
-      console.log(`ToolCalls: ${result.toolCalls.length} calls`);
-      if (result.error) {
-        console.log(`Error:     ${result.error}`);
+  for (const model of modelsToRun) {
+    for (const taskId of tasksToRun) {
+      const task = tasks.find(t => t.id === taskId);
+      if (!task) {
+        console.error(`[Harness] Task with ID ${taskId} not found. Skipping.`);
+        continue;
       }
-      console.log('---------------------------------------------------');
-    } catch (err: any) {
-      console.error(`Failed executing task ${taskId}:`, err.message);
+
+      for (const arm of armsToRun) {
+        console.log(`\n---------------------------------------------------`);
+        console.log(`Running: Model: ${model} | Task: ${taskId} | Arm: ${arm}`);
+        console.log(`---------------------------------------------------`);
+
+        let provider: 'openai' | 'anthropic' | 'dry-run';
+        if (cacheMode === 'dry-run') {
+          provider = 'dry-run';
+        } else if (anthropicModels.includes(model)) {
+          provider = 'anthropic';
+        } else {
+          provider = 'openai';
+        }
+
+        // Instantiate appropriate tool provider
+        let toolProvider: ToolProvider;
+        if (arm === 'vectorcode') {
+          toolProvider = new VectorCodeProvider(binPath);
+        } else {
+          toolProvider = new TraditionalProvider();
+        }
+
+        const startMs = Date.now();
+        let success = false;
+        let correctness = 0.0;
+        let error: string | undefined;
+        let agentResult: any;
+        let judgeResult: any;
+
+        try {
+          if (cacheMode !== 'dry-run') {
+            await toolProvider.initialize();
+          }
+
+          agentResult = await runAgent(
+            task,
+            { model, provider, arm, cacheMode },
+            toolProvider
+          );
+
+          // Task Verification & Safe cleanup block (Task 6.2)
+          const workspaceDir = path.resolve('../../'); // Project root
+          let wroteFile = false;
+          const filePath = path.join(workspaceDir, 'src/cli/status_eval.rs');
+
+          try {
+            if (taskId === 'task-status-command' && cacheMode !== 'dry-run') {
+              const code = extractRustCode(agentResult.finalAnswer);
+              fs.writeFileSync(filePath, code, 'utf8');
+              wroteFile = true;
+            }
+
+            const verification = await task.verify(workspaceDir);
+            success = verification.success;
+            if (!success) {
+              error = verification.error || 'Task verification failed';
+            }
+          } finally {
+            if (wroteFile) {
+              if (fs.existsSync(filePath)) {
+                try {
+                  fs.unlinkSync(filePath);
+                } catch (e) {
+                  console.error(`[Harness] Failed to clean up status_eval.rs: ${e}`);
+                }
+              }
+            }
+          }
+
+          // Evaluate correctness
+          if (taskId === 'task-status-command') {
+            correctness = success ? 1.0 : 0.0;
+          } else {
+            // Read-only task, use LLM-as-Judge
+            const rubricPath = path.resolve(process.cwd(), `rubrics/${taskId}.json`);
+            let rubric = { taskId, criteria: [] };
+            if (fs.existsSync(rubricPath)) {
+              rubric = JSON.parse(fs.readFileSync(rubricPath, 'utf8'));
+            }
+
+            judgeResult = await judge(
+              taskId,
+              task.prompt,
+              agentResult.finalAnswer,
+              rubric,
+              cacheMode === 'dry-run' ? 'dry-run-model' : 'mimo-v2.5'
+            );
+            correctness = judgeResult.score;
+            success = correctness >= 0.8; // threshold of 0.8 for success
+          }
+
+        } catch (err: any) {
+          success = false;
+          correctness = 0.0;
+          error = err.message || 'Unknown runtime error';
+          agentResult = {
+            steps: 0,
+            tokens: { input: 0, output: 0, total: 0 },
+            toolCalls: [],
+            finalAnswer: ''
+          };
+        } finally {
+          try {
+            await toolProvider.shutdown();
+          } catch (e) {
+            console.error(`[Harness] Error shutting down tool provider:`, e);
+          }
+        }
+
+        const durationMs = Date.now() - startMs;
+        const record = {
+          taskId,
+          model,
+          provider,
+          arm,
+          success,
+          correctness,
+          steps: agentResult.steps,
+          tokens: agentResult.tokens,
+          toolCalls: agentResult.toolCalls,
+          error,
+          durationMs,
+          judgeResult
+        };
+
+        results.push(record);
+
+        console.log(`Result:     ${success ? '✅ SUCCESS' : '❌ FAILED'}`);
+        console.log(`Score:      ${correctness.toFixed(2)}`);
+        console.log(`Steps:      ${agentResult.steps}`);
+        console.log(`Tokens:     In: ${agentResult.tokens.input} | Out: ${agentResult.tokens.output} | Total: ${agentResult.tokens.total}`);
+        console.log(`Duration:   ${(durationMs / 1000).toFixed(2)}s`);
+        if (error) {
+          console.log(`Error:      ${error}`);
+        }
+      }
     }
   }
 
   // Save report
-  const resultsDir = path.resolve('../results');
+  const resultsDir = path.resolve(process.cwd(), 'results');
   if (!fs.existsSync(resultsDir)) {
     fs.mkdirSync(resultsDir, { recursive: true });
   }
 
   const reportPath = path.join(resultsDir, 'agent_eval_report.json');
-  fs.writeFileSync(reportPath, JSON.stringify(results, null, 2));
-  console.log(`[Harness] Report written to: ${reportPath}`);
+  fs.writeFileSync(reportPath, JSON.stringify(results, null, 2), 'utf8');
+  console.log(`\n[Harness] Report written to: ${reportPath}`);
 
-  // Generate a beautiful markdown summary table
-  let mdReport = `# Agent Evaluation Summary\n\n`;
-  mdReport += `| Task ID | Model | Success | Steps | Tokens | Tool Calls | Duration |\n`;
-  mdReport += `| --- | --- | --- | --- | --- | --- | --- |\n`;
+  // Generate markdown report
+  const gitSha = getGitSha();
+  let mdReport = `# Agent Evaluation Report\n\n`;
+  mdReport += `- **Workspace SHA**: \`${gitSha}\`\n`;
+  mdReport += `- **Date**: ${new Date().toISOString()}\n`;
+  mdReport += `- **Mode**: \`${cacheMode}\`\n\n`;
+
+  mdReport += `## Summary Table\n\n`;
+  mdReport += `| Model | Task | Arm | Success | Correctness | Steps | Tokens | Tool Calls | Duration |\n`;
+  mdReport += `| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n`;
+
   for (const r of results) {
-    mdReport += `| ${r.taskId} | ${r.model} | ${r.success ? '✅' : '❌'} | ${r.steps} | ${r.tokens.total} | ${r.toolCalls.length} | ${(r.durationMs / 1000).toFixed(2)}s |\n`;
+    const successEmoji = r.success ? '✅' : '❌';
+    const duration = (r.durationMs / 1000).toFixed(2) + 's';
+    mdReport += `| ${r.model} | ${r.taskId} | ${r.arm} | ${successEmoji} | ${r.correctness.toFixed(2)} | ${r.steps} | ${r.tokens.total} | ${r.toolCalls.length} | ${duration} |\n`;
   }
-  
+
   const mdReportPath = path.join(resultsDir, 'agent_eval_report.md');
-  fs.writeFileSync(mdReportPath, mdReport);
+  fs.writeFileSync(mdReportPath, mdReport, 'utf8');
   console.log(`[Harness] Markdown report written to: ${mdReportPath}`);
 }
 
@@ -239,3 +246,4 @@ main().catch(err => {
   console.error('[Harness] Critical error in harness main:', err);
   process.exit(1);
 });
+

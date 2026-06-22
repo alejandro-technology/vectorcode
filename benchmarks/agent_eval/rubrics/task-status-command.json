@@ -1,0 +1,11 @@
+{
+  "taskId": "task-status-command",
+  "criteria": [
+    {
+      "name": "compilation",
+      "weight": 1.0,
+      "description": "The file src/cli/status_eval.rs is created, registered in src/cli/mod.rs, and compiling successfully with cargo check.",
+      "groundTruth": "Compiling status_eval.rs with correct imports from config and store modules."
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "taskId": "task-bug-hunt",
+  "criteria": [
+    {
+      "name": "correct_file",
+      "weight": 0.30,
+      "description": "Identifies the correct file where sanitize_fts_query is defined (src/store/fts.rs).",
+      "groundTruth": "src/store/fts.rs"
+    },
+    {
+      "name": "sanitization_logic",
+      "weight": 0.40,
+      "description": "Explains how the query is sanitized by filtering out FTS5 operator characters (*, ^, \", (, ), :, ;, -, +) and wrapping each word/token in double quotes.",
+      "groundTruth": "Strips characters (*, ^, \", (, ), :, ;, -, +) and quotes remaining tokens/words."
+    },
+    {
+      "name": "empty_query_handling",
+      "weight": 0.30,
+      "description": "Explains that if the entire query consists of special characters, sanitize_fts_query returns an empty string, and search_sparse handles this by returning an empty vector immediately.",
+      "groundTruth": "It returns an empty string, and search_sparse returns an empty vector immediately to avoid executing an FTS5 MATCH on an empty string."
+    }
+  ]
+}

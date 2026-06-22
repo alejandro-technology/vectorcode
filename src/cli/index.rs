@@ -115,27 +115,30 @@ pub async fn execute(args: &IndexArgs, project_path: &std::path::Path, quiet: bo
             }
         };
 
-    let actual_dims = embedder.probe_dimensions().await.unwrap_or_else(|_| embedder.dimensions());
+    let actual_dims = embedder
+        .probe_dimensions()
+        .await
+        .unwrap_or_else(|_| embedder.dimensions());
 
-    if !args.full {
-        if index_meta.dimensions != actual_dims || index_meta.provider != config.provider.name {
-            if !quiet {
-                eprintln!(
-                    "Embedding provider or dimensions changed (was: {}/{}, now: {}/{}).\n\
-                     Recreating vector index automatically. Existing files and graph will be preserved.",
-                    index_meta.provider, index_meta.dimensions,
-                    config.provider.name, actual_dims
-                );
-            }
-            db.recreate_vector_index(actual_dims)?;
-            
-            // Also update the index metadata to reflect the new provider/model
-            let mut updated_meta = index_meta.clone();
-            updated_meta.provider = config.provider.name.clone();
-            updated_meta.model = embedder.model_name().to_string();
-            updated_meta.dimensions = actual_dims;
-            meta::write_index_meta(db.conn(), &updated_meta)?;
+    if !args.full
+        && (index_meta.dimensions != actual_dims || index_meta.provider != config.provider.name)
+    {
+        if !quiet {
+            eprintln!(
+                "Embedding provider or dimensions changed (was: {}/{}, now: {}/{}).\n\
+                 Recreating vector index automatically. Existing files and graph will be preserved.",
+                index_meta.provider, index_meta.dimensions,
+                config.provider.name, actual_dims
+            );
         }
+        db.recreate_vector_index(actual_dims)?;
+
+        // Also update the index metadata to reflect the new provider/model
+        let mut updated_meta = index_meta.clone();
+        updated_meta.provider = config.provider.name.clone();
+        updated_meta.model = embedder.model_name().to_string();
+        updated_meta.dimensions = actual_dims;
+        meta::write_index_meta(db.conn(), &updated_meta)?;
     }
 
     // Create indexer and run

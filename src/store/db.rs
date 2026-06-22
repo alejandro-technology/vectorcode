@@ -239,22 +239,22 @@ impl Database {
     /// to re-embed all existing chunks.
     pub fn recreate_vector_index(&self, new_dims: u32) -> Result<(), VectorCodeError> {
         let tx = self.conn.unchecked_transaction()?;
-        
+
         // Drop existing vector mapping and sqlite-vec table
         tx.execute_batch(
             "DROP TABLE IF EXISTS chunk_vec_map;
-             DROP TABLE IF EXISTS vec_chunks;"
+             DROP TABLE IF EXISTS vec_chunks;",
         )?;
-        
+
         // Recreate the chunk mapping table
         tx.execute_batch(
             "CREATE TABLE chunk_vec_map (
                 chunk_id TEXT PRIMARY KEY,
                 vec_rowid INTEGER NOT NULL UNIQUE,
                 FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
-            );"
+            );",
         )?;
-        
+
         // Recreate the sqlite-vec table with the new dimensions
         let vec_sql = format!(
             "CREATE VIRTUAL TABLE vec_chunks USING vec0(\
@@ -262,13 +262,13 @@ impl Database {
             )"
         );
         let _ = tx.execute_batch(&vec_sql);
-        
+
         // Update the metadata
         tx.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('embedding_dims', ?1)",
             [new_dims.to_string().as_str()],
         )?;
-        
+
         tx.commit()?;
         Ok(())
     }

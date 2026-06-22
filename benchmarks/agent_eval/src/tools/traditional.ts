@@ -127,6 +127,7 @@ export class TraditionalProvider implements ToolProvider {
     try {
       const { stdout } = await execFileAsync('rg', cmdArgs, { cwd: workspaceRoot });
       const lines = stdout.split('\n').map(l => l.trim()).filter(Boolean);
+      lines.sort((a, b) => a.localeCompare(b));
       if (lines.length === 0) {
         return `No results found for query: '${query}'`;
       }
@@ -181,8 +182,9 @@ export class TraditionalProvider implements ToolProvider {
     try {
       const { stdout } = await execFileAsync('find', cmdArgs, { cwd: workspaceRoot });
       const lines = stdout.split('\n').map(l => l.trim()).filter(Boolean);
+      lines.sort((a, b) => a.localeCompare(b));
       if (lines.length === 0) {
-        return `No files found matching pattern: '${pattern}'`;
+        return `No results found for pattern: '${pattern}'`;
       }
 
       const limit = 50;
@@ -244,6 +246,7 @@ export class TraditionalProvider implements ToolProvider {
       }
 
       const entries = fs.readdirSync(dirPath);
+      entries.sort((a, b) => a.localeCompare(b));
       let out = `Directory: ${path.relative(workspaceRoot, dirPath) || '.'}\n\n`;
       out += `Name`.padEnd(40) + ` | ` + `Type`.padEnd(10) + ` | ` + `Size (bytes)\n`;
       out += `-`.repeat(70) + `\n`;

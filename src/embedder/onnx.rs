@@ -27,10 +27,10 @@ pub struct OnnxEmbedder {
 
 impl OnnxEmbedder {
     /// Model name constant.
-    pub const MODEL_NAME: &'static str = "nomic-embed-text-v1.5";
+    pub const MODEL_NAME: &'static str = "all-MiniLM-L6-v2";
 
     /// Output dimensions.
-    pub const DIMENSIONS: u32 = 768;
+    pub const DIMENSIONS: u32 = 384;
 
     /// Maximum token length.
     pub const MAX_TOKENS: u32 = 512;
@@ -382,9 +382,9 @@ mod tests {
 
     #[test]
     fn onnx_embedder_metadata_constants() {
-        assert_eq!(OnnxEmbedder::DIMENSIONS, 768);
+        assert_eq!(OnnxEmbedder::DIMENSIONS, 384);
         assert_eq!(OnnxEmbedder::MAX_TOKENS, 512);
-        assert_eq!(OnnxEmbedder::MODEL_NAME, "nomic-embed-text-v1.5");
+        assert_eq!(OnnxEmbedder::MODEL_NAME, "all-MiniLM-L6-v2");
     }
 
     #[test]

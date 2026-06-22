@@ -1,0 +1,22 @@
+{
+  "name": "vectorcode-agent-eval",
+  "version": "1.0.0",
+  "description": "Agent Evaluation Harness for VectorCode",
+  "main": "dist/harness.js",
+  "type": "module",
+  "scripts": {
+    "eval": "tsx src/harness.ts",
+    "test:plumbing": "tsx src/harness.ts --dry-run"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.28.0",
+    "@modelcontextprotocol/sdk": "^0.6.0",
+    "dotenv": "^16.4.5",
+    "openai": "^4.56.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.9",
+    "tsx": "^4.15.7",
+    "typescript": "^5.5.2"
+  }
+}

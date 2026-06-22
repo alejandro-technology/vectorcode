@@ -353,8 +353,6 @@ This section tracks the ongoing validation and ROI metrics of VectorCode across 
 | Fase | Descripción | Métrica Principal | Resultado |
 | ---- | ----------- | ----------------- | --------- |
 | 1 | Precisión IR y Rendimiento | P@1, P@3, P@5, Latencia | [Status](docs/STATUS.md) |
-| 2 | Ahorro de Tokens (Agente E2E) | Reducción de Input Tokens vs Baseline | [Status](docs/STATUS.md) |
-| 3 | Saturación de Contexto (Context Bloat) | Puntuación del AI Judge | [Status](docs/STATUS.md) |
 
 ### How to verify these numbers
 
@@ -386,36 +384,6 @@ This section tracks the ongoing validation and ROI metrics of VectorCode across 
 
 > 3 iteraciones × 50 queries cada una. Resultados: mediana a través de iteraciones.
 > `VECTORCODE_MODEL=nomic-embed-text` para cambiar modelo en benchmarks. Re-ejecutable vía `bash scripts/verify-baseline.sh` (regression gate, <30s, sin red).
-
-### Fase 2: Ahorro de Tokens (Agente E2E)
-
-**Objetivo:** Validar que un agente real (`kimi-k2.6`) consuma menos tokens y cometa menos errores usando VectorCode vs herramientas clásicas (`grep`/`find`).
-
-**Metodología:** Simulador de agente ReAct en Python usando la API de OpenCode Go. El agente busca convenciones en `install.rs` para crear `status.rs`.
-
-| Modelo | Brazo A (Bash/Grep) | Brazo B (VectorCode) | Mejora |
-| ------ | ------------------- | -------------------- | ------ |
-| **mimo-v2.5-pro (high effort)** | 252,531 tokens | 98,197 tokens | **-61.1%** |
-| **qwen3.7-plus** | 106,896 tokens | 43,434 tokens | **-59.4%** |
-| **kimi-k2.6** | 222,893 tokens | 154,248 tokens | **-30.8%** |
-| **minimax-m3** | 12,552 tokens | 19,688 tokens | +56.9%* |
-
-> * **Análisis Crítico (Fase 2):** Con la introducción del nuevo parser/outliner AST (`vec_outline`), resolvimos exitosamente la "ansiedad exploratoria" que afectaba a modelos de razonamiento profundo como **mimo-v2.5-pro**, logrando un ahorro masivo de **-61.1% de tokens** (comparado con el +24.2% de exceso de la versión anterior). **qwen3.7-plus** también demostró una excelente sinergia con la nueva tool, reduciendo el consumo en un **-59.4%**. Minimax-m3 fue la única excepción, ya que en este intento realizó búsquedas de outline redundantes para validar su propuesta de código. Esto confirma que `vec_outline` es la pieza que faltaba para un UX eficiente de agentes en archivos individuales.
-
-### Fase 3: Saturación de Contexto (Context Bloat)
-
-**Objetivo:** Demostrar que VectorCode evita el "Context Bloat" y la saturación de memoria ("Lost in the Middle") en preguntas arquitectónicas globales.
-
-**Metodología:** Agente ReAct responde cómo funciona el sistema de embeddings. El Brazo A usa `bash` y `read_file`. El Brazo B usa *exclusivamente* `vec_search` sin poder leer archivos enteros.
-
-| Modelo | Brazo A (Bash/Grep) | Brazo B (VectorCode) | Mejora |
-| ------ | ------------------- | -------------------- | ------ |
-| **minimax-m3** | 24,550 tokens | 36,211 tokens | +47.5% |
-| **mimo-v2.5-pro (high effort)** | 82,755 tokens | 154,865 tokens | +87.1% |
-| **qwen3.7-plus** | 46,105 tokens | 149,581 tokens | +224.4% |
-| **kimi-k2.6** | 42,836 tokens | 388,652 tokens | +807.3% |
-
-> * **Análisis Crítico (Fase 3):** En esta iteración de la Fase 3, observamos un incremento en los tokens acumulados para el Brazo B. Esto se debe a una decisión de diseño de la versión V2: el límite de truncamiento para los resultados de `vec_search` se elevó a **15,000 caracteres** (aproximadamente 3,750 tokens por llamada) para entregar fragmentos de código más completos y evitar respuestas imprecisas. Al realizar múltiples consultas semánticas de forma secuencial, el historial acumulativo de ReAct duplicó el contexto en cada paso de la conversación. Esto subraya el trade-off clásico en RAG: fragmentos más amplios aseguran la comprensión del modelo, pero incrementan exponencialmente el costo de tokens en loops ReAct de múltiples turnos.
 
 ## Architecture
 

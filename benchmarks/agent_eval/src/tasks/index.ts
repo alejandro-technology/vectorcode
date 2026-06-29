@@ -1,14 +1,5 @@
-import { taskSymbolLookup } from './symbol-lookup.js';
-import { taskArchTrace } from './arch-trace.js';
-import { taskBugHunt } from './bug-hunt.js';
-import { taskStatusCommand } from './status-command.js';
-import { taskRefactorPlan } from './refactor-plan.js';
-import { Task } from '../types.js';
+import { vectorcodeTasks } from './vectorcode/index.js';
 
-export const tasks: Task[] = [
-  taskSymbolLookup,
-  taskArchTrace,
-  taskBugHunt,
-  taskStatusCommand,
-  taskRefactorPlan
-];
+// Backward-compatible alias — Phase D will add corpus-aware getTasksForCorpus()
+export const tasks = vectorcodeTasks;
+export { vectorcodeTasks };

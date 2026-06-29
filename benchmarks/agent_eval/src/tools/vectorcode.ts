@@ -10,7 +10,7 @@ export class VectorCodeProvider implements ToolProvider {
   private transport: StdioClientTransport | null = null;
   private tools: ToolDefinition[] = [];
 
-  constructor(private binPath?: string) {}
+  constructor(private binPath?: string, private workspaceDir?: string) {}
 
   async initialize(): Promise<void> {
     const resolvedBin = this.binPath || process.env.VECTORCODE_BIN || path.resolve('../../target/debug/vectorcode');
@@ -21,7 +21,8 @@ export class VectorCodeProvider implements ToolProvider {
     this.transport = new StdioClientTransport({
       command: resolvedBin,
       args: ['serve', '--mcp'],
-      env: { ...process.env } as any
+      env: { ...process.env } as any,
+      cwd: this.workspaceDir,
     });
 
     this.client = new Client(

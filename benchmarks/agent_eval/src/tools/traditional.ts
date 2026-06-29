@@ -3,14 +3,6 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { ToolProvider, ToolDefinition } from './types.js';
 
-const workspaceRoot = path.resolve(process.cwd(), '../../');
-
-function resolvePath(p?: string): string {
-  if (!p) return workspaceRoot;
-  if (path.isAbsolute(p)) return p;
-  return path.resolve(workspaceRoot, p);
-}
-
 function execFileAsync(file: string, args: string[], options: { cwd?: string } = {}): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     execFile(file, args, options, (error, stdout, stderr) => {
@@ -76,9 +68,19 @@ const TOOLS: ToolDefinition[] = [
 
 export class TraditionalProvider implements ToolProvider {
   readonly name = 'traditional' as const;
+  private workspaceDir: string;
+
+  constructor(workspaceDir: string) {
+    this.workspaceDir = workspaceDir;
+  }
+
+  private resolvePath(p?: string): string {
+    if (!p) return this.workspaceDir;
+    if (path.isAbsolute(p)) return p;
+    return path.resolve(this.workspaceDir, p);
+  }
 
   async initialize(): Promise<void> {
-    // No-op for traditional provider
     return Promise.resolve();
   }
 
@@ -102,7 +104,6 @@ export class TraditionalProvider implements ToolProvider {
   }
 
   async shutdown(): Promise<void> {
-    // No-op for traditional provider
     return Promise.resolve();
   }
 
@@ -111,9 +112,9 @@ export class TraditionalProvider implements ToolProvider {
     if (!query) {
       throw new Error('grep tool requires a query parameter');
     }
-    const searchPath = resolvePath(args.path);
+    const searchPath = this.resolvePath(args.path);
     const flagArgs = args.flags ? args.flags.trim().split(/\s+/) : [];
-    
+
     const cmdArgs = [
       '--color=never',
       '--line-number',
@@ -125,7 +126,7 @@ export class TraditionalProvider implements ToolProvider {
     ];
 
     try {
-      const { stdout } = await execFileAsync('rg', cmdArgs, { cwd: workspaceRoot });
+      const { stdout } = await execFileAsync('rg', cmdArgs, { cwd: this.workspaceDir });
       const lines = stdout.split('\n').map(l => l.trim()).filter(Boolean);
       lines.sort((a, b) => a.localeCompare(b));
       if (lines.length === 0) {
@@ -141,7 +142,7 @@ export class TraditionalProvider implements ToolProvider {
         const secondColon = line.indexOf(':', firstColon + 1);
         if (firstColon !== -1 && secondColon !== -1) {
           const filePath = line.substring(0, firstColon);
-          const relativeFilePath = path.relative(workspaceRoot, filePath);
+          const relativeFilePath = path.relative(this.workspaceDir, filePath);
           const lineNum = line.substring(firstColon + 1, secondColon);
           const content = line.substring(secondColon + 1);
           out += `${i + 1}. ${relativeFilePath}:L${lineNum}\n`;
@@ -166,10 +167,8 @@ export class TraditionalProvider implements ToolProvider {
     if (!pattern) {
       throw new Error('find_files tool requires a pattern parameter');
     }
-    const searchDir = resolvePath(args.path);
-    
-    // Construct standard find arguments:
-    // exclude .git (hidden files/folders), node_modules, and target
+    const searchDir = this.resolvePath(args.path);
+
     const cmdArgs = [
       searchDir,
       '-type', 'f',
@@ -180,7 +179,7 @@ export class TraditionalProvider implements ToolProvider {
     ];
 
     try {
-      const { stdout } = await execFileAsync('find', cmdArgs, { cwd: workspaceRoot });
+      const { stdout } = await execFileAsync('find', cmdArgs, { cwd: this.workspaceDir });
       const lines = stdout.split('\n').map(l => l.trim()).filter(Boolean);
       lines.sort((a, b) => a.localeCompare(b));
       if (lines.length === 0) {
@@ -191,7 +190,7 @@ export class TraditionalProvider implements ToolProvider {
       const results = lines.slice(0, limit);
       let out = `Found ${lines.length} files matching '${pattern}':\n`;
       for (const file of results) {
-        const relFile = path.relative(workspaceRoot, file);
+        const relFile = path.relative(this.workspaceDir, file);
         out += `${relFile}\n`;
       }
       if (lines.length > limit) {
@@ -208,7 +207,7 @@ export class TraditionalProvider implements ToolProvider {
     if (!relativePath) {
       throw new Error('read_file tool requires a file_path parameter');
     }
-    const filePath = resolvePath(relativePath);
+    const filePath = this.resolvePath(relativePath);
     if (!fs.existsSync(filePath)) {
       return Promise.resolve(`Error: File not found at ${relativePath}`);
     }
@@ -220,7 +219,7 @@ export class TraditionalProvider implements ToolProvider {
       const endLine = args.end_line ? Math.min(lines.length, args.end_line) : lines.length;
 
       const slicedLines = lines.slice(startLine - 1, endLine);
-      let out = `File: ${path.relative(workspaceRoot, filePath)} (lines ${startLine}-${endLine} of ${lines.length})\n`;
+      let out = `File: ${path.relative(this.workspaceDir, filePath)} (lines ${startLine}-${endLine} of ${lines.length})\n`;
       out += `--------------------------------------------------\n`;
       for (let i = 0; i < slicedLines.length; i++) {
         const lineNum = startLine + i;
@@ -234,7 +233,7 @@ export class TraditionalProvider implements ToolProvider {
   }
 
   private handleListDir(args: Record<string, any>): Promise<string> {
-    const dirPath = resolvePath(args.path);
+    const dirPath = this.resolvePath(args.path);
     if (!fs.existsSync(dirPath)) {
       return Promise.resolve(`Error: Directory not found at ${args.path || '.'}`);
     }
@@ -247,7 +246,7 @@ export class TraditionalProvider implements ToolProvider {
 
       const entries = fs.readdirSync(dirPath);
       entries.sort((a, b) => a.localeCompare(b));
-      let out = `Directory: ${path.relative(workspaceRoot, dirPath) || '.'}\n\n`;
+      let out = `Directory: ${path.relative(this.workspaceDir, dirPath) || '.'}\n\n`;
       out += `Name`.padEnd(40) + ` | ` + `Type`.padEnd(10) + ` | ` + `Size (bytes)\n`;
       out += `-`.repeat(70) + `\n`;
       for (const entry of entries) {

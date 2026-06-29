@@ -52,3 +52,25 @@ export interface JudgeResult {
   overallReasoning: string;
 }
 
+export interface CorpusConfig {
+  id: string;
+  sourcePath: string;
+  needsCloning: boolean;
+  needsIndexing: boolean;
+  vectorcodeConfig?: {
+    provider: string;
+    model: string;
+    dims: number;
+  };
+}
+
+export interface ExperimentConfig {
+  corpora: string[];
+  models: string[];
+  arms: ('vectorcode' | 'traditional')[];
+  repetitions: number;
+  maxSteps: number;
+  timeoutMs: number;
+  temperature: number;
+}
+

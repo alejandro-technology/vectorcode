@@ -1,4 +1,4 @@
-import { Task } from '../types.js';
+import { Task } from '../../types.js';
 
 export const taskArchTrace: Task = {
   id: 'task-arch-trace',

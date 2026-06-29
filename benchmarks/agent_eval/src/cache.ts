@@ -32,25 +32,25 @@ export type CacheMode = 'cached' | 'live' | 'update-cache' | 'dry-run';
 const workspaceRoot = path.resolve(process.cwd(), '../../');
 const cacheDir = path.resolve(process.cwd(), 'cache');
 
-export function getGitSha(): string {
+export function getGitSha(workspaceDir: string = workspaceRoot): string {
   try {
-    return execSync('git rev-parse HEAD', { cwd: workspaceRoot, encoding: 'utf8' }).trim();
+    return execSync('git rev-parse HEAD', { cwd: workspaceDir, encoding: 'utf8' }).trim();
   } catch (e) {
     return 'unknown-sha';
   }
 }
 
-export function isGitDirty(): boolean {
+export function isGitDirty(workspaceDir: string = workspaceRoot): boolean {
   try {
-    const status = execSync('git status --porcelain', { cwd: workspaceRoot, encoding: 'utf8' }).trim();
+    const status = execSync('git status --porcelain', { cwd: workspaceDir, encoding: 'utf8' }).trim();
     if (!status) return false;
-    
+
     // Only care about changes under src/, benchmarks/agent_eval/src/, or Cargo.toml
     const lines = status.split('\n').filter(Boolean);
     const codeChanges = lines.filter(line => {
       const filePath = line.slice(3).trim();
-      return filePath.startsWith('src/') || 
-             filePath.startsWith('benchmarks/agent_eval/src/') || 
+      return filePath.startsWith('src/') ||
+             filePath.startsWith('benchmarks/agent_eval/src/') ||
              filePath === 'Cargo.toml';
     });
     return codeChanges.length > 0;

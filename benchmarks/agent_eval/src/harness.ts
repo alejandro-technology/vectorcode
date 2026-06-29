@@ -86,11 +86,12 @@ async function main() {
         }
 
         // Instantiate appropriate tool provider
+        const workspaceDir = path.resolve('../../');
         let toolProvider: ToolProvider;
         if (arm === 'vectorcode') {
-          toolProvider = new VectorCodeProvider(binPath);
+          toolProvider = new VectorCodeProvider(binPath, workspaceDir);
         } else {
-          toolProvider = new TraditionalProvider();
+          toolProvider = new TraditionalProvider(workspaceDir);
         }
 
         const startMs = Date.now();
@@ -112,7 +113,6 @@ async function main() {
           );
 
           // Task Verification & Safe cleanup block (Task 6.2)
-          const workspaceDir = path.resolve('../../'); // Project root
           let wroteFile = false;
           const filePath = path.join(workspaceDir, 'src/cli/status_eval.rs');
 
@@ -145,7 +145,7 @@ async function main() {
             correctness = success ? 1.0 : 0.0;
           } else {
             // Read-only task, use LLM-as-Judge
-            const rubricPath = path.resolve(process.cwd(), `rubrics/${taskId}.json`);
+            const rubricPath = path.resolve(process.cwd(), `rubrics/vectorcode/${taskId}.json`);
             let rubric = { taskId, criteria: [] };
             if (fs.existsSync(rubricPath)) {
               rubric = JSON.parse(fs.readFileSync(rubricPath, 'utf8'));

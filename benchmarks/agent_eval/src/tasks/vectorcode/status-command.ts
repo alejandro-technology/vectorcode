@@ -1,4 +1,4 @@
-import { Task } from '../types.js';
+import { Task } from '../../types.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';

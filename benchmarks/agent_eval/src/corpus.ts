@@ -120,7 +120,7 @@ function getBinPath(): string {
   if (process.env.VECTORCODE_BIN) {
     return path.resolve(process.env.VECTORCODE_BIN);
   }
-  return path.resolve(process.cwd(), '../../target/debug/vectorcode');
+  return path.resolve(process.cwd(), '../../target/release/vectorcode');
 }
 
 /**
@@ -223,11 +223,11 @@ export class CorpusManager {
     console.log(`[CorpusManager] Initializing mock-mini corpus at ${fixturesDir}...`);
 
     // Run vectorcode init --provider mock
-    await execFileAsync(bin, ['init', '--provider', 'mock'], { cwd: fixturesDir });
+    await execFileAsync(bin, ['--project-path', '.', 'init', '--provider', 'mock'], { cwd: fixturesDir });
     console.log(`[CorpusManager] vectorcode init --provider mock completed`);
 
     // Run vectorcode index
-    await execFileAsync(bin, ['index'], { cwd: fixturesDir });
+    await execFileAsync(bin, ['--project-path', '.', 'index'], { cwd: fixturesDir });
     console.log(`[CorpusManager] vectorcode index completed`);
 
     return fixturesDir;
@@ -260,9 +260,9 @@ export class CorpusManager {
       // Run vectorcode init + index in the repo workspace
       const vcDir = path.join(repoDir, '.vectorcode');
       if (!fs.existsSync(vcDir)) {
-        await execFileAsync(bin, ['init'], { cwd: repoDir });
+        await execFileAsync(bin, ['--project-path', '.', 'init'], { cwd: repoDir });
       }
-      await execFileAsync(bin, ['index'], { cwd: repoDir });
+      await execFileAsync(bin, ['--project-path', '.', 'index'], { cwd: repoDir });
       console.log(`[CorpusManager] ${repoName} indexed`);
     }
 

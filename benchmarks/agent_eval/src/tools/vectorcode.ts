@@ -13,7 +13,7 @@ export class VectorCodeProvider implements ToolProvider {
   constructor(private binPath?: string, private workspaceDir?: string) {}
 
   async initialize(): Promise<void> {
-    const resolvedBin = this.binPath || process.env.VECTORCODE_BIN || path.resolve('../../target/debug/vectorcode');
+    const resolvedBin = this.binPath || process.env.VECTORCODE_BIN || path.resolve('../../target/release/vectorcode');
     if (!fs.existsSync(resolvedBin)) {
       throw new Error(`VectorCode binary not found at: ${resolvedBin}. Please compile it using 'cargo build' first.`);
     }

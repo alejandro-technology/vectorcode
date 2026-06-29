@@ -23,14 +23,14 @@ export interface LLMResponse {
   stopReason: 'end_turn' | 'tool_use' | 'max_tokens';
 }
 
-export type LLMCallFn = (messages: ChatMessage[]) => Promise<LLMResponse>;
+export type LLMCallFn = (messages: ChatMessage[], systemPrompt?: string) => Promise<LLMResponse>;
 
-function mapMessagesToOpenAI(messages: ChatMessage[]): OpenAI.ChatCompletionMessageParam[] {
+function mapMessagesToOpenAI(messages: ChatMessage[], systemPrompt?: string): OpenAI.ChatCompletionMessageParam[] {
   const result: OpenAI.ChatCompletionMessageParam[] = [];
-  
+
   result.push({
     role: 'system',
-    content: 'You are an elite coding agent with access to VectorCode MCP tools. Solve the task step-by-step. Use tools when needed.'
+    content: systemPrompt || 'You are an elite coding agent with access to VectorCode MCP tools. Solve the task step-by-step. Use tools when needed.'
   });
   
   for (const msg of messages) {
@@ -136,14 +136,15 @@ function mapMessagesToAnthropic(messages: ChatMessage[]): Anthropic.MessageParam
 async function openaiCall(
   messages: ChatMessage[],
   config: AgentConfig,
-  tools: ToolDefinition[]
+  tools: ToolDefinition[],
+  systemPrompt?: string
 ): Promise<LLMResponse> {
   const apiKey = process.env.OPENCODE_API_KEY || process.env.OPENAI_API_KEY || 'dummy';
   const client = new OpenAI({
     apiKey,
     baseURL: 'https://opencode.ai/zen/go/v1'
   });
-  
+
   const openaiTools: OpenAI.ChatCompletionTool[] = tools.map(t => ({
     type: 'function',
     function: {
@@ -152,8 +153,8 @@ async function openaiCall(
       parameters: t.inputSchema
     }
   }));
-  
-  const openaiMessages = mapMessagesToOpenAI(messages);
+
+  const openaiMessages = mapMessagesToOpenAI(messages, systemPrompt);
   
   const response = await client.chat.completions.create({
     model: config.model,
@@ -204,27 +205,28 @@ async function openaiCall(
 async function anthropicCall(
   messages: ChatMessage[],
   config: AgentConfig,
-  tools: ToolDefinition[]
+  tools: ToolDefinition[],
+  systemPrompt?: string
 ): Promise<LLMResponse> {
   const apiKey = process.env.OPENCODE_API_KEY || process.env.ANTHROPIC_API_KEY || 'dummy';
   const client = new Anthropic({
     apiKey,
     baseURL: 'https://opencode.ai/zen/go'
   });
-  
+
   const anthropicTools: Anthropic.Tool[] = tools.map(t => ({
     name: t.name,
     description: t.description,
     input_schema: t.inputSchema as any
   }));
-  
+
   const anthropicMessages = mapMessagesToAnthropic(messages);
-  
+
   const response = await client.messages.create({
     model: config.model,
     max_tokens: 4000,
     temperature: config.temperature ?? 0,
-    system: 'You are an elite coding agent with access to VectorCode MCP tools. Solve the task step-by-step. Use tools when needed.',
+    system: systemPrompt || 'You are an elite coding agent with access to VectorCode MCP tools. Solve the task step-by-step. Use tools when needed.',
     messages: anthropicMessages,
     tools: anthropicTools.length > 0 ? anthropicTools : undefined
   });
@@ -323,6 +325,14 @@ export async function reactLoop(
     { role: 'user', content: task.prompt }
   ];
 
+  // Build system prompt with optional targetRepos hint
+  let systemPrompt: string | undefined;
+  if (task.targetRepos && task.targetRepos.length > 0 && task.targetRepos.length < 3) {
+    systemPrompt = `You are an elite coding agent with access to VectorCode MCP tools. Solve the task step-by-step. Use tools when needed.
+
+IMPORTANT: When using vec_search, always pass the "workspaces" parameter with value ${JSON.stringify(task.targetRepos)} to scope your search to the relevant repositories.`;
+  }
+
   let isReplaying = cacheMode === 'cached' || (cacheMode === 'live' && cachedEntries.length > 0);
   const newEntries: CacheEntry[] = [];
 
@@ -362,7 +372,7 @@ export async function reactLoop(
           response = simulateDryRunResponse(task, steps, provider.listTools());
           tokens = { input: 150, output: 50 };
         } else {
-          response = await llmCall(messages);
+          response = await llmCall(messages, systemPrompt);
           tokens = response.tokens;
         }
 
@@ -499,11 +509,11 @@ export async function runAgent(
   const cacheManager = new CacheManager();
   const tools = provider.listTools();
 
-  const llmCall = async (messages: ChatMessage[]): Promise<LLMResponse> => {
+  const llmCall = async (messages: ChatMessage[], systemPrompt?: string): Promise<LLMResponse> => {
     if (config.provider === 'openai') {
-      return openaiCall(messages, config, tools);
+      return openaiCall(messages, config, tools, systemPrompt);
     } else if (config.provider === 'anthropic') {
-      return anthropicCall(messages, config, tools);
+      return anthropicCall(messages, config, tools, systemPrompt);
     } else {
       throw new Error(`Unsupported provider: ${config.provider}`);
     }

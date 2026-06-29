@@ -262,9 +262,7 @@ fn resolve_provider_defaults(
             dims.unwrap_or(768),
         ),
         ProviderArg::Mock => (
-            model
-                .clone()
-                .unwrap_or_else(|| "mock-embedder".to_string()),
+            model.clone().unwrap_or_else(|| "mock-embedder".to_string()),
             dims.unwrap_or(384),
         ),
     }

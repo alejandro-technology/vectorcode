@@ -18,11 +18,15 @@ export class VectorCodeProvider implements ToolProvider {
       throw new Error(`VectorCode binary not found at: ${resolvedBin}. Please compile it using 'cargo build' first.`);
     }
 
+    const args = ['serve', '--mcp'];
+    if (this.workspaceDir) {
+      args.push('--project-path', this.workspaceDir);
+    }
+
     this.transport = new StdioClientTransport({
       command: resolvedBin,
-      args: ['serve', '--mcp'],
+      args,
       env: { ...process.env } as any,
-      cwd: this.workspaceDir,
     });
 
     this.client = new Client(

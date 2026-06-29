@@ -21,6 +21,48 @@ pub struct McpHandler {
 }
 
 impl McpHandler {
+    /// Filter inner states by optional workspace name list.
+    /// Returns an error listing available workspaces if the filter matches nothing.
+    fn filter_by_workspaces(
+        states: Vec<AppInnerState>,
+        workspaces: &Option<Vec<String>>,
+    ) -> Result<Vec<AppInnerState>, String> {
+        let Some(names) = workspaces else {
+            return Ok(states);
+        };
+        if names.is_empty() {
+            return Ok(states);
+        }
+
+        let available: Vec<String> = states
+            .iter()
+            .filter_map(|s| {
+                s.project_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+            })
+            .collect();
+
+        let filtered: Vec<AppInnerState> = states
+            .into_iter()
+            .filter(|s| {
+                s.project_path
+                    .file_name()
+                    .map(|n| names.contains(&n.to_string_lossy().to_string()))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        if filtered.is_empty() {
+            return Err(format!(
+                "No workspaces matched the filter {:?}. Available workspaces: {:?}",
+                names, available
+            ));
+        }
+
+        Ok(filtered)
+    }
+
     async fn get_all_inner_states(&self) -> Result<Vec<AppInnerState>, String> {
         {
             let workspaces = self.state.workspaces.read().await;
@@ -102,18 +144,22 @@ pub struct VecSearchParams {
     pub mode: Option<String>,
     /// Routing strategy: "auto" (heuristic), "graph" (force graph), "hybrid" (force hybrid), or None (default)
     pub routing: Option<String>,
+    /// Optional: filter to specific workspace names (e.g., repo names). If omitted, searches all workspaces.
+    pub workspaces: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct VecStatusParams {
-    /// Reserved for future use
-    pub reserved: Option<bool>,
+    /// Optional: filter to specific workspace names (e.g., repo names). If omitted, shows all workspaces.
+    pub workspaces: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct VecReindexParams {
     /// Set to true to drop the index and start fresh
     pub full: bool,
+    /// Optional: filter to specific workspace names (e.g., repo names). If omitted, reindexes all workspaces.
+    pub workspaces: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -182,7 +228,8 @@ impl McpHandler {
             return Err("Query cannot be empty".to_string());
         }
 
-        let inner_states = self.get_all_inner_states().await?;
+        let inner_states =
+            Self::filter_by_workspaces(self.get_all_inner_states().await?, &p.workspaces)?;
 
         // Determine effective mode based on routing param
         let mode: SearchMode = if let Some(ref routing) = p.routing {
@@ -364,8 +411,10 @@ impl McpHandler {
         description = "Get the current status of the vector index across all initialized workspaces.",
         annotations(read_only_hint = true)
     )]
-    async fn vec_status(&self, _params: Parameters<VecStatusParams>) -> Result<String, String> {
-        let inner_states = self.get_all_inner_states().await?;
+    async fn vec_status(&self, params: Parameters<VecStatusParams>) -> Result<String, String> {
+        let p = params.0;
+        let inner_states =
+            Self::filter_by_workspaces(self.get_all_inner_states().await?, &p.workspaces)?;
         let mut outputs = Vec::new();
 
         for inner in inner_states {
@@ -408,7 +457,8 @@ impl McpHandler {
     )]
     async fn vec_reindex(&self, params: Parameters<VecReindexParams>) -> Result<String, String> {
         let p = params.0;
-        let inner_states = self.get_all_inner_states().await?;
+        let inner_states =
+            Self::filter_by_workspaces(self.get_all_inner_states().await?, &p.workspaces)?;
         let mut outputs = Vec::new();
 
         for inner_state in inner_states {

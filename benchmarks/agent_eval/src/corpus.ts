@@ -80,8 +80,9 @@ function parseCorpusToml(tomlPath: string): ParsedCorpusToml {
 
       const value = parseTomlValue(rawVal);
 
-      if (currentSubSection && result[currentSection].repos) {
-        const repo = result[currentSection].repos[result[currentSection].repos.length - 1];
+      if (currentSubSection && result[currentSection]?.repos) {
+        const repos = result[currentSection].repos!;
+        const repo = repos[repos.length - 1];
         (repo as any)[key] = value;
       } else if (currentSection) {
         (result[currentSection] as any)[key] = value;
@@ -256,15 +257,15 @@ export class CorpusManager {
         console.log(`[CorpusManager] Cloning ${repo.url} into ${repoDir}...`);
         await this.cloneRepoWithRetry(repo.url, repoDir, repo.sparse_paths);
       }
-
-      // Run vectorcode init + index in the repo workspace
-      const vcDir = path.join(repoDir, '.vectorcode');
-      if (!fs.existsSync(vcDir)) {
-        await execFileAsync(bin, ['--project-path', '.', 'init', '--provider', 'onnx'], { cwd: repoDir });
-      }
-      await execFileAsync(bin, ['--project-path', '.', 'index'], { cwd: repoDir });
-      console.log(`[CorpusManager] ${repoName} indexed`);
     }
+
+    // Single init + index at the parent corpus directory (not per-repo)
+    const vcDir = path.join(corpusDir, '.vectorcode');
+    if (!fs.existsSync(vcDir)) {
+      await execFileAsync(bin, ['init', '--provider', 'onnx'], { cwd: corpusDir });
+    }
+    await execFileAsync(bin, ['index', '--full'], { cwd: corpusDir });
+    console.log(`[CorpusManager] Mini corpus indexed at ${corpusDir}`);
 
     return corpusDir;
   }

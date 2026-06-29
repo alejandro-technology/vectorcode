@@ -70,7 +70,7 @@ function parseCLIArgs(args: string[]): CLIArgs {
     : [corpusArg];
 
   // Validate repetitions
-  const repetitions = repetitionsArg ? parseInt(repetitionsArg, 10) : 1;
+  const repetitions = repetitionsArg ? parseInt(repetitionsArg, 10) : 5;
   if (isNaN(repetitions) || repetitions < 1) {
     console.error(`[Harness] Error: --repetitions must be ≥ 1, got '${repetitionsArg}'`);
     process.exit(1);

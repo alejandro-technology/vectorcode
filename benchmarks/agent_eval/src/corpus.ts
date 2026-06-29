@@ -260,7 +260,7 @@ export class CorpusManager {
       // Run vectorcode init + index in the repo workspace
       const vcDir = path.join(repoDir, '.vectorcode');
       if (!fs.existsSync(vcDir)) {
-        await execFileAsync(bin, ['--project-path', '.', 'init'], { cwd: repoDir });
+        await execFileAsync(bin, ['--project-path', '.', 'init', '--provider', 'onnx'], { cwd: repoDir });
       }
       await execFileAsync(bin, ['--project-path', '.', 'index'], { cwd: repoDir });
       console.log(`[CorpusManager] ${repoName} indexed`);

@@ -261,6 +261,12 @@ fn resolve_provider_defaults(
                 .unwrap_or_else(|| "nvidia/llama-nemotron-embed-vl-1b-v2:free".to_string()),
             dims.unwrap_or(768),
         ),
+        ProviderArg::Mock => (
+            model
+                .clone()
+                .unwrap_or_else(|| "mock-embedder".to_string()),
+            dims.unwrap_or(384),
+        ),
     }
 }
 
@@ -298,7 +304,7 @@ fn api_key_env_var(provider: &ProviderArg) -> &'static str {
         ProviderArg::Gemini => "GEMINI_API_KEY",
         ProviderArg::Openai => "OPENAI_API_KEY",
         ProviderArg::Openrouter => "OPENROUTER_API_KEY",
-        ProviderArg::Onnx | ProviderArg::Ollama => "",
+        ProviderArg::Onnx | ProviderArg::Ollama | ProviderArg::Mock => "",
     }
 }
 
@@ -435,6 +441,15 @@ name = "openrouter"
 
 [provider.openrouter]
 api_key_from_env = true
+model = "{model}"
+dimensions = {dims}
+"#
+        ),
+        ProviderArg::Mock => format!(
+            r#"[provider]
+name = "mock"
+
+[provider.mock]
 model = "{model}"
 dimensions = {dims}
 "#

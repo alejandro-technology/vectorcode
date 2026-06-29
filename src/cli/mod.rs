@@ -80,6 +80,7 @@ pub enum ProviderArg {
     Ollama,
     Openai,
     Openrouter,
+    Mock,
 }
 
 impl ProviderArg {
@@ -91,6 +92,7 @@ impl ProviderArg {
             Self::Ollama => "ollama",
             Self::Openai => "openai",
             Self::Openrouter => "openrouter",
+            Self::Mock => "mock",
         }
     }
 }

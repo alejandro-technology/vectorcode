@@ -11,7 +11,8 @@ import { judge } from './judge.js';
 import { CorpusManager } from './corpus.js';
 import { latinSquareOrder, alternateArmOrder } from './randomization.js';
 import { analyzeExperiment } from './analysis.js';
-import { TrialResult, ExperimentReport, ExperimentConfig, JudgeResult } from './types.js';
+import { generateReports, generateAggregateReport } from './report.js';
+import { TrialResult, ExperimentReport, ExperimentConfig, AnalysisReport, JudgeResult } from './types.js';
 
 dotenv.config();
 
@@ -131,6 +132,7 @@ async function main() {
 
   const binPath = getBinPath();
   const allTrialResults: TrialResult[] = [];
+  const corpusReportData = new Map<string, { report: ExperimentReport; analysis: AnalysisReport }>();
 
   // ── Stage 2+3+4+5: Per-corpus loop ───────────────────────────────────
   for (const corpus of corpora) {
@@ -360,7 +362,7 @@ async function main() {
       }
     }
 
-    // ── Stage 4: Statistical analysis ──────────────────────────────────
+    // ── Stage 4: Statistical analysis + report generation ─────────────
     if (corpusTrials.length > 0 && repetitions >= 1) {
       console.log(`\n[Harness] Running statistical analysis for corpus: ${corpus}...`);
       const experimentReport: ExperimentReport = {
@@ -373,21 +375,12 @@ async function main() {
         const analysis = analyzeExperiment(experimentReport);
         console.log(`[Harness] Analysis complete: ${analysis.totalComparisons} comparisons, ${analysis.significantCount} significant (α=${analysis.bonferroniAlpha.toFixed(4)})`);
 
-        // Write per-corpus reports
-        const resultsDir = path.resolve(process.cwd(), `results/${corpus}`);
-        if (!fs.existsSync(resultsDir)) {
-          fs.mkdirSync(resultsDir, { recursive: true });
-        }
+        // Generate reports via report module
+        const resultsDir = path.resolve(process.cwd(), 'results');
+        generateReports(experimentReport, analysis, resultsDir, workspaceDir, cacheMode);
 
-        // JSON report: raw trial data
-        const reportPath = path.join(resultsDir, 'agent_eval_report.json');
-        fs.writeFileSync(reportPath, JSON.stringify(experimentReport, null, 2), 'utf8');
-        console.log(`[Harness] Trial data written to: ${reportPath}`);
-
-        // JSON report: statistical analysis
-        const statsPath = path.join(resultsDir, 'statistical_analysis.json');
-        fs.writeFileSync(statsPath, JSON.stringify(analysis, null, 2), 'utf8');
-        console.log(`[Harness] Statistical analysis written to: ${statsPath}`);
+        // Accumulate for aggregate report
+        corpusReportData.set(corpus, { report: experimentReport, analysis });
 
         // Log hypothesis verdicts
         console.log(`\n[Harness] Hypothesis Verdicts (${corpus}):`);
@@ -409,62 +402,14 @@ async function main() {
     }
   }
 
-  // ── Aggregate results (if multiple corpora) ────────────────────────────
-  if (corpora.length > 1 && allTrialResults.length > 0) {
+  // ── Aggregate report (if multiple corpora) ────────────────────────────
+  if (corpusReportData.size > 0) {
     console.log(`\n${'='.repeat(60)}`);
-    console.log(` Aggregate Report (${corpora.length} corpora, ${allTrialResults.length} trials)`);
+    console.log(` Aggregate Report (${corpusReportData.size} corpora, ${allTrialResults.length} trials)`);
     console.log(`${'='.repeat(60)}`);
 
     const resultsDir = path.resolve(process.cwd(), 'results');
-    if (!fs.existsSync(resultsDir)) {
-      fs.mkdirSync(resultsDir, { recursive: true });
-    }
-
-    // Aggregate JSON
-    const aggregateReport = {
-      corpora,
-      totalTrials: allTrialResults.length,
-      generatedAt: new Date().toISOString(),
-    };
-
-    const aggPath = path.join(resultsDir, 'aggregate_report.json');
-    fs.writeFileSync(aggPath, JSON.stringify(aggregateReport, null, 2), 'utf8');
-    console.log(`[Harness] Aggregate report written to: ${aggPath}`);
-  }
-
-  // ── Legacy flat report (backward compat) ───────────────────────────────
-  if (allTrialResults.length > 0) {
-    const resultsDir = path.resolve(process.cwd(), 'results');
-    if (!fs.existsSync(resultsDir)) {
-      fs.mkdirSync(resultsDir, { recursive: true });
-    }
-
-    const reportPath = path.join(resultsDir, 'agent_eval_report.json');
-    fs.writeFileSync(reportPath, JSON.stringify(allTrialResults, null, 2), 'utf8');
-    console.log(`\n[Harness] Flat report written to: ${reportPath}`);
-
-    // Generate markdown report
-    const gitSha = getGitSha();
-    let mdReport = `# Agent Evaluation Report\n\n`;
-    mdReport += `- **Workspace SHA**: \`${gitSha}\`\n`;
-    mdReport += `- **Date**: ${new Date().toISOString()}\n`;
-    mdReport += `- **Mode**: \`${cacheMode}\`\n`;
-    mdReport += `- **Corpora**: ${corpora.join(', ')}\n`;
-    mdReport += `- **Repetitions**: ${repetitions}\n\n`;
-
-    mdReport += `## Summary Table\n\n`;
-    mdReport += `| Corpus | Model | Task | Arm | Rep | Success | Correctness | Steps | Tokens | Duration |\n`;
-    mdReport += `| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n`;
-
-    for (const r of allTrialResults) {
-      const successEmoji = r.success ? '✅' : '❌';
-      const duration = (r.durationMs / 1000).toFixed(2) + 's';
-      mdReport += `| ${r.corpus} | ${r.model} | ${r.taskId} | ${r.arm} | ${r.repetition} | ${successEmoji} | ${r.correctness.toFixed(2)} | ${r.steps} | ${r.tokens.total} | ${duration} |\n`;
-    }
-
-    const mdReportPath = path.join(resultsDir, 'agent_eval_report.md');
-    fs.writeFileSync(mdReportPath, mdReport, 'utf8');
-    console.log(`[Harness] Markdown report written to: ${mdReportPath}`);
+    generateAggregateReport(corpusReportData, resultsDir);
   }
 
   console.log(`\n[Harness] Analysis complete. All done.`);

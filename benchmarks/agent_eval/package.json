@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "eval": "tsx src/harness.ts",
-    "test:plumbing": "tsx src/harness.ts --dry-run"
+    "test:plumbing": "tsx src/harness.ts --corpus=mock-mini --dry-run",
+    "test:plumbing:all": "tsx src/harness.ts --corpus=all --dry-run",
+    "migrate-cache": "tsx scripts/migrate-cache-paths.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.28.0",

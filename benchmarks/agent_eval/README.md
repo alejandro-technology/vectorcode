@@ -36,30 +36,87 @@ The harness supports OpenCode.ai's OpenAI and Anthropic compatible model list:
 
 ## Running the Evaluation
 
+### CLI Arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--corpus=<id>` | `mock-mini` | Corpus to evaluate: `mock-mini`, `mini`, `vectorcode`, or `all` |
+| `--repetitions=<N>` | `1` | Number of repetitions per condition (R≥3 recommended for statistics) |
+| `--timeout=<ms>` | `120000` | Per-trial timeout in milliseconds |
+| `--model=<list>` | All 3 defaults | Comma-separated model IDs to evaluate |
+| `--task=<list>` | All tasks | Comma-separated task IDs to evaluate |
+| `--arm=<list>` | Both arms | `vectorcode`, `traditional`, or both |
+| `--dry-run` | — | Offline plumbing test (no LLM calls) |
+| `--live` | — | Live LLM calls (updates cache) |
+| `--cached` | — | Replay from cache only |
+| `--update-cache` | — | Update cache with fresh LLM calls |
+
 ### 1. Dry Run (Offline / Free Plumbing Check)
 To test the harness piping, MCP tool resolution, and task verification without making any LLM calls or spending tokens:
 ```bash
 npm run test:plumbing
 ```
 
-### 2. Live Run (Real LLM Calls)
-To evaluate the default model (`kimi-k2.6`) on all tasks:
+This runs the mock-mini corpus (2 tasks × 3 models × 2 arms = 12 trials).
+
+To test all corpora (mini corpus requires network access for cloning):
 ```bash
-npm run eval
+npm run test:plumbing:all
 ```
 
-To run a specific model (e.g. `qwen3.7-plus` or `mimo-v2.5-pro`):
+### 2. Live Run (Real LLM Calls)
+To evaluate all corpora with default settings:
+```bash
+npm run eval -- --corpus=all
+```
+
+To evaluate a specific corpus with repetitions:
+```bash
+npm run eval -- --corpus=vectorcode --repetitions=5
+```
+
+To run a specific model (e.g. `qwen3.7-plus`):
 ```bash
 npm run eval -- --model=qwen3.7-plus
 ```
 
-To evaluate a single task (e.g. `task-2-write`):
+To evaluate a single task (e.g. `task-symbol-lookup`):
 ```bash
-npm run eval -- --task=task-2-write
+npm run eval -- --task=task-symbol-lookup
 ```
+
+## Experimental Design
+
+The evaluation uses a fully-crossed factorial design: **2 (arm) × M (model) × C (corpus) × T (tasks) × R (repetitions)**
+
+- **Corpora**: mock-mini (plumbing), mini (primary), vectorcode (self-referential)
+- **Arms**: `vectorcode` (semantic search via MCP) vs `traditional` (ripgrep + find + file read)
+- **Randomization**: Latin square over tasks, arm order alternation across repetitions
+- **Controls**: temperature=0, Bonferroni-corrected hypothesis testing, bootstrap CIs
+
+### Hypotheses
+
+| ID | Hypothesis |
+|----|-----------|
+| H1 | VectorCode arm achieves correctness ≥ Traditional with fewer total tokens |
+| H2 | VectorCode arm completes hard tasks (≥★★★) with fewer tool calls and steps |
+| H3 | VectorCode advantage is larger on cross-module tasks |
+| H4 | VectorCode arm shows lower inter-model variance in correctness |
 
 ## Results and Reports
 
-Each execution saves reports in the `benchmarks/results/` directory:
-- `agent_eval_report.json`: Detailed JSON containing token metrics, steps, duration, and list of tool calls.
-- `agent_eval_report.md`: Markdown summary table for quick comparison.
+Each execution saves per-corpus reports in the `results/<corpus>/` directory:
+- `agent_eval_report.json`: ExperimentReport with full trial data
+- `statistical_analysis.json`: AnalysisReport with Wilcoxon tests, Cohen's d, hypothesis verdicts
+- `agent_eval_report.md`: Human-readable Markdown with summary tables and efficiency ratios
+
+When multiple corpora are evaluated, an `aggregate_report.md` is generated at `results/aggregate_report.md`.
+
+## Cache Migration
+
+If upgrading from a pre-Phase 2 version, migrate cache paths:
+```bash
+npm run migrate-cache
+```
+
+This moves `cache/<model>/<taskId>/<arm>/` → `cache/<model>/<corpus>/<taskId>/<arm>/`.

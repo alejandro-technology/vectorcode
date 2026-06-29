@@ -348,42 +348,42 @@ Parameters:
 
 ## Benchmarks
 
-This section tracks the ongoing validation and ROI metrics of VectorCode across different SDD flow phases.
+Our benchmarking efforts align with formal research terminology for LLM agents and Augmented Retrieval Systems. The project is divided into three major evaluation phases:
 
-| Fase | Descripción | Métrica Principal | Resultado |
-| ---- | ----------- | ----------------- | --------- |
-| 1 | Precisión IR y Rendimiento | P@1, P@3, P@5, Latencia | [Status](docs/STATUS.md) |
+| Phase | Academic Taxonomy | Measurement Focus | Status |
+|-------|-------------------|-------------------|--------|
+| **1** | **Retrieval Evaluation** (Information Retrieval Benchmark) | Quality of the retriever (Recall, Precision, MRR, nDCG). | ✅ **Implemented** |
+| **2** | **End-to-End Agent Evaluation** (Task-Oriented Benchmark) | Agent's efficiency and success rate using tools. | 🚧 *WIP* |
+| **3** | **Context Efficiency Evaluation** (Long-Context Efficiency) | Token cost and RAG system scalability. | 🚧 *WIP* |
 
-### How to verify these numbers
+For full details on the testing methodology, query sets, and historical evolution, see [`benchmarks/README.md`](benchmarks/README.md) and [`BASELINE.md`](BASELINE.md).
 
-- **Public verification guide** — see [`docs/benchmarks.md`](docs/benchmarks.md). Clone the repo, run `bash scripts/verify-baseline.sh`, and the committed mock-mini baselines gate the regression in <30s with no network, no Ollama, no API keys.
-- **Baseline JSON schema** — see [`benchmarks/baseline/SCHEMA.md`](benchmarks/baseline/SCHEMA.md) for the per-metric tolerance policy and the update rules.
-- **Historical context** — `BASELINE.md` carries the original Phase 1 IR-quality and latency numbers from the real ONNX / Ollama / gemma runs. The mock-mini baselines under `benchmarks/baseline/` are the regression gate; the published `BASELINE.md` numbers are not directly comparable (different model + corpus).
-- **Delivery status** — see [`docs/STATUS.md`](docs/STATUS.md) for the current phase status.
+### Phase 1: Retrieval Evaluation
 
-### Fase 1: Precisión IR
+Measurements taken using the `mini` integration corpus (Rust, TypeScript, Python) with the `embeddinggemma` model across different retrieval strategies.
 
-**Dataset:** 50 pares query→ruta esperada, 13 áreas del codebase, 84% queries en lenguaje natural vago.
+#### Semantic Search (IR Quality)
 
-| Métrica | ONNX | Ollama (nomic) | Ollama (gemma) | Target |
-| ------- | ---- | -------------- | -------------- | ------ |
-| Cold Index (median) | 3.62s | 16.50s | 23.24s | — |
-| Cold Index (P95) | 3.68s | 26.40s | 24.30s | — |
-| Search Latency (median) | 87.50 ms | **37.49 ms** ✅ | 117.57 ms | <100 ms |
-| Search Latency (P95) | 92.80 ms | **42.08 ms** | 136.71 ms | — |
-| **Precision@1** | 48.00% | 68.00% | **74.00%** | — |
-| **Precision@3** | 70.00% | 84.00% | **86.00%** | — |
-| **Precision@5** | 74.00% | 86.00% | **92.00%** | — |
-| Peak RSS | 17.2 MB | 16.1 MB | 16.7 MB | — |
+| Mode | Recall@5 | nDCG@10 | MRR | Latency | Note |
+|------|----------|---------|-----|---------|------|
+| **Dense** (Vector) | 0.2667 | 0.1983 | 0.2333 | 11.6s | Pure semantic search |
+| **Sparse** (FTS5) | 0.0333 | 0.0469 | 0.0667 | 9.2s | Pure lexical search |
+| **Hybrid** (RRF) | 0.2000 | 0.1417 | 0.1389 | 11.3s | Dense + Sparse fusion |
+| **Hybrid+Rerank** | **0.2000** | **0.2083** | **0.3000** | 32.6s | Re-ranked with ONNX cross-encoder |
 
-| Provider | Modelo | Dims | Perfil |
-| -------- | ------ | ---- | ------ |
-| **ONNX** | MiniLM-L6-v2 (~80MB) | 384 | ⚡ Indexado más rápido (3.6s), precisión básica |
-| **Ollama + nomic** | nomic-embed-text (~274MB) | 768 | 🚀 Mejor latencia (37ms), buena precisión — balance óptimo |
-| **Ollama + gemma** | embeddinggemma:latest (621MB) | 768 | 🎯 Máxima precisión (P@5=92%), indexado más lento |
+*Adding the ONNX cross-encoder reranker improves ranking quality (MRR) by 116% over standard hybrid search, though at the cost of higher CPU latency.*
 
-> 3 iteraciones × 50 queries cada una. Resultados: mediana a través de iteraciones.
-> `VECTORCODE_MODEL=nomic-embed-text` para cambiar modelo en benchmarks. Re-ejecutable vía `bash scripts/verify-baseline.sh` (regression gate, <30s, sin red).
+#### Structural Search (Knowledge Graph)
+
+Measurements for exact symbol resolution (callers, dependents, imports) utilizing the extracted syntax tree graph.
+
+| Metric | Result |
+|--------|--------|
+| **Symbol Recall@5** | 100% (1.00) |
+| **Symbol Recall@10** | 100% (1.00) |
+| **Symbol Precision@5** | 65% (0.65)* |
+
+*\*Precision reflects that structural queries return exact sets (often <5 results), not ranked lists. Recall is 100%, meaning the graph never misses a known dependency.*
 
 ## Architecture
 

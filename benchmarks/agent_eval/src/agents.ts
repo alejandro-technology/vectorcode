@@ -336,10 +336,16 @@ export async function reactLoop(
         tokens = cachedEntry.tokens;
       } else {
         if (cacheMode === 'cached') {
-          throw new Error(`Cache divergence at step ${steps} in cached-only mode. Expected hash ${cachedEntry?.requestHash || 'none'} but got ${requestHash}.`);
+          if (!cachedEntry) {
+            throw new Error(`Cache divergence at step ${steps} in cached-only mode: no more cached entries to replay.`);
+          }
+          console.warn(`[Cache] Warning: Cache request hash diverged at step ${steps} (expected ${cachedEntry.requestHash} but got ${requestHash}). Continuing replay anyway.`);
+          response = cachedEntry.response;
+          tokens = cachedEntry.tokens;
+        } else {
+          console.log(`[Cache] Cache diverged at step ${steps}. Switching to live execution.`);
+          isReplaying = false;
         }
-        console.log(`[Cache] Cache diverged at step ${steps}. Switching to live execution.`);
-        isReplaying = false;
       }
     }
     

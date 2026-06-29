@@ -93,5 +93,5 @@ Our benchmarking efforts align with formal research terminology for LLM agents a
 | Fase | Nombre técnico aproximado | Qué mide | Estado |
 |------|---------------------------|----------|--------|
 | **1** | **Information Retrieval Benchmark** (Retrieval Evaluation) | Calidad del recuperador (Recall, Precision, etc.) | **Implementado** (Dense, Sparse, Hybrid, Graph) |
-| **2** | **End-to-End Agent Benchmark** (Task-Oriented Agent Evaluation) | Eficiencia y capacidad del agente resolviendo problemas usando las herramientas. | *WIP (Pruebas preliminares en `agent_eval/`)* |
-| **3** | **Context Efficiency Benchmark** (Token Efficiency Evaluation) | Coste de contexto y escalabilidad del sistema RAG. | *WIP (Pruebas preliminares en `agent_eval/`)* |
+| **2** | **End-to-End Agent Benchmark** (Task-Oriented Agent Evaluation) | Eficiencia y capacidad del agente resolviendo problemas usando las herramientas. | **Implementado** (vectorcode corpus, SER=1.80, TER=1.29) |
+| **3** | **Context Efficiency Benchmark** (Token Efficiency Evaluation) | Coste de contexto y escalabilidad del sistema RAG. | **Implementado** (vectorcode corpus, SER=1.80, TER=1.29) |

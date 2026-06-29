@@ -327,10 +327,28 @@ export async function reactLoop(
 
   // Build system prompt with optional targetRepos hint
   let systemPrompt: string | undefined;
-  if (task.targetRepos && task.targetRepos.length > 0 && task.targetRepos.length < 3) {
-    systemPrompt = `You are an elite coding agent with access to VectorCode MCP tools. Solve the task step-by-step. Use tools when needed.
+  if (task.targetRepos && task.targetRepos.length > 0) {
+    const repos = JSON.stringify(task.targetRepos);
+    if (task.targetRepos.length >= 3) {
+      // Cross-repo task: guide the agent to search each repo individually
+      systemPrompt = `You are an elite coding agent with access to VectorCode MCP tools. Solve the task step-by-step. Use tools when needed.
 
-IMPORTANT: When using vec_search, always pass the "workspaces" parameter with value ${JSON.stringify(task.targetRepos)} to scope your search to the relevant repositories.`;
+IMPORTANT — CROSS-REPO SEARCH STRATEGY:
+The task involves ${task.targetRepos.length} repositories: ${repos}.
+When using vec_search, results are merged from ALL repos unless you scope them. To get useful results for each repository:
+
+1. Make SEPARATE vec_search calls for EACH repository using the "workspaces" parameter. For example:
+   - vec_search({ query: "public API entry point", workspaces: ["thiserror"] })
+   - vec_search({ query: "public API entry point", workspaces: ["defu"] })
+   - vec_search({ query: "public API entry point", workspaces: ["itsdangerous"] })
+2. After gathering information per-repo, synthesize your findings into a comparison or cross-repo analysis.
+3. Be efficient — you have limited steps. Make parallel calls when independent.
+4. After gathering enough information, STOP exploring and produce your final answer. Do not use all available steps on exploration.`;
+    } else {
+      systemPrompt = `You are an elite coding agent with access to VectorCode MCP tools. Solve the task step-by-step. Use tools when needed.
+
+IMPORTANT: When using vec_search, always pass the "workspaces" parameter with value ${repos} to scope your search to the relevant repositories.`;
+    }
   }
 
   let isReplaying = cacheMode === 'cached' || (cacheMode === 'live' && cachedEntries.length > 0);
@@ -444,6 +462,21 @@ IMPORTANT: When using vec_search, always pass the "workspaces" parameter with va
         role: 'user',
         content: toolResults
       });
+    }
+
+    // If the agent exhausted all steps without producing a final answer,
+    // force one more LLM call (without tools) to synthesize findings.
+    if (!finalAnswer && steps >= maxSteps) {
+      console.log(`[reactLoop] Agent used all ${maxSteps} steps without final answer. Forcing synthesis...`);
+      messages.push({
+        role: 'user',
+        content: [{ type: 'text', text: 'You have used all available steps. Stop using tools and synthesize everything you have found into your final answer now.' }]
+      });
+      const forcedResponse = await llmCall(messages, systemPrompt);
+      finalAnswer = forcedResponse.text;
+      inputTokens += forcedResponse.tokens.input;
+      outputTokens += forcedResponse.tokens.output;
+      steps++;
     }
 
     return { steps, finalAnswer, inputTokens, outputTokens, toolCalls };

@@ -51,6 +51,18 @@ export class VectorCodeProvider implements ToolProvider {
     if (!this.client) {
       throw new Error('VectorCodeProvider not initialized');
     }
+    // Coerce workspaces from stringified JSON array to actual array.
+    // LLMs sometimes pass workspaces as "[\"repo\"]" (string) instead of ["repo"] (array).
+    if (args.workspaces && typeof args.workspaces === 'string') {
+      try {
+        const parsed = JSON.parse(args.workspaces);
+        if (Array.isArray(parsed)) {
+          args = { ...args, workspaces: parsed };
+        }
+      } catch {
+        // Not valid JSON — leave as-is, let server handle it
+      }
+    }
     const response = await this.client.callTool({
       name,
       arguments: args

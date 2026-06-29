@@ -83,3 +83,62 @@ export interface ExperimentConfig {
   temperature: number;
 }
 
+export interface TrialResult {
+  corpus: string;
+  taskId: string;
+  model: string;
+  arm: 'vectorcode' | 'traditional';
+  repetition: number;
+  success: boolean;
+  correctness: number;
+  steps: number;
+  tokens: { input: number; output: number; total: number };
+  toolCalls: ToolCallRecord[];
+  uniqueTools: number;
+  durationMs: number;
+  timedOut: boolean;
+  error?: string;
+  judgeResult?: JudgeResult;
+  workspaceSha: string;
+  timestamp: string;
+}
+
+export interface ExperimentReport {
+  config: ExperimentConfig;
+  trials: TrialResult[];
+  generatedAt: string;
+}
+
+export interface StatisticalResult {
+  metric: string;
+  corpus: string;
+  taskId: string;
+  model: string;
+  vectorcode: { mean: number; std: number; ci95: [number, number] };
+  traditional: { mean: number; std: number; ci95: [number, number] };
+  testStatistic: number;
+  pValue: number;
+  effectSize: number;
+  effectMagnitude: 'negligible' | 'small' | 'medium' | 'large';
+  significant: boolean;
+}
+
+export interface AnalysisReport {
+  results: StatisticalResult[];
+  bonferroniAlpha: number;
+  totalComparisons: number;
+  significantCount: number;
+  summary: {
+    ter: Record<string, number>;
+    ser: Record<string, number>;
+    hypotheses: HypothesisVerdict[];
+  };
+}
+
+export interface HypothesisVerdict {
+  id: string;
+  supported: boolean;
+  evidence: string;
+  effectSize: number;
+}
+

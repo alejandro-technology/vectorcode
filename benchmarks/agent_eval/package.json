@@ -12,7 +12,8 @@
     "@anthropic-ai/sdk": "^0.28.0",
     "@modelcontextprotocol/sdk": "^0.6.0",
     "dotenv": "^16.4.5",
-    "openai": "^4.56.0"
+    "openai": "^4.56.0",
+    "simple-statistics": "^7.9.1"
   },
   "devDependencies": {
     "@types/node": "^20.14.9",

@@ -262,9 +262,9 @@ export class CorpusManager {
     // Single init + index at the parent corpus directory (not per-repo)
     const vcDir = path.join(corpusDir, '.vectorcode');
     if (!fs.existsSync(vcDir)) {
-      await execFileAsync(bin, ['init', '--provider', 'onnx'], { cwd: corpusDir });
+      await execFileAsync(bin, ['--project-path', '.', 'init', '--provider', 'onnx'], { cwd: corpusDir });
     }
-    await execFileAsync(bin, ['index', '--full'], { cwd: corpusDir });
+    await execFileAsync(bin, ['--project-path', '.', 'index', '--full'], { cwd: corpusDir });
     console.log(`[CorpusManager] Mini corpus indexed at ${corpusDir}`);
 
     return corpusDir;

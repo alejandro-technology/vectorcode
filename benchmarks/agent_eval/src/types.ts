@@ -2,6 +2,10 @@ export interface Task {
   id: string;
   name: string;
   prompt: string;
+  corpus: string;                    // corpus this task belongs to
+  difficulty: number;                // 1-5 star rating
+  type: 'read' | 'write';           // task classification
+  targetRepos?: string[];            // repos within corpus (for mini multi-repo tasks)
   verify: (workspaceDir: string) => Promise<{ success: boolean; error?: string }>;
 }
 
@@ -9,6 +13,8 @@ export interface AgentConfig {
   model: string;
   provider: 'openai' | 'anthropic' | 'dry-run';
   maxSteps?: number;
+  temperature?: number;              // default 0
+  timeoutMs?: number;                // default 120000
 }
 
 export interface ToolCallRecord {
@@ -32,6 +38,7 @@ export interface EvalResult {
   toolCalls: ToolCallRecord[];
   error?: string;
   durationMs: number;
+  timedOut: boolean;                 // true if timeout fired before convergence
 }
 
 export interface RubricCriterion {
@@ -43,6 +50,8 @@ export interface RubricCriterion {
 
 export interface TaskRubric {
   taskId: string;
+  corpus: string;                    // corpus this rubric belongs to
+  targetRepo?: string;               // repo within corpus (for mini tasks)
   criteria: RubricCriterion[];
 }
 

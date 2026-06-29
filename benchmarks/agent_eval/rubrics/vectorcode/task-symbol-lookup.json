@@ -1,5 +1,6 @@
 {
   "taskId": "task-symbol-lookup",
+  "corpus": "vectorcode",
   "criteria": [
     {
       "name": "correct_file",

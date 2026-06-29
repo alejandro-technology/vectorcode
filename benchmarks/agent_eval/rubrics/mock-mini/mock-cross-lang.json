@@ -1,0 +1,24 @@
+{
+  "taskId": "mock-cross-lang",
+  "corpus": "mock-mini",
+  "criteria": [
+    {
+      "name": "rate_limiter_mechanism",
+      "weight": 0.30,
+      "description": "Explains that RateLimiter uses a concurrency limit with a Promise-based queue and optional timeout via Promise.race.",
+      "groundTruth": "RateLimiter maintains activeCount and a queue of resolvers; waitForSlot blocks until a slot is available; withTimeout races the operation against a setTimeout reject."
+    },
+    {
+      "name": "signing_mechanism",
+      "weight": 0.30,
+      "description": "Explains that Signer uses HMAC-SHA256 to create a signed token containing the value, a timestamp, and the signature.",
+      "groundTruth": "Signer.sign() builds payload = value + '.' + timestamp, then computes HMAC-SHA256 signature and appends it. unsign() recomputes and verifies with hmac.compare_digest."
+    },
+    {
+      "name": "comparison_quality",
+      "weight": 0.40,
+      "description": "Provides a meaningful comparison between the two approaches — concurrency control vs. authenticity verification, queue-based vs. cryptographic.",
+      "groundTruth": "RateLimiter controls execution flow via queue + concurrency count; Signer ensures data integrity via HMAC. RateLimiter uses Promise.race for timeout; Signer uses hmac.compare_digest for timing-safe comparison."
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "taskId": "mini-error-derive",
+  "corpus": "mini",
+  "targetRepo": "thiserror",
+  "criteria": [
+    {
+      "name": "derive_macro_location",
+      "weight": 0.30,
+      "description": "Correctly identifies that the derive macro is implemented in a separate proc-macro crate at impl/src/lib.rs with #[proc_macro_derive(Error, attributes(backtrace, error, from, source))].",
+      "groundTruth": "The derive macro is defined in thiserror-impl crate (impl/src/lib.rs) as #[proc_macro_derive(Error, attributes(backtrace, error, from, source))]"
+    },
+    {
+      "name": "from_attribute",
+      "weight": 0.25,
+      "description": "Explains that #[from] generates a From impl for the variant and implies #[source] for the same field.",
+      "groundTruth": "#[from] generates a From<SourceType> impl for the variant and automatically implies #[source] on the same field"
+    },
+    {
+      "name": "source_attribute",
+      "weight": 0.20,
+      "description": "Explains that #[source] marks a field as the error source for Error::source(), or a field named 'source' is auto-detected.",
+      "groundTruth": "#[source] marks a field as the source for Error::source() method. A field named 'source' is automatically detected without needing the attribute."
+    },
+    {
+      "name": "additional_attributes",
+      "weight": 0.25,
+      "description": "Mentions #[backtrace] for backtrace forwarding, #[error(...)] for Display formatting, and #[transparent] for delegating to the source.",
+      "groundTruth": "#[backtrace] enables backtrace forwarding through provide(), #[error(\"...\")] formats the Display impl with field interpolation, #[transparent] delegates Display and source to the inner error"
+    }
+  ]
+}

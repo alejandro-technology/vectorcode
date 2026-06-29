@@ -1,0 +1,31 @@
+{
+  "taskId": "mini-signing-flow",
+  "corpus": "mini",
+  "targetRepo": "itsdangerous",
+  "criteria": [
+    {
+      "name": "sign_flow_traced",
+      "weight": 0.30,
+      "description": "Traces the complete sign flow: Signer.sign() -> get_signature() -> derive_key() -> HMACAlgorithm.get_signature() -> base64_encode.",
+      "groundTruth": "sign() calls get_signature(value) which derives a key via derive_key() (django-concat: hash(salt + 'signer' + secret_key)), then HMACAlgorithm.get_signature(key, value) computes HMAC, result is base64_encoded and appended with separator"
+    },
+    {
+      "name": "hash_algorithm_identified",
+      "weight": 0.20,
+      "description": "Correctly identifies the default hash algorithm as SHA1 (via _lazy_sha1), configurable via digest_method parameter.",
+      "groundTruth": "Default digest method is SHA1 (via _lazy_sha1 wrapper for FIPS compatibility). Configurable via digest_method parameter in Signer constructor or HMACAlgorithm"
+    },
+    {
+      "name": "timestamp_encoding",
+      "weight": 0.25,
+      "description": "Explains that TimestampSigner extends Signer to append a base64-encoded timestamp (int_to_bytes(get_timestamp())) between value and signature.",
+      "groundTruth": "TimestampSigner.sign() appends base64_encode(int_to_bytes(int(time.time()))) as timestamp between value and signature, separated by sep. unsign() can validate max_age"
+    },
+    {
+      "name": "tampering_detection",
+      "weight": 0.25,
+      "description": "Explains that tampering is detected via verify_signature() which uses hmac.compare_digest() for timing-safe comparison across all secret keys (key rotation).",
+      "groundTruth": "verify_signature() base64_decodes the sig, then iterates secret_keys in reverse (newest first), derives key for each, and uses HMACAlgorithm.verify_signature() which calls hmac.compare_digest() for timing-safe comparison"
+    }
+  ]
+}

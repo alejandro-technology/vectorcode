@@ -1,0 +1,37 @@
+{
+  "taskId": "mini-cross-repo",
+  "corpus": "mini",
+  "targetRepos": ["thiserror", "defu", "itsdangerous"],
+  "criteria": [
+    {
+      "name": "thiserror_entry_point",
+      "weight": 0.15,
+      "description": "Identifies thiserror's public API: #[derive(Error)] proc macro re-exported from main crate, with impl in thiserror-impl proc-macro crate.",
+      "groundTruth": "thiserror re-exports #[derive(Error)] from thiserror-impl; the main crate lib.rs provides the Error trait auto-impl and From impls via generated code"
+    },
+    {
+      "name": "defu_entry_point",
+      "weight": 0.15,
+      "description": "Identifies defu's public API: defu(), defuFn(), defuArrayFn() exports from src/defu.ts using createDefu() factory.",
+      "groundTruth": "defu exports defu (standard), defuFn (function merger), defuArrayFn (array-only function merger), all created via createDefu() factory pattern"
+    },
+    {
+      "name": "itsdangerous_entry_point",
+      "weight": 0.15,
+      "description": "Identifies itsdangerous's public API: Signer, TimestampSigner, Serializer classes as the primary interface.",
+      "groundTruth": "itsdangerous exposes Signer (basic sign/unsign), TimestampSigner (with expiration), and Serializer (JSON/high-level serialization) as the public API surface"
+    },
+    {
+      "name": "error_handling_patterns",
+      "weight": 0.20,
+      "description": "Compares error handling: thiserror generates Error impls via derive, defu uses null/undefined skipping, itsdangerous raises BadSignature/BadTimeSignature/SignatureExpired exceptions.",
+      "groundTruth": "thiserror: compile-time Error impl generation via derive macro. defu: silent skip of null/undefined values during merge. itsdangerous: runtime exception hierarchy (BadSignature, BadTimeSignature, SignatureExpired)"
+    },
+    {
+      "name": "design_patterns",
+      "weight": 0.35,
+      "description": "Identifies key design patterns: thiserror uses proc-macro derive + code generation, defu uses factory pattern (createDefu) with strategy (merger), itsdangerous uses template method (Signer base + TimestampSigner override).",
+      "groundTruth": "thiserror: proc-macro derive pattern for code generation. defu: factory pattern (createDefu) with optional strategy (merger function). itsdangerous: template method pattern (TimestampSigner overrides sign/unsign from Signer base class)"
+    }
+  ]
+}

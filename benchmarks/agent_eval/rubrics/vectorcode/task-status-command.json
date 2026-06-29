@@ -1,5 +1,6 @@
 {
   "taskId": "task-status-command",
+  "corpus": "vectorcode",
   "criteria": [
     {
       "name": "compilation",

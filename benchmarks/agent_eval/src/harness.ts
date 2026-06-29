@@ -108,7 +108,7 @@ async function main() {
 
           agentResult = await runAgent(
             task,
-            { model, provider, arm, cacheMode },
+            { model, provider, arm, cacheMode, corpus: task.corpus },
             toolProvider
           );
 
@@ -141,11 +141,11 @@ async function main() {
           }
 
           // Evaluate correctness
-          if (taskId === 'task-status-command') {
+          if (task.type === 'write') {
             correctness = success ? 1.0 : 0.0;
           } else {
             // Read-only task, use LLM-as-Judge
-            const rubricPath = path.resolve(process.cwd(), `rubrics/vectorcode/${taskId}.json`);
+            const rubricPath = path.resolve(process.cwd(), `rubrics/${task.corpus}/${taskId}.json`);
             let rubric = { taskId, criteria: [] };
             if (fs.existsSync(rubricPath)) {
               rubric = JSON.parse(fs.readFileSync(rubricPath, 'utf8'));

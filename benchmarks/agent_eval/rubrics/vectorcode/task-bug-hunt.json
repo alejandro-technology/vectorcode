@@ -1,5 +1,6 @@
 {
   "taskId": "task-bug-hunt",
+  "corpus": "vectorcode",
   "criteria": [
     {
       "name": "correct_file",

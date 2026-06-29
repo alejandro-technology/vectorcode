@@ -1,0 +1,31 @@
+{
+  "taskId": "mini-merge-trace",
+  "corpus": "mini",
+  "targetRepo": "defu",
+  "criteria": [
+    {
+      "name": "entry_point_identified",
+      "weight": 0.25,
+      "description": "Correctly identifies the exported defu() function as the entry point, created via createDefu().",
+      "groundTruth": "src/defu.ts exports the defu function, which is created by calling createDefu() without a custom merger"
+    },
+    {
+      "name": "merge_function_traced",
+      "weight": 0.30,
+      "description": "Traces the internal _defu function that performs recursive property-by-property merging.",
+      "groundTruth": "defu calls _defu which recursively merges: iterates baseObject keys, skips __proto__/constructor, skips null/undefined values, and assigns or recurses based on type"
+    },
+    {
+      "name": "array_handling_explained",
+      "weight": 0.20,
+      "description": "Explains how arrays are handled during merge — arrays are concatenated (base first, then defaults), not replaced.",
+      "groundTruth": "When both value and object[key] are arrays, they are concatenated: object[key] = [...value, ...object[key]] — base array values come first"
+    },
+    {
+      "name": "custom_merger_support",
+      "weight": 0.25,
+      "description": "Mentions custom merger function support via createDefu(merger), and variants like defuFn and defuArrayFn.",
+      "groundTruth": "createDefu accepts an optional merger function; if merger returns true, the default handling is skipped. defuFn and defuArrayFn are variants that support function-valued properties"
+    }
+  ]
+}

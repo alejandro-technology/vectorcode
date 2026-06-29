@@ -25,6 +25,13 @@ export interface TrajectoryMetadata {
   arm: 'vectorcode' | 'traditional';
   recordedAt: string;
   totalSteps: number;
+  corpus: string;              // corpus this trajectory belongs to
+  repetition: number;          // repetition number
+  experimentConfig: {          // experiment configuration at recording time
+    maxSteps: number;
+    timeoutMs: number;
+    temperature: number;
+  };
 }
 
 export type CacheMode = 'cached' | 'live' | 'update-cache' | 'dry-run';
@@ -167,12 +174,12 @@ export function parseCacheMode(args: string[]): CacheMode {
 }
 
 export class CacheManager {
-  private getTrajectoryPath(model: string, taskId: string, arm: 'vectorcode' | 'traditional'): string {
-    return path.join(cacheDir, model, taskId, arm, 'trajectory.jsonl');
+  private getTrajectoryPath(model: string, corpus: string, taskId: string, arm: 'vectorcode' | 'traditional'): string {
+    return path.join(cacheDir, model, corpus, taskId, arm, 'trajectory.jsonl');
   }
 
-  loadTrajectory(model: string, taskId: string, arm: 'vectorcode' | 'traditional'): { metadata: TrajectoryMetadata; entries: CacheEntry[] } | null {
-    const filePath = this.getTrajectoryPath(model, taskId, arm);
+  loadTrajectory(model: string, corpus: string, taskId: string, arm: 'vectorcode' | 'traditional'): { metadata: TrajectoryMetadata; entries: CacheEntry[] } | null {
+    const filePath = this.getTrajectoryPath(model, corpus, taskId, arm);
     if (!fs.existsSync(filePath)) {
       return null;
     }
@@ -199,12 +206,13 @@ export class CacheManager {
 
   saveTrajectory(
     model: string,
+    corpus: string,
     taskId: string,
     arm: 'vectorcode' | 'traditional',
     metadata: Omit<TrajectoryMetadata, 'recordedAt' | 'totalSteps'>,
     entries: CacheEntry[]
   ): void {
-    const filePath = this.getTrajectoryPath(model, taskId, arm);
+    const filePath = this.getTrajectoryPath(model, corpus, taskId, arm);
     const dir = path.dirname(filePath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });

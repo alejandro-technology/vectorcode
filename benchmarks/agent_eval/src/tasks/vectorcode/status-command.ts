@@ -10,6 +10,9 @@ export const taskStatusCommand: Task = {
   id: 'task-status-command',
   name: 'Implement CLI Subcommand',
   prompt: 'Write a complete Rust file `src/cli/status_eval.rs` implementing a `run()` function that: (1) loads the VectorCode config from `.vectorcode/config.toml`, (2) opens the SQLite database at `.vectorcode/index.db`, (3) reads the `meta` table to get provider name and model, (4) counts rows in the `chunks` table, and (5) prints a formatted status summary. Use the project\'s existing `config` and `store` modules — do NOT reimplement config parsing or database access.',
+  corpus: 'vectorcode',
+  difficulty: 2,
+  type: 'write',
   verify: async (workspaceDir: string) => {
     // If dry-run, immediately pass
     if (process.argv.includes('--dry-run')) {

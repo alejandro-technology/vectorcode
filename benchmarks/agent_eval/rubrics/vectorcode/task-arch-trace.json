@@ -1,5 +1,6 @@
 {
   "taskId": "task-arch-trace",
+  "corpus": "vectorcode",
   "criteria": [
     {
       "name": "watcher_identified",

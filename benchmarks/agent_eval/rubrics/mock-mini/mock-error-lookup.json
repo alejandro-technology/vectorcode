@@ -1,0 +1,18 @@
+{
+  "taskId": "mock-error-lookup",
+  "corpus": "mock-mini",
+  "criteria": [
+    {
+      "name": "correct_file",
+      "weight": 0.40,
+      "description": "Identifies the correct file where the error enum is defined (error.rs).",
+      "groundTruth": "error.rs"
+    },
+    {
+      "name": "correct_variants",
+      "weight": 0.60,
+      "description": "Lists the variants of the ErrorKind enum (NotFound, InvalidInput, Internal).",
+      "groundTruth": "NotFound, InvalidInput, Internal"
+    }
+  ]
+}

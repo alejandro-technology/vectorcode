@@ -1,10 +1,7 @@
-name: Benchmark
+name: Benchmark (Not run for now. Se demora demasiado en ejecutar mas de 2 horas)
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always

@@ -1,6 +1,6 @@
 <div align="center">
 
-<img width="1920" height="1080" alt="VectorCode banner" src="docs/assets/VectorCodeBanner.webp" />
+<img width="1920" height="1080" alt="VectorCode banner" src="docs/assets/Banner.jpg" />
 
 <h1>VectorCode</h1>
 
